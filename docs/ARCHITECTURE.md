@@ -347,20 +347,26 @@ pub fn selection_text(sel: &Selection, page: impl Fn(u32) -> Option<Arc<PageText
 
 ```rust
 pub struct SearchQuery { pub text: String, pub case_sensitive: bool, pub whole_word: bool, pub regex: bool }
-pub struct SearchMatch { pub page: u32, pub chars: Range<u32>, pub rects: Vec<Rect>,
+pub struct MatchPart { pub page: u32, pub chars: Range<u32>, pub rects: Vec<Rect> }
+pub struct SearchMatch { pub page: u32, pub chars: Range<u32>, pub rects: Vec<Rect>,   // 시작한 쪽의 부분
+                         pub cont: Option<MatchPart>,                                    // 다음 쪽으로 넘어간 부분
                          pub before: String, pub matched: String, pub after: String }
-pub struct SearchSnapshot { pub matches: Vec<SearchMatch>, pub pages_done: u32, pub pages_total: u32, pub finished: bool }
+pub struct SearchSnapshot { pub matches: Vec<SearchMatch>, pub pages_done: u32, pub pages_total: u32,
+                            pub finished: bool, pub truncated: bool }                    // 일치 10만 개에서 멈춤
 
 impl SearchJob {
-    pub fn start(doc: DocumentHandle, query: SearchQuery, start_page: u32, notifier: Notifier) -> SearchJob;
-    pub fn snapshot(&self) -> SearchSnapshot;      // matches 는 항상 문서 순서
-}   // drop 하면 취소
+    pub fn start(doc: DocumentHandle, query: SearchQuery, start_page: u32, notifier: Notifier)
+        -> Result<SearchJob, SearchError>;         // 빈 검색어, 잘못된 정규식은 Err
+    pub fn snapshot(&self) -> Arc<SearchSnapshot>; // 값싸다. matches 는 항상 문서 순서. 최대 50ms 늦을 수 있다
+}   // drop 하면 취소 (기다리지 않는다)
 ```
 
 - 자체 스레드에서 `page_text_wait` 로 `start_page` 부터 끝까지, 이어서 처음부터 돈다. 쪽마다 취소 여부를 확인한다.
 - 정규화(`normalize.rs`): 대소문자(옵션), NFKC(합자), 줄바꿈 → 공백, 글자 사이에 낀 줄 끝 하이픈 제거.
   정규화된 문자열의 각 위치가 원래 글자 색인으로 돌아가는 표를 함께 만든다.
 - 쪽 경계에 걸친 문구를 위해 다음 쪽 앞부분을 이어 붙여 검색하고, 일치는 시작한 쪽에 속한다.
+- 대소문자를 무시할 때 ß 는 ss 로 본다. 정규식 방식에서는 검색어를 정규화하지 않는다.
+- 문서가 아직 열리는 중이면 검색 스레드가 기다린다. 열 수 없는 문서는 결과 없이 끝난다.
 - 참고: `references/engines/pdfjs/web/pdf_find_controller.js:95-366`.
 
 ### 4.9 diff
