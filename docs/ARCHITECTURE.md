@@ -533,10 +533,14 @@ crates/app/src/
     pdf_view.rs      PDF 뷰 위젯
     textures.rs      텍스처 캐시
     diff_view.rs     비교 뷰
+    selection.rs     텍스트 선택의 판단 로직
+    links.rs         링크의 판단 로직
+    preload.rs       전체 쪽 미리 그리기
     start_page.rs
-  panels/            toc.rs, search_bar.rs, search_results.rs, status_bar.rs, breadcrumb.rs
+  panels/            toc.rs, search.rs(검색 막대와 결과 목록), changes.rs(비교 변경 목록), status_bar.rs, breadcrumb.rs
   overlays/          palette.rs, link_preview.rs, goto_page.rs, password.rs, capture.rs
-  session.rs         AppState ↔ Session, 지연 저장
+  session.rs         AppState ↔ Session, 지연 저장, 문서별 기억
+  cli.rs             명령줄 해석
   i18n.rs  theme.rs
 ```
 
