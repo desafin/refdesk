@@ -2,6 +2,7 @@
 
 pub mod pdf_view;
 pub mod preload;
+pub mod selection;
 pub mod textures;
 
 /// Helpers for tests that wait on document workers without sleeping.

@@ -54,6 +54,8 @@ pub enum Action {
         /// The new zoom.
         zoom: ZoomMode,
     },
+    /// Copy the selected text of a PDF tab to the clipboard (SEL-2).
+    CopySelection(TabId),
     /// Compare two documents.
     StartDiff {
         /// The older document.
@@ -162,6 +164,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 pdf.view.zoom = zoom;
             }
         }
+        Action::CopySelection(tab) => copy_selection(state, tab, ctx),
         Action::StartDiff { left, right } => {
             // The comparison view is built by a later work package. Until then the two documents
             // are only opened as tabs, left first, so the right one ends up focused.
@@ -356,6 +359,16 @@ fn navigate(state: &mut AppState, tab: TabId, to: Location, how: OpenHow) {
     };
     if let Some(target) = target {
         jump_to(state, target, to);
+    }
+}
+
+/// Copies the selected text of a PDF tab. Does nothing without a selection.
+fn copy_selection(state: &mut AppState, tab: TabId, ctx: &egui::Context) {
+    let AppState { docs, tabs, .. } = state;
+    if let Some(Tab::Pdf(pdf)) = tabs.get_mut(tab)
+        && let Some(doc) = docs.get(pdf.doc)
+    {
+        crate::views::pdf_view::copy_selection(ctx, doc, &mut pdf.ui);
     }
 }
 

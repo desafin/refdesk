@@ -20,6 +20,7 @@ type Row = (&'static str, &'static str, &'static str);
 /// All UI strings. A text containing `{}` is a template filled in with `str::replace`.
 pub const TABLE: &[Row] = &[
     ("menu.file", "파일", "File"),
+    ("menu.edit", "편집", "Edit"),
     ("menu.view", "보기", "View"),
     ("menu.tab", "탭", "Tab"),
     ("menu.window", "창", "Window"),
@@ -83,6 +84,8 @@ pub const TABLE: &[Row] = &[
     ),
     ("dock.expand", "펼치기", "Expand"),
     ("dock.add_tab", "탭 추가", "Add Tab"),
+    ("cmd.edit.copy", "복사", "Copy"),
+    ("sel.copied", "복사됨 ({} 글자)", "Copied ({} characters)"),
     ("cmd.view.zoom_in", "확대", "Zoom In"),
     ("cmd.view.zoom_out", "축소", "Zoom Out"),
     ("cmd.view.zoom_reset", "100%", "Actual Size"),

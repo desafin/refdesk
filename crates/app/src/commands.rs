@@ -10,7 +10,7 @@ use refdesk_core::ZoomMode;
 
 use crate::action::Action;
 use crate::overlays::palette::PaletteMode;
-use crate::state::{AppState, TabId};
+use crate::state::{AppState, PdfTab, TabId};
 use crate::windows::dock::SplitDir;
 
 /// The menu a command appears in.
@@ -18,6 +18,8 @@ use crate::windows::dock::SplitDir;
 pub enum MenuGroup {
     /// The "File" menu.
     File,
+    /// The "Edit" menu.
+    Edit,
     /// The "View" menu.
     View,
     /// The "Tab" menu.
@@ -28,8 +30,9 @@ pub enum MenuGroup {
 
 impl MenuGroup {
     /// The menus in the order they appear in the menu bar.
-    pub const ALL: [MenuGroup; 4] = [
+    pub const ALL: [MenuGroup; 5] = [
         MenuGroup::File,
+        MenuGroup::Edit,
         MenuGroup::View,
         MenuGroup::Tab,
         MenuGroup::Window,
@@ -39,6 +42,7 @@ impl MenuGroup {
     pub fn name_key(self) -> &'static str {
         match self {
             MenuGroup::File => "menu.file",
+            MenuGroup::Edit => "menu.edit",
             MenuGroup::View => "menu.view",
             MenuGroup::Tab => "menu.tab",
             MenuGroup::Window => "menu.window",
@@ -108,6 +112,13 @@ fn has_several_panes(state: &AppState) -> bool {
     state.focused_window().dock.pane_count() > 1
 }
 
+/// The focused PDF view has selected text.
+fn has_selection(state: &AppState) -> bool {
+    state
+        .focused_pdf()
+        .is_some_and(|(_, pdf)| pdf.ui.has_selection())
+}
+
 fn has_closed_tabs(state: &AppState) -> bool {
     !state.closed_tabs.is_empty()
 }
@@ -173,6 +184,15 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::Quit),
+    },
+    Command {
+        id: "edit.copy",
+        name_key: "cmd.edit.copy",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::C)),
+        aliases: &[],
+        enabled: has_selection,
+        action: |s| s.focus.map(Action::CopySelection),
     },
     Command {
         id: "view.zoom_in",
@@ -427,6 +447,31 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
     },
 ];
 
+/// One entry of the menu shown on a right click in a PDF view when text is selected (SEL-3).
+/// It acts on the clicked view. Later work adds rows (for example "Search for This Text").
+pub struct SelectionMenuEntry {
+    /// i18n key of the displayed name.
+    pub name_key: &'static str,
+    /// The command whose shortcut is displayed next to the entry, if any.
+    pub command_id: Option<&'static str>,
+    /// Whether the entry can run for this view now.
+    pub enabled: fn(&PdfTab) -> bool,
+    /// The action for this tab.
+    pub action: fn(TabId) -> Action,
+}
+
+fn tab_has_selection(tab: &PdfTab) -> bool {
+    tab.ui.has_selection()
+}
+
+/// The selection menu, in display order.
+pub static SELECTION_MENU: &[SelectionMenuEntry] = &[SelectionMenuEntry {
+    name_key: "cmd.edit.copy",
+    command_id: Some("edit.copy"),
+    enabled: tab_has_selection,
+    action: Action::CopySelection,
+}];
+
 /// The command with this identifier.
 pub fn command(id: &str) -> Option<&'static Command> {
     COMMANDS.iter().find(|c| c.id == id)
@@ -528,6 +573,17 @@ pub fn handle_shortcuts(ctx: &egui::Context, state: &AppState) -> Option<Action>
     bindings.sort_by_key(|(s, _)| std::cmp::Reverse(specificity(s)));
 
     ctx.input_mut(|input| {
+        // Ctrl+C does not arrive as a key press: egui-winit turns it into `Event::Copy`. Take that
+        // event only when the copy command can run, so other widgets still see it otherwise.
+        if let Some(copy) = command("edit.copy").filter(|c| (c.enabled)(state))
+            && let Some(at) = input
+                .events
+                .iter()
+                .position(|e| matches!(e, egui::Event::Copy))
+        {
+            input.events.remove(at);
+            return copy.run(state);
+        }
         for (shortcut, command) in bindings {
             if input.consume_shortcut(&shortcut) {
                 // The key is consumed even when the command is not possible right now, so it
@@ -544,6 +600,7 @@ mod tests {
     use super::*;
     use crate::action::{OpenTarget, dispatch};
     use crate::i18n::{Lang, lookup};
+    use crate::state::Tab;
     use std::collections::HashSet;
 
     #[test]
@@ -1147,5 +1204,122 @@ mod tests {
         for lang in [Lang::Ko, Lang::En] {
             assert!(lookup(lang, command.name_key).is_some());
         }
+    }
+
+    fn find(id: &str) -> &'static Command {
+        command(id).expect("command")
+    }
+
+    /// Selects something in the view of the focused tab (the text itself is not needed).
+    fn select_in_focused_tab(state: &mut AppState) -> TabId {
+        use refdesk_core::{Selection, TextPos};
+        let tab = state.focus.expect("a focused tab");
+        let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) else {
+            panic!("a pdf tab");
+        };
+        pdf.ui.selection.set_for_test(Selection {
+            anchor: TextPos { page: 0, ch: 2 },
+            focus: TextPos { page: 0, ch: 9 },
+        });
+        tab
+    }
+
+    fn copy_event_frame(ctx: &egui::Context, state: &AppState) -> (Option<Action>, bool) {
+        let mut out = None;
+        let mut left = true;
+        let input = egui::RawInput {
+            events: vec![egui::Event::Copy],
+            ..Default::default()
+        };
+        run_frame(ctx, input, |ui| {
+            out = handle_shortcuts(ui.ctx(), state);
+            left = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        });
+        (out, left)
+    }
+
+    #[test]
+    fn copy_is_in_the_edit_menu_with_ctrl_c() {
+        let copy = find("edit.copy");
+        assert_eq!(copy.menu, MenuGroup::Edit);
+        assert_eq!(copy.shortcut, Some(KeyboardShortcut::new(CTRL, Key::C)));
+        assert!(in_menu(MenuGroup::Edit).any(|c| c.id == "edit.copy"));
+        assert!(MenuGroup::ALL.contains(&MenuGroup::Edit));
+    }
+
+    #[test]
+    fn copy_is_disabled_without_a_selection_and_enabled_with_one() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_tabs(&ctx, 1);
+        let copy = find("edit.copy");
+        assert!(!(copy.enabled)(&state), "a view without a selection");
+        assert_eq!(copy.run(&state), None);
+        let start = AppState::new();
+        assert!(!(copy.enabled)(&start), "the start page");
+
+        let tab = select_in_focused_tab(&mut state);
+        assert!((copy.enabled)(&state));
+        assert_eq!(copy.run(&state), Some(Action::CopySelection(tab)));
+    }
+
+    #[test]
+    fn ctrl_c_runs_copy_as_a_key_press_and_as_the_copy_event_of_egui_winit() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_tabs(&ctx, 1);
+        assert_eq!(press(&ctx, &state, Modifiers::CTRL, Key::C), None);
+        // Without a selection the event is left for other widgets.
+        assert_eq!(copy_event_frame(&ctx, &state), (None, true));
+
+        let tab = select_in_focused_tab(&mut state);
+        assert_eq!(
+            press(&ctx, &state, Modifiers::CTRL, Key::C),
+            Some(Action::CopySelection(tab))
+        );
+        // egui-winit reports Ctrl+C as `Event::Copy`; it is taken when the command can run.
+        assert_eq!(
+            copy_event_frame(&ctx, &state),
+            (Some(Action::CopySelection(tab)), false)
+        );
+    }
+
+    #[test]
+    fn copy_event_is_left_alone_while_a_text_field_has_focus() {
+        let ctx = egui::Context::default();
+        let mut state = state_with_tabs(&ctx, 1);
+        select_in_focused_tab(&mut state);
+        let mut text = String::new();
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
+            ui.text_edit_singleline(&mut text).request_focus();
+        });
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
+            ui.text_edit_singleline(&mut text);
+        });
+        assert!(ctx.text_edit_focused());
+        assert_eq!(copy_event_frame(&ctx, &state), (None, true));
+    }
+
+    #[test]
+    fn selection_menu_entries_have_texts_known_commands_and_follow_the_selection() {
+        assert!(!SELECTION_MENU.is_empty());
+        for entry in SELECTION_MENU {
+            for lang in [Lang::Ko, Lang::En] {
+                assert!(lookup(lang, entry.name_key).is_some(), "{}", entry.name_key);
+            }
+            if let Some(id) = entry.command_id {
+                assert!(command(id).is_some(), "unknown command {id}");
+            }
+        }
+        let copy = SELECTION_MENU
+            .iter()
+            .find(|e| e.command_id == Some("edit.copy"))
+            .expect("copy entry");
+        let ctx = egui::Context::default();
+        let mut state = state_with_tabs(&ctx, 1);
+        let tab = state.focus.expect("tab");
+        let pdf = |s: &AppState| s.tabs.pdf(tab).cloned().expect("pdf tab");
+        assert!(!(copy.enabled)(&pdf(&state)));
+        select_in_focused_tab(&mut state);
+        assert!((copy.enabled)(&pdf(&state)));
+        assert_eq!((copy.action)(tab), Action::CopySelection(tab));
     }
 }

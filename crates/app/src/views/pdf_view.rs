@@ -15,7 +15,10 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use egui::{Color32, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{
+    Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
+    Vec2, pos2, vec2,
+};
 use refdesk_core::layout::{MAX_ZOOM, MIN_ZOOM, PIXELS_PER_POINT_AT_100};
 use refdesk_core::{
     DocStatus, DocumentHandle, DocumentInfo, LayoutParams, Location, PageLayout, Point, Priority,
@@ -23,9 +26,11 @@ use refdesk_core::{
 };
 
 use crate::action::Action;
+use crate::commands;
 use crate::i18n::tr;
 use crate::panels::status_bar::GotoInput;
 use crate::state::{DocId, PdfTab, TabId};
+use crate::views::selection::{self, Released, SelectionState};
 use crate::views::textures::{Pick, TextureCache};
 
 /// Vertical space between pages, in logical pixels.
@@ -146,6 +151,15 @@ impl ScrollTracker {
     }
 }
 
+/// The password field shown for an encrypted document.
+#[derive(Clone, Debug, Default)]
+pub struct PasswordInput {
+    /// What has been typed.
+    pub text: String,
+    /// A password was submitted at least once.
+    pub tried: bool,
+}
+
 /// The unsaved state of one PDF view.
 #[derive(Clone, Debug, Default)]
 pub struct PdfViewUiState {
@@ -166,12 +180,13 @@ pub struct PdfViewUiState {
     /// The actual zoom factor (1.0 = 100%) as of the last frame; it differs from the zoom mode
     /// for the fit modes.
     pub effective_zoom: Option<f32>,
-    /// The password being typed for an encrypted document.
-    pub password: String,
-    /// A password was submitted at least once.
-    pub password_tried: bool,
+    /// The password field of an encrypted document. Boxed: a `Tab` must stay small.
+    pub password: Box<PasswordInput>,
     /// The page number field of the status bar, while it is open.
     pub goto: Option<GotoInput>,
+    /// The selected text and the press that is changing it (SEL-1). Cleared when the document is
+    /// reloaded. Boxed to keep tabs small.
+    pub selection: Box<SelectionState>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -194,6 +209,11 @@ impl PdfViewUiState {
     /// The current scroll offset in content space.
     pub fn scroll(&self) -> Point {
         self.scroll
+    }
+
+    /// Whether some text is selected.
+    pub fn has_selection(&self) -> bool {
+        self.selection.has_selection()
     }
 
     /// The viewport size of the last laid-out frame; zero before the first one.
@@ -575,19 +595,19 @@ fn show_password(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle) {
         ui.strong(file_name(doc));
         ui.label(tr("doc.needs_password"));
         let field = ui.add(
-            egui::TextEdit::singleline(&mut tab.ui.password)
+            egui::TextEdit::singleline(&mut tab.ui.password.text)
                 .password(true)
                 .desired_width(240.0),
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
         if (ui.button(tr("doc.password_submit")).clicked() || entered)
-            && !tab.ui.password.is_empty()
+            && !tab.ui.password.text.is_empty()
         {
-            doc.authenticate(&tab.ui.password);
-            tab.ui.password.clear();
-            tab.ui.password_tried = true;
+            doc.authenticate(&tab.ui.password.text);
+            tab.ui.password.text.clear();
+            tab.ui.password.tried = true;
         }
-        if tab.ui.password_tried {
+        if tab.ui.password.tried {
             ui.colored_label(ui.visuals().error_fg_color, tr("doc.password_wrong"));
         }
     });
@@ -620,7 +640,7 @@ fn show_document(
         return;
     }
     let id = ui.scope_id().with(("pdf_view", cx.tab_id));
-    let response = ui.interact(view_rect, id, Sense::click());
+    let response = ui.interact(view_rect, id, Sense::click_and_drag());
     if response.clicked() && !cx.focused {
         cx.queue.push(Action::FocusTab(cx.tab_id));
     }
@@ -628,8 +648,13 @@ fn show_document(
     let viewport = Size::new(view_rect.width(), view_rect.height());
     let state = &mut tab.ui;
     state.sync(&tab.view, &info.page_sizes, info.generation, viewport);
+    state.selection.sync_generation(info.generation);
 
     let now = ui.input(|i| i.time);
+    let texts = |page: u32| doc.page_text(page);
+    if handle_pointer(ui, &response, view_rect, state, &texts, now) && !cx.focused {
+        cx.queue.push(Action::FocusTab(cx.tab_id));
+    }
     let hovered = response.contains_pointer();
     if hovered {
         let (zoom, pointer, delta) = ui.input_mut(|i| {
@@ -669,6 +694,7 @@ fn show_document(
             }
         }
     }
+    autoscroll_and_follow(ui, view_rect, state, &texts);
     scroll_bars(ui, id, outer, view_rect, state);
     state.scroll_motion.note(state.scroll().y, now);
     state.commit(&mut tab.view);
@@ -706,6 +732,239 @@ fn show_document(
         pixels,
         cx.textures,
     );
+    paint_selection(ui, view_rect, state, &texts);
+    show_copy_notice(ui, view_rect, state, now);
+
+    // Right click: the menu of the selection, built from the command module's table.
+    if commands::SELECTION_MENU.iter().any(|e| (e.enabled)(tab)) {
+        response.context_menu(|ui| {
+            for entry in commands::SELECTION_MENU {
+                let mut button = egui::Button::new(tr(entry.name_key));
+                if let Some(keys) = entry
+                    .command_id
+                    .and_then(|id| commands::shortcut_text(ui.ctx(), id))
+                {
+                    button = button.shortcut_text(keys);
+                }
+                if ui.add_enabled((entry.enabled)(tab), button).clicked() {
+                    cx.queue.push((entry.action)(cx.tab_id));
+                    ui.close();
+                }
+            }
+        });
+    }
+}
+
+/// One primary-button event, in the order it arrived.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PointerEvent {
+    Press { pos: Pos2, shift: bool },
+    Move(Pos2),
+    Release(Pos2),
+}
+
+fn pointer_event(event: &egui::Event) -> Option<PointerEvent> {
+    match event {
+        egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers,
+        } => Some(PointerEvent::Press {
+            pos: *pos,
+            shift: modifiers.shift,
+        }),
+        egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: false,
+            ..
+        } => Some(PointerEvent::Release(*pos)),
+        egui::Event::PointerMoved(pos) => Some(PointerEvent::Move(*pos)),
+        _ => None,
+    }
+}
+
+/// The document position under a position relative to the top-left corner of the view.
+fn hit_at(state: &PdfViewUiState, viewport_pos: Point) -> Option<selection::Hit> {
+    selection::locate(state.layout()?, state.scroll(), viewport_pos)
+}
+
+fn viewport_pos(view_rect: Rect, pos: Pos2) -> Point {
+    let v = pos - view_rect.min;
+    Point::new(v.x, v.y)
+}
+
+/// Applies this frame's primary button events to the selection (SEL-1) and sets the cursor.
+/// Returns true when the button went down in the view.
+///
+/// The decision between a click and a drag is made by `SelectionState`: [`Released::Click`] is a
+/// single press and release without movement, anything else is a selection gesture.
+fn handle_pointer(
+    ui: &Ui,
+    response: &egui::Response,
+    view_rect: Rect,
+    state: &mut PdfViewUiState,
+    texts: selection::PageTexts,
+    now: f64,
+) -> bool {
+    let events: Vec<PointerEvent> =
+        ui.input(|i| i.events.iter().filter_map(pointer_event).collect());
+    let hovered = response.hovered();
+    let mut pressed_here = false;
+    for event in events {
+        match event {
+            PointerEvent::Press { pos, shift } => {
+                if !(hovered && view_rect.contains(pos)) {
+                    continue;
+                }
+                pressed_here = true;
+                let vp = viewport_pos(view_rect, pos);
+                if let Some(hit) = hit_at(state, vp) {
+                    state.selection.press(texts, vp, hit, now, shift);
+                }
+            }
+            PointerEvent::Move(pos) => {
+                if state.selection.is_dragging() {
+                    let vp = viewport_pos(view_rect, pos);
+                    if let Some(hit) = hit_at(state, vp) {
+                        state.selection.drag_to(texts, vp, hit);
+                    }
+                }
+            }
+            PointerEvent::Release(pos) => {
+                if !state.selection.is_dragging() {
+                    continue;
+                }
+                let vp = viewport_pos(view_rect, pos);
+                if let Some(hit) = hit_at(state, vp) {
+                    state.selection.drag_to(texts, vp, hit);
+                }
+                match state.selection.release() {
+                    Some(Released::Click { .. }) => {
+                        // LINK HOOK: a click that did not drag. `hit.loc` is the page-space
+                        // position; following a link under it belongs here.
+                    }
+                    Some(Released::Selected) | None => {}
+                }
+            }
+        }
+    }
+
+    // The I-beam over text, and while selecting.
+    let over_text = hovered
+        && ui
+            .input(|i| i.pointer.hover_pos())
+            .and_then(|p| hit_at(state, viewport_pos(view_rect, p)))
+            .is_some_and(|hit| selection::over_text(texts, &hit));
+    if over_text || state.selection.is_dragging() {
+        ui.ctx().set_cursor_icon(CursorIcon::Text);
+    }
+    pressed_here
+}
+
+/// While a selection is being dragged: scrolls the view when the pointer is at its top or bottom
+/// edge, and moves the end of the selection to the pointer (which points at other text after a
+/// scroll even if it did not move).
+fn autoscroll_and_follow(
+    ui: &Ui,
+    view_rect: Rect,
+    state: &mut PdfViewUiState,
+    texts: selection::PageTexts,
+) {
+    if !state.selection.is_dragging() {
+        return;
+    }
+    let (down, latest, dt) = ui.input(|i| {
+        (
+            i.pointer.primary_down(),
+            i.pointer.latest_pos(),
+            i.stable_dt,
+        )
+    });
+    if !down {
+        // The release happened where this view saw no event.
+        let _ = state.selection.release();
+        return;
+    }
+    let pos = latest
+        .map(|p| viewport_pos(view_rect, p))
+        .or_else(|| state.selection.pointer());
+    let Some(pos) = pos else {
+        state.selection.frame(texts);
+        return;
+    };
+    if state.selection.is_selecting() {
+        let speed = selection::autoscroll_speed(pos.y, view_rect.height());
+        if speed != 0.0 {
+            // A long frame must not throw the view far.
+            state.scroll_by(Point::new(0.0, speed * dt.min(0.05)));
+            ui.ctx().request_repaint();
+        }
+    }
+    match hit_at(state, pos) {
+        Some(hit) => state.selection.drag_to(texts, pos, hit),
+        None => state.selection.frame(texts),
+    }
+}
+
+/// Tints the selected lines of the visible pages with the theme's selection color.
+fn paint_selection(ui: &Ui, view_rect: Rect, state: &PdfViewUiState, texts: selection::PageTexts) {
+    let (Some(sel), Some(layout)) = (state.selection.active(), state.layout()) else {
+        return;
+    };
+    let base = ui.visuals().selection.bg_fill;
+    // Translucent, so the text stays readable.
+    let color = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 110);
+    let painter = ui.painter_at(view_rect);
+    for h in selection::highlight_rects(&sel, layout, state.scroll(), state.viewport(), texts) {
+        let rect = Rect::from_min_max(
+            view_rect.min + vec2(h.rect.x0, h.rect.y0),
+            view_rect.min + vec2(h.rect.x1, h.rect.y1),
+        );
+        painter.rect_filled(rect, 0.0, color);
+    }
+}
+
+/// Copies the selected text of a view to the clipboard and announces how much was copied. Does
+/// nothing without a selection. A selection that spans pages whose text is not there yet is
+/// copied by a background thread once the text has been extracted (R-1).
+pub fn copy_selection(ctx: &egui::Context, doc: &DocumentHandle, state: &mut PdfViewUiState) {
+    let Some(sel) = state.selection.active() else {
+        return;
+    };
+    let inbox = state.selection.copy_inbox();
+    let ctx = ctx.clone();
+    selection::start_copy(doc, sel, move |text| {
+        let chars = text.chars().count();
+        if chars > 0 {
+            ctx.copy_text(text);
+            inbox.post(chars);
+        }
+        ctx.request_repaint();
+    });
+}
+
+/// Shows the "copied" notice for a moment at the bottom of the view.
+fn show_copy_notice(ui: &Ui, view_rect: Rect, state: &mut PdfViewUiState, now: f64) {
+    let Some((chars, left)) = state.selection.copy_notice(now) else {
+        return;
+    };
+    ui.ctx().request_repaint_after(left);
+    let painter = ui.painter_at(view_rect);
+    let text = tr("sel.copied").replace("{}", &chars.to_string());
+    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(14.0), Color32::WHITE);
+    let pad = vec2(12.0, 6.0);
+    let size = galley.size() + pad * 2.0;
+    let rect = Rect::from_min_size(
+        pos2(
+            view_rect.center().x - size.x / 2.0,
+            view_rect.max.y - size.y - 16.0,
+        ),
+        size,
+    );
+    painter.rect_filled(rect, 6.0, Color32::from_black_alpha(210));
+    painter.galley(rect.min + pad, galley, Color32::WHITE);
 }
 
 fn paint_pages(
@@ -1301,6 +1560,8 @@ mod widget_tests {
     use refdesk_core::testutil::{PdfBuilder, TempPdf};
 
     const SCREEN: Vec2 = vec2(800.0, 600.0);
+    /// Where the view starts on screen: the central panel has no frame and nothing above it.
+    const VIEW_ORIGIN: Pos2 = Pos2::ZERO;
 
     /// A test app: state, context, and a clock that advances one 60 Hz frame per run.
     struct Harness {
@@ -1308,6 +1569,8 @@ mod widget_tests {
         repaints: Repaints,
         state: AppState,
         time: f64,
+        /// What the frames asked the platform to copy to the clipboard, oldest first.
+        copied: Vec<String>,
     }
 
     impl Harness {
@@ -1319,6 +1582,7 @@ mod widget_tests {
                 repaints,
                 state: AppState::new(),
                 time: 0.0,
+                copied: Vec::new(),
             }
         }
 
@@ -1344,14 +1608,21 @@ mod widget_tests {
             preload::step(&self.ctx, &mut self.state);
             let state = &mut self.state;
             let mut queue = Vec::new();
-            self.ctx
-                .run_ui(input, |ui| {
-                    egui::Panel::bottom("status").show(ui, |ui| {
-                        status_bar::show(ui, state, state.focus, &mut queue);
-                    });
-                    egui::CentralPanel::default().show(ui, |ui| draw_active(ui, state, &mut queue));
-                })
-                .drop_without_applying_deltas();
+            let output = self.ctx.run_ui(input, |ui| {
+                queue.extend(crate::commands::handle_shortcuts(ui.ctx(), state));
+                egui::Panel::bottom("status").show(ui, |ui| {
+                    status_bar::show(ui, state, state.focus, &mut queue);
+                });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| draw_active(ui, state, &mut queue));
+            });
+            for command in &output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    self.copied.push(text.clone());
+                }
+            }
+            output.drop_without_applying_deltas();
             self.state.actions.append(&mut queue);
             dispatch_queued(&mut self.state, &self.ctx);
         }
@@ -1727,5 +1998,297 @@ mod widget_tests {
             modifiers: Modifiers::NONE,
         }]);
         assert_eq!(h.state.focus, Some(tab));
+    }
+
+    // ---- selection (WP-52) ----
+
+    /// Four pages, each with three lines of one paragraph and a hyphenated word.
+    fn text_document(stem: &str) -> TempPdf {
+        let mut b = PdfBuilder::new();
+        for n in 1..=4 {
+            b = b.page(595.0, 842.0, |p| {
+                p.text(72.0, 100.0, 12.0, &format!("Alpha beta gamma page{n}"));
+                p.text(72.0, 116.0, 12.0, "delta epsilon speci-");
+                p.text(72.0, 132.0, 12.0, "fication zeta");
+            });
+        }
+        b.write_temp(stem)
+    }
+
+    fn pointer_button(pos: Pos2, pressed: bool, button: egui::PointerButton) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    impl Harness {
+        /// The text of a page, waiting for the engine (a test may block).
+        fn page_text(&self, tab: TabId, page: u32) -> std::sync::Arc<refdesk_core::PageText> {
+            let doc = self.state.docs.get(self.tab(tab).doc).expect("doc");
+            doc.page_text_wait(page).expect("page text")
+        }
+
+        /// The screen position of a page-space point in the view of `tab` as drawn last.
+        fn screen_of(&self, tab: TabId, page: u32, x: f32, y: f32) -> Pos2 {
+            let pdf = self.tab(tab);
+            let layout = pdf.ui.layout().expect("layout");
+            let origin = VIEW_ORIGIN;
+            let r = layout.page_rect(page);
+            let s = layout.scale();
+            let scroll = pdf.ui.scroll();
+            origin + vec2(r.x0 + x * s - scroll.x, r.y0 + y * s - scroll.y)
+        }
+
+        /// Screen position just inside the left or right edge of character `i`.
+        fn char_pos(&self, tab: TabId, page: u32, i: u32, right: bool) -> Pos2 {
+            let b = self.page_text(tab, page).chars[i as usize].quad.bounds();
+            let x = if right { b.x1 - 0.3 } else { b.x0 + 0.3 };
+            self.screen_of(tab, page, x, (b.y0 + b.y1) / 2.0)
+        }
+
+        fn selected_text(&self, tab: TabId) -> Option<String> {
+            let sel = self.tab(tab).ui.selection.active()?;
+            let doc = self.state.docs.get(self.tab(tab).doc)?;
+            Some(selection::selection_string(&sel, &|p| doc.page_text(p)))
+        }
+    }
+
+    /// Presses at `from`, moves to `to` over a frame, waits until the selection exists, releases.
+    fn drag_select(h: &mut Harness, from: Pos2, to: Pos2) {
+        h.frame(vec![
+            egui::Event::PointerMoved(from),
+            pointer_button(from, true, egui::PointerButton::Primary),
+        ]);
+        h.frame(vec![egui::Event::PointerMoved(to)]);
+        h.frames_until("the selection", |h| {
+            h.state
+                .focused_pdf()
+                .is_some_and(|(_, p)| p.ui.has_selection())
+        });
+        h.frame(vec![pointer_button(
+            to,
+            false,
+            egui::PointerButton::Primary,
+        )]);
+    }
+
+    #[test]
+    fn dragging_in_the_view_selects_text_across_pages_and_draws_without_panicking() {
+        let pdf = text_document("view-select");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        let beta = 6;
+        let from = h.char_pos(tab, 0, beta, false);
+        let to = h.char_pos(tab, 0, beta + 3, true);
+        drag_select(&mut h, from, to);
+        assert_eq!(h.selected_text(tab).as_deref(), Some("beta"));
+        // More frames with the selection on screen.
+        for _ in 0..3 {
+            h.frame(Vec::new());
+        }
+        assert!(h.tab(tab).ui.selection.has_selection());
+        assert!(!h.tab(tab).ui.selection.is_dragging());
+    }
+
+    #[test]
+    fn a_drag_that_starts_before_the_text_has_arrived_continues_when_it_does() {
+        let pdf = text_document("view-select-pending");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        // Nothing asked for the text yet, so the press finds none.
+        let (from, to) = (
+            h.screen_of(tab, 0, 73.0, 95.0),
+            h.screen_of(tab, 0, 200.0, 111.0),
+        );
+        h.frame(vec![
+            egui::Event::PointerMoved(from),
+            pointer_button(from, true, egui::PointerButton::Primary),
+        ]);
+        h.frame(vec![egui::Event::PointerMoved(to)]);
+        h.frames_until("the selection", |h| h.tab(tab).ui.has_selection());
+        h.frame(vec![pointer_button(
+            to,
+            false,
+            egui::PointerButton::Primary,
+        )]);
+        let text = h.selected_text(tab).expect("selection");
+        assert!(text.starts_with("Alpha"), "{text}");
+        assert!(text.contains("delta"), "{text}");
+    }
+
+    #[test]
+    fn a_click_without_a_drag_clears_the_selection_and_a_double_click_selects_a_word() {
+        let pdf = text_document("view-select-click");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        let (from, to) = (h.char_pos(tab, 0, 6, false), h.char_pos(tab, 0, 9, true));
+        drag_select(&mut h, from, to);
+        assert!(h.tab(tab).ui.has_selection());
+
+        let at = h.char_pos(tab, 0, 14, false); // inside "gamma"
+        let click = |h: &mut Harness| {
+            h.frame(vec![
+                egui::Event::PointerMoved(at),
+                pointer_button(at, true, egui::PointerButton::Primary),
+            ]);
+            h.frame(vec![pointer_button(
+                at,
+                false,
+                egui::PointerButton::Primary,
+            )]);
+        };
+        click(&mut h);
+        assert!(!h.tab(tab).ui.has_selection(), "a plain click clears");
+        click(&mut h);
+        assert_eq!(h.selected_text(tab).as_deref(), Some("gamma"));
+    }
+
+    #[test]
+    fn ctrl_c_copies_the_selected_text_and_announces_it() {
+        let pdf = text_document("view-select-copy");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        // From "epsilon" through the broken word of the next line.
+        let text = h.page_text(tab, 0);
+        let all: String = text.chars.iter().map(|c| c.ch).collect();
+        let epsilon = all.find("epsilon").expect("epsilon") as u32;
+        let zeta = all.find("zeta").expect("zeta") as u32;
+        let (from, to) = (
+            h.char_pos(tab, 0, epsilon, false),
+            h.char_pos(tab, 0, zeta + 3, true),
+        );
+        drag_select(&mut h, from, to);
+        assert!(h.copied.is_empty());
+
+        // egui-winit delivers Ctrl+C as `Event::Copy`.
+        h.frame(vec![egui::Event::Copy]);
+        h.frame(Vec::new());
+        assert_eq!(h.copied, vec!["epsilon specification zeta".to_owned()]);
+        // The notice is up, with the character count.
+        assert_eq!(
+            h.tab(tab).ui.selection.notice_chars(),
+            Some("epsilon specification zeta".chars().count())
+        );
+    }
+
+    #[test]
+    fn the_copy_action_without_a_selection_copies_nothing() {
+        let (mut h, _pdf, tab) = rendered(3, "view-copy-none");
+        h.state.actions.push(Action::CopySelection(tab));
+        let ctx = h.ctx.clone();
+        dispatch_queued(&mut h.state, &ctx);
+        h.frame(Vec::new());
+        assert!(h.copied.is_empty());
+        assert!(h.tab(tab).ui.selection.notice_chars().is_none());
+    }
+
+    #[test]
+    fn a_right_click_with_a_selection_opens_the_menu_and_without_one_does_not() {
+        let pdf = text_document("view-select-menu");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        let at = h.char_pos(tab, 0, 14, false);
+        let right_click = |h: &mut Harness| {
+            h.frame(vec![
+                egui::Event::PointerMoved(at),
+                pointer_button(at, true, egui::PointerButton::Secondary),
+            ]);
+            h.frame(vec![pointer_button(
+                at,
+                false,
+                egui::PointerButton::Secondary,
+            )]);
+            h.frame(Vec::new());
+        };
+        right_click(&mut h);
+        assert!(
+            !egui::Popup::is_any_open(&h.ctx),
+            "nothing selected, no menu"
+        );
+
+        let (from, to) = (h.char_pos(tab, 0, 6, false), h.char_pos(tab, 0, 9, true));
+        drag_select(&mut h, from, to);
+        right_click(&mut h);
+        assert!(egui::Popup::is_any_open(&h.ctx), "the menu is open");
+        assert!(
+            h.tab(tab).ui.has_selection(),
+            "a right click keeps the selection"
+        );
+    }
+
+    #[test]
+    fn dragging_to_the_bottom_edge_scrolls_the_view_and_extends_the_selection() {
+        let pdf = text_document("view-select-autoscroll");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        let from = h.char_pos(tab, 0, 6, false);
+        let edge = pos2(from.x, VIEW_ORIGIN.y + h.tab(tab).ui.viewport().h - 1.0);
+        h.frame(vec![
+            egui::Event::PointerMoved(from),
+            pointer_button(from, true, egui::PointerButton::Primary),
+        ]);
+        h.frame(vec![egui::Event::PointerMoved(edge)]);
+        let y0 = h.tab(tab).ui.scroll().y;
+        for _ in 0..20 {
+            h.frame(Vec::new());
+        }
+        assert!(
+            h.tab(tab).ui.scroll().y > y0 + 100.0,
+            "the view scrolled down"
+        );
+        // The pointer never moved, yet the selection reaches the pages now under it.
+        h.frames_until("the selection to reach a later page", |h| {
+            h.tab(tab)
+                .ui
+                .selection
+                .selection()
+                .is_some_and(|s| s.focus.page > 0)
+        });
+        h.frame(vec![pointer_button(
+            edge,
+            false,
+            egui::PointerButton::Primary,
+        )]);
+        let scroll = h.tab(tab).ui.scroll().y;
+        for _ in 0..5 {
+            h.frame(Vec::new());
+        }
+        assert_eq!(
+            h.tab(tab).ui.scroll().y,
+            scroll,
+            "it stops when the button is released"
+        );
+    }
+
+    #[test]
+    fn a_reload_clears_the_selection() {
+        let pdf = text_document("view-select-reload");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        let (from, to) = (h.char_pos(tab, 0, 6, false), h.char_pos(tab, 0, 9, true));
+        drag_select(&mut h, from, to);
+        assert!(h.tab(tab).ui.has_selection());
+        let generation = |h: &Harness| {
+            h.state
+                .docs
+                .get(h.tab(tab).doc)
+                .and_then(|d| d.info())
+                .map(|i| i.generation)
+        };
+        let before = generation(&h);
+        h.state.docs.get(h.tab(tab).doc).expect("doc").reload();
+        h.frames_until("the new generation", |h| generation(h) != before);
+        h.frame(Vec::new());
+        assert!(!h.tab(tab).ui.has_selection());
     }
 }
