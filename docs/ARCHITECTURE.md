@@ -52,6 +52,8 @@ font-kit  = { version = "0.14", features = ["source-fontconfig-dlopen"] }
 쓰기로 한 것(WP-00 이 버전을 고정하며 빌드로 확인): `similar` 3.2, `serde`, `serde_json`, `toml`, `thiserror`, `log`,
 `rfd`, `notify`, `directories`, `xxhash-rust`, `unicode-normalization`, `png`, 개발 의존성 `egui_kittest` 0.37.
 
+번역(WP-80): `ureq` 3.x — 로컬 Ollama 에 붙는 블로킹 HTTP 클라이언트. TLS 기능은 켜지 않는다(로컬 `http://` 전용).
+
 새 의존성을 더할 때는 WP 보고에 이유를 적는다. C 라이브러리나 시스템 패키지를 요구하는 크레이트는 더하지 않는다.
 
 ### 2.2 라이브러리 API 주의
@@ -539,6 +541,44 @@ impl WorkspaceWatcher {                                                     // �
 - 구현 메모(WP-70): `WorkspaceIndex` 는 `scan` 이나 `WorkspaceIndex::new` 로만 만든다(안에 조회용 색인이 있다). `find` 는 디스크를 읽지 않는다.
   5만 개 파일의 훑기가 86ms, `find` 가 1µs 미만이다. 훑기와 감시의 알림은 백그라운드 스레드에서 불린다.
 
+### 4.14 translate — 로컬 모델에 번역 묻기 (WP-80, TR-5 ~ 8)
+
+```rust
+pub enum TranslateKind { Passage, Word { context: String } }      // context: 그 단어가 든 문장
+pub struct TranslateRequest { pub text: String, pub kind: TranslateKind }
+pub enum TranslateError { Unreachable(String), ModelMissing(String), Http { status: u16, message: String },
+                          Protocol(String), Cancelled }
+
+pub trait TranslateBackend: Send + Sync {                          // app 의 테스트는 가짜 구현을 넣는다
+    /// 번역을 조각으로 흘려보낸다. cancel 이 서면 가능한 한 빨리 Err(Cancelled).
+    fn translate(&self, req: &TranslateRequest, cancel: &AtomicBool,
+                 on_text: &mut dyn FnMut(&str)) -> Result<(), TranslateError>;
+    /// 모델을 메모리에 올린다(없으면 ModelMissing, 서버가 없으면 Unreachable).
+    fn warm_up(&self, cancel: &AtomicBool) -> Result<(), TranslateError>;
+    /// 캐시 열쇠에 들어갈 이름(모델과 대상 언어).
+    fn identity(&self) -> String;
+}
+pub struct OllamaBackend;  impl OllamaBackend { pub fn new(config: &TranslateConfig) -> OllamaBackend }
+
+pub struct TranslateSnapshot { pub text: String, pub state: TranslateState }   // Running | Done | Failed(TranslateError)
+impl TranslateJob {
+    pub fn start(backend: Arc<dyn TranslateBackend>, req: TranslateRequest, notifier: Notifier) -> TranslateJob;
+    pub fn warm_up(backend: Arc<dyn TranslateBackend>, notifier: Notifier) -> TranslateJob;
+    pub fn snapshot(&self) -> Arc<TranslateSnapshot>;              // 값싸다
+}   // drop 하면 취소 (기다리지 않는다)
+
+pub struct TranslationCache;                                       // LRU, state_dir/translations.json
+impl TranslationCache { pub fn get(&mut self, identity: &str, req: &TranslateRequest) -> Option<&str>;
+                        pub fn insert(&mut self, identity: &str, req: &TranslateRequest, text: String);
+                        pub fn load(path) -> Self; pub fn save(&self, path) -> io::Result<()>; }
+```
+
+- `OllamaBackend` 는 Ollama 의 HTTP API 를 쓴다(`POST /api/chat`, `stream: true`, 줄마다 JSON 하나). HTTP 는 `ureq`(블로킹)이고 **항상 작업 스레드에서만** 부른다(R-1). 연결 제한 시간은 짧게(2초), 응답은 조각마다 `cancel` 을 본다.
+- 주소와 모델은 `Config.translate`(`config.toml` 의 `[translate]`): `endpoint`(기본 `http://127.0.0.1:11434`), `model`(기본 `translategemma:4b`), `target`(기본 `ko`), `keep_alive_minutes`(기본 30), `word_with_sentence`(기본 true). 기본 주소는 이 머신이다. 다른 주소를 넣으면 글이 그 주소로 간다 — 설정 파일의 주석에 적는다.
+- 프롬프트는 순수 함수다(`translate/prompt.rs`). 모델 이름이 `translategemma` 로 시작하면 그 모델이 요구하는 정해진 틀을, 아니면 일반 지시문을 쓴다. 단어는 "이 문장에서 이 단어의 뜻을 한국어 낱말 하나나 둘로"를 묻는다. 식별자·숫자·단위는 그대로 두라고 지시한다(TR-8). 출력은 다듬는다(앞뒤 공백·따옴표, 단어는 첫 줄만).
+- 실측(2026-11-26, RTX 4070 Laptop 8GB, `translategemma:4b`, 100% GPU): 모델 올리기 17초, 단어 0.05 ~ 0.1초, 한 줄 0.35 ~ 0.6초, 85 토큰/초.
+- 테스트는 실제 Ollama 를 쓰지 않는다. 테스트가 직접 띄운 가짜 서버(`127.0.0.1:0`)에만 붙는다.
+
 ### 4.12 testutil — 테스트용 PDF
 
 저장소에 외부 PDF 를 넣지 않는다. 내용과 좌표를 아는 PDF 를 테스트 코드에서 만든다.
@@ -740,6 +780,15 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 - core: `store/search_history.rs` 의 `SearchHistory` — 항목은 `SearchQuery` 의 네 값과 마지막으로 쓴 시각. `record`(같은 것은 맨 앞으로, 100개 상한), `remove`, `clear`, `entries`(최근 것 먼저). 파일은 `state_dir/search_history.json`(`Paths::search_history_file()`), 형식 버전·원자적 쓰기·깨지면 `.bad`(R-8).
 - app: `AppState.search_history`. 바꾸는 것은 dispatch 뿐이다(R-6): `RecordSearch { query, replaces }`(`replaces` 는 머무름으로 기록했던 앞부분 — 있으면 그 항목을 치운다), `RemoveSearchHistory(usize)`, `ClearSearchHistory`. 바뀌면 바로 저장한다(`paths` 가 없으면 저장하지 않는다). 맨 앞 항목과 같은 검색어는 아무것도 바꾸지 않고 저장도 하지 않는다.
 - `panels/search_history.rs` 가 입력란 하나에 붙는 부품을 준다: ↑/↓ 불러오기의 상태(`Recall`: 기록의 몇 번째를 보고 있는지와 불러오기 전에 치던 글), 기록 단추와 목록, "2초 동안 그대로"와 앞부분 대체를 판단하는 `Settle`. 문서 내 검색 막대와 모든 문서 찾기의 입력란이 같은 부품을 쓴다. 판단은 순수 함수다(R-10).
+
+### 5.12 번역 (WP-81, TR-1 ~ 4, 7)
+
+- 상태는 앱 전체에 하나다: `AppState.translate`(`overlays/translate.rs`) — 번역 모드(환경 설정 `prefs.json` 에 기억), 백엔드(`Arc<dyn TranslateBackend>`), 캐시, 준비 상태(`Off | Loading | Ready | Failed(이유)`), 모델 올리기 작업.
+- 번역 모드를 켜면 모델 올리기(`TranslateJob::warm_up`)를 시작하고, 끝나기 전의 요청은 그대로 보낸다(Ollama 가 줄 세운다). 실패한 이유는 상태 표시줄 단추와 팝업에 보인다.
+- 팝업은 뷰마다 하나다(`PdfViewUiState.translate`): 무엇을 번역 중인지(단어 + 문장, 또는 선택), 작업, 뜨고 닫히는 시각. 단어 팝업은 포인터가 0.5초 머문 뒤 뜨고, 벗어나면 0.2초 뒤 닫힌다. 선택 팝업은 선택이 풀리거나 Esc 까지 남는다. 뜨고 닫히는 판단, 자리와 크기, 어떤 단어를 대상으로 삼는지(글자가 둘 이상, 라틴 글자가 있어야 함), 문장 잘라내기는 순수 함수다(R-10).
+- 링크 위에서는 링크 미리보기(§5.5)가 우선이고 단어 팝업은 뜨지 않는다. 끄는 중, 메뉴·검색 입력·명령 팔레트가 열려 있을 때도 뜨지 않는다.
+- 캐시에 있으면 작업을 만들지 않고 바로 보인다. 끝난 번역은 캐시에 넣고, 캐시는 바뀐 뒤 몇 초 묶어서 저장한다.
+- 비교 탭의 뷰에서는 동작하지 않는다(P2).
 
 ### 5.8 세션
 
