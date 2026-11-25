@@ -149,6 +149,11 @@ pub const TABLE: &[Row] = &[
     ("cmd.view.fit_page", "쪽 맞춤", "Fit Page"),
     ("cmd.app.quit", "종료", "Quit"),
     ("cmd.view.toggle_toc", "목차 패널", "Table of Contents"),
+    (
+        "cmd.view.toggle_breadcrumb",
+        "절 경로 표시 켜기/끄기",
+        "Toggle Section Path",
+    ),
     ("cmd.diff.start", "문서 비교…", "Compare Documents…"),
     ("cmd.diff.next_change", "다음 변경", "Next Change"),
     ("cmd.diff.prev_change", "이전 변경", "Previous Change"),

@@ -154,6 +154,8 @@ pub enum Action {
     Forward(TabId),
     /// Show or hide the table of contents panel of the focused window (TOC-3).
     ToggleToc,
+    /// Show or hide the section path line above PDF views (TOC-6).
+    ToggleBreadcrumb,
     /// Close the application.
     Quit,
 }
@@ -321,6 +323,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             if let Some(window) = state.windows.get_mut(w) {
                 window.toc_open = !window.toc_open;
             }
+        }
+        Action::ToggleBreadcrumb => {
+            state.show_breadcrumb = !state.show_breadcrumb;
+            ctx.request_repaint();
         }
         Action::Quit => quit(ctx),
     }

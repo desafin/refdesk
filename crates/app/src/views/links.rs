@@ -16,6 +16,7 @@ use refdesk_core::{Link, LinkTarget, Location, Outline, PageLayout, Point, Rect,
 
 use crate::action::OpenHow;
 use crate::i18n::tr;
+use crate::overlays::link_preview::PreviewState;
 use crate::views::selection::{self, Hit};
 
 /// How long the mark of a jump's landing place takes to fade out.
@@ -389,6 +390,8 @@ pub struct LinkState {
     pub rest: ScrollRest,
     /// The wheel button went down in the view.
     pub middle_down: bool,
+    /// The hover preview popup of a link (LINK-8).
+    pub preview: PreviewState,
 }
 
 impl LinkState {

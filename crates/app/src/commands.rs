@@ -354,6 +354,15 @@ pub static COMMANDS: &[Command] = &[
         action: |_| Some(Action::ToggleToc),
     },
     Command {
+        id: "view.toggle_breadcrumb",
+        name_key: "cmd.view.toggle_breadcrumb",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ToggleBreadcrumb),
+    },
+    Command {
         id: "palette.commands",
         name_key: "cmd.palette.commands",
         menu: MenuGroup::View,
@@ -1467,6 +1476,26 @@ mod tests {
         for lang in [Lang::Ko, Lang::En] {
             assert!(lookup(lang, command.name_key).is_some());
         }
+    }
+
+    #[test]
+    fn the_section_path_command_is_in_the_view_menu_and_toggles_the_line() {
+        let command = COMMANDS
+            .iter()
+            .find(|c| c.id == "view.toggle_breadcrumb")
+            .expect("command");
+        assert_eq!(command.menu, MenuGroup::View);
+        assert!(in_menu(MenuGroup::View).any(|c| c.id == command.id));
+        let state = AppState::new();
+        assert_eq!(command.run(&state), Some(Action::ToggleBreadcrumb));
+        assert!(state.show_breadcrumb, "on by default");
+        for lang in [Lang::Ko, Lang::En] {
+            assert!(lookup(lang, command.name_key).is_some());
+        }
+        assert_eq!(
+            lookup(Lang::Ko, command.name_key),
+            Some("절 경로 표시 켜기/끄기")
+        );
     }
 
     fn find(id: &str) -> &'static Command {

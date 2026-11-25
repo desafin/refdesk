@@ -22,6 +22,7 @@ use refdesk_core::{DocStatus, DocumentHandle};
 use crate::action::Action;
 use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
+use crate::panels::breadcrumb;
 use crate::panels::search;
 use crate::panels::status_bar;
 use crate::panels::toc;
@@ -275,6 +276,8 @@ pub fn show_window(
     // The matches of the search of this window's focused tab (FIND-4).
     search::show_results_panel(ui, &mut state.tabs, &state.docs, window_id, window_focus);
 
+    let show_breadcrumb = state.show_breadcrumb;
+    let overlay_open = state.palette.open.is_some();
     let AppState {
         windows,
         tabs,
@@ -294,6 +297,8 @@ pub fn show_window(
         titles,
         menus,
         start,
+        show_breadcrumb,
+        overlay_open,
         queue,
     };
     CentralPanel::default().show(ui, |ui| {
@@ -464,6 +469,10 @@ struct WindowHost<'a> {
     menus: HashMap<TabId, Vec<MenuItem>>,
     /// What the start page shows; `None` when this window has no start page.
     start: Option<StartPage>,
+    /// The section path line above PDF views is shown (TOC-6).
+    show_breadcrumb: bool,
+    /// The command palette is open: link previews stay closed (LINK-8).
+    overlay_open: bool,
     queue: &'a mut Vec<Action>,
 }
 
@@ -498,7 +507,7 @@ impl DockHost for WindowHost<'_> {
                         textures: self.textures,
                         queue: self.queue,
                     };
-                    draw_pdf_tab(ui, pdf, doc, cx);
+                    draw_pdf_tab(ui, pdf, doc, cx, self.show_breadcrumb, self.overlay_open);
                 }
                 None => {
                     ui.label(tr("tab.unknown"));
@@ -555,9 +564,30 @@ impl DockHost for WindowHost<'_> {
 
 /// Draws the content of a PDF tab: the PDF view (WP-15). It gets the tab (whose view state it
 /// may change), the document handle, the shared textures and the action queue.
-pub fn draw_pdf_tab(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, cx: ViewContext<'_>) {
+pub fn draw_pdf_tab(
+    ui: &mut Ui,
+    tab: &mut PdfTab,
+    doc: &DocumentHandle,
+    cx: ViewContext<'_>,
+    show_breadcrumb: bool,
+    overlay_open: bool,
+) {
     search::show_bar(ui, tab, doc, cx.tab_id, cx.focused);
+    tab.ui.links.preview.overlay_open = overlay_open;
+    // The section path line (TOC-6) is drawn above the view, from where the view was in the
+    // previous frame; when the view moved to another section in this one, one more frame
+    // brings the line up to date.
+    let line = if show_breadcrumb { doc.info() } else { None };
+    let viewport_h = breadcrumb::view_height_without_line(ui);
+    let drawn = line
+        .as_ref()
+        .and_then(|info| breadcrumb::show(ui, tab, info, cx.tab_id, viewport_h, cx.queue));
     pdf_view::show(ui, tab, doc, cx);
+    if let Some(info) = &line
+        && breadcrumb::section_of(tab, info, viewport_h) != drawn
+    {
+        ui.ctx().request_repaint();
+    }
 }
 
 /// Draws the start page: the application name, a button to open files, the recent documents

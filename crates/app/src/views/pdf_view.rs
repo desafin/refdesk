@@ -28,6 +28,7 @@ use refdesk_core::{
 use crate::action::{Action, OpenTarget};
 use crate::commands;
 use crate::i18n::tr;
+use crate::overlays::link_preview::{self, ShowEnv, UpdateEnv};
 use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
 use crate::state::{DocId, PdfTab, TabId};
@@ -51,7 +52,7 @@ pub const ZOOM_SETTLE_SECS: f64 = 0.08;
 /// The view counts as scrolling until this long after the scroll offset last changed.
 pub const SCROLL_SETTLE_SECS: f64 = 0.3;
 /// Thickness of the scroll bars.
-const SCROLLBAR: f32 = 12.0;
+pub(crate) const SCROLLBAR: f32 = 12.0;
 /// Shortest scroll bar thumb.
 const MIN_THUMB: f32 = 24.0;
 /// Scroll distance of one arrow key press.
@@ -686,6 +687,23 @@ fn show_document(
         // The status bar was drawn before this frame's pointer was known.
         ui.ctx().request_repaint();
     }
+    // The popup of a link (LINK-8) is open or about to open; menus, the search bar and a drag
+    // in progress keep it away.
+    let preview_blocked = state.selection.is_dragging()
+        || state.search.open
+        || state.goto.is_some()
+        || ui.ctx().any_popup_open();
+    let preview_open = link_preview::update(
+        ui,
+        state,
+        &UpdateEnv {
+            view_rect,
+            now,
+            hover: hover.as_ref(),
+            info,
+            blocked: preview_blocked,
+        },
+    );
     let env = PointerEnv {
         over_link: hover.is_some(),
         ..env
@@ -786,7 +804,24 @@ fn show_document(
     paint_link_hover(ui, view_rect, state, hover.as_ref());
     paint_arrival(ui, view_rect, state, now);
     show_copy_notice(ui, view_rect, state, now);
-    if let Some(text) = hover_text {
+    link_preview::show(
+        ui,
+        state,
+        cx.textures,
+        cx.queue,
+        &ShowEnv {
+            tab: cx.tab_id,
+            view_rect,
+            doc_id: tab.doc,
+            doc,
+            generation: info.generation,
+            pixels,
+        },
+    );
+    // The popup says the same as the tooltip, and more.
+    if let Some(text) = hover_text
+        && !preview_open
+    {
         response.clone().on_hover_text_at_pointer(text);
     }
 

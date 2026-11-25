@@ -293,6 +293,8 @@ pub struct AppState {
     pub config: Config,
     /// What is remembered about each document (`documents.json`, SES-3).
     pub doc_db: DocStateDb,
+    /// The section path line above PDF views is shown (TOC-6). Not saved.
+    pub show_breadcrumb: bool,
     /// Session bookkeeping: focus order, fingerprints, window sizes (WP-41).
     pub memory: Memory,
     next_window: u64,
@@ -327,6 +329,7 @@ impl AppState {
             paths: None,
             config: Config::default(),
             doc_db: DocStateDb::default(),
+            show_breadcrumb: true,
             memory: Memory::default(),
             next_window: 1,
         }

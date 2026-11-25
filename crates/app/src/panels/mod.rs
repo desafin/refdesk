@@ -1,5 +1,6 @@
 //! Panels around the tab area.
 
+pub mod breadcrumb;
 pub mod changes;
 pub mod search;
 pub mod status_bar;
