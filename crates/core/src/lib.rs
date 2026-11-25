@@ -6,6 +6,7 @@
 
 pub mod engine;
 pub mod geom;
+pub mod layout;
 pub mod link;
 pub mod model;
 pub mod nav;
@@ -19,6 +20,7 @@ pub use engine::{
     RenderedImage, RenderedPage,
 };
 pub use geom::{Point, Quad, Rect, Size};
+pub use layout::{LayoutParams, PageLayout};
 pub use link::{Link, LinkTarget, RawLink};
 pub use model::{Location, ViewState, ZoomMode};
 pub use nav::dest::{DestKind, Destination};
