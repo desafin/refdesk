@@ -19,6 +19,7 @@ pub mod store;
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;
 pub mod text;
+pub mod translate;
 pub mod workspace;
 
 pub use diff::{
@@ -43,12 +44,17 @@ pub use search::{
 pub use store::{
     CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths, Prefs,
     RecentFolder, ScrollSpeedItem, SearchHistory, SearchHistoryEntry, Session, SessionTab,
-    SessionWindow, SessionWorkspace, Theme, atomic_write, clamp_scroll_speed,
-    effective_scroll_speed, line_scroll_speed, multiplier_of_line_scroll_speed, scroll_speed_label,
-    scroll_speed_menu, step_scroll_speed,
+    SessionWindow, SessionWorkspace, Theme, TranslateBackendKind, TranslateConfig, atomic_write,
+    clamp_scroll_speed, effective_scroll_speed, effective_translate_config,
+    effective_translate_mode, effective_translate_model, line_scroll_speed,
+    multiplier_of_line_scroll_speed, scroll_speed_label, scroll_speed_menu, step_scroll_speed,
 };
 pub use text::{
     CopyOptions, PageText, Selection, TextBlock, TextChar, TextLine, TextPos, selection_text,
+};
+pub use translate::{
+    OllamaBackend, OpenAiBackend, TranslateBackend, TranslateError, TranslateJob, TranslateKind,
+    TranslateRequest, TranslateSnapshot, TranslateState, TranslationCache, backend_from_config,
 };
 pub use workspace::{
     EntryKind, ScanLimits, WorkspaceEntry, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher,

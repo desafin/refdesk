@@ -14,10 +14,14 @@ mod views;
 mod windows;
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
 use eframe::egui;
-use refdesk_core::{Config, IpcListener, IpcRequest, Language, Paths, ipc};
+use refdesk_core::{
+    Config, IpcListener, IpcRequest, Language, Paths, Prefs, TranslateRequest, backend_from_config,
+    effective_translate_config, ipc, translate,
+};
 
 use crate::app::RefdeskApp;
 use crate::cli::Cli;
@@ -120,6 +124,40 @@ fn apply_language(language: Language) {
     i18n::force_lang(lang);
 }
 
+/// `refdesk --translate TEXT` (TR-10): translates with the configured backend and model (the
+/// model picked in the app wins), prints the translation and gives the exit status. Blocks: there
+/// is no UI here.
+fn translate_once(paths: &Paths, config: &Config, text: &str) -> i32 {
+    let prefs = Prefs::load(&paths.prefs_file());
+    let settings = effective_translate_config(&prefs, &config.translate);
+    let backend = backend_from_config(&settings);
+    let (passage, cut) = translate::prepare_passage(text);
+    if cut {
+        eprintln!(
+            "refdesk: the text is longer than {} characters; only the beginning is translated",
+            translate::MAX_PASSAGE_CHARS
+        );
+    }
+    let request = TranslateRequest::passage(passage);
+    let mut raw = String::new();
+    let never = AtomicBool::new(false);
+    match backend.translate(&request, &never, &mut |piece| raw.push_str(piece)) {
+        Ok(()) => {
+            println!("{}", translate::clean_output(&request.kind, &raw));
+            0
+        }
+        Err(err) => {
+            eprintln!(
+                "refdesk: {err} ({} {}, model {})",
+                settings.backend.name(),
+                settings.endpoint(),
+                settings.model
+            );
+            1
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     init_logging();
     let paths = Paths::from_env();
@@ -135,6 +173,7 @@ fn main() -> eframe::Result {
             println!("{}", cli::version_text());
             return Ok(());
         }
+        Cli::Translate(text) => std::process::exit(translate_once(&paths, &config, &text)),
         Cli::Error(message) => {
             eprintln!("refdesk: {message}\n\n{}", cli::usage());
             std::process::exit(2);

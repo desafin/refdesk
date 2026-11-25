@@ -32,6 +32,8 @@ xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
 unicode-normalization = "0.1.26"
 png = "0.18.1"
 regex = "1.13.2"
+# Blocking HTTP client for the local translation server. Plain http:// only: no TLS features.
+ureq = { version = "3.5.2", default-features = false }
 
 egui_kittest = "0.37.0"
 

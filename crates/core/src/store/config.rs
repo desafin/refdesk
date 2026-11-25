@@ -143,6 +143,203 @@ impl Default for CaptureConfig {
     }
 }
 
+/// Which kind of server `[translate]` talks to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranslateBackendKind {
+    /// Ollama's own API (`/api/chat`, `/api/generate`, `/api/tags`).
+    #[default]
+    Ollama,
+    /// An OpenAI compatible API (`/v1/chat/completions`, `/v1/models`): llama.cpp's
+    /// `llama-server`, LM Studio, vLLM, ...
+    #[serde(rename = "openai")]
+    OpenAi,
+}
+
+impl TranslateBackendKind {
+    /// The address used when `endpoint` is not set.
+    pub fn default_endpoint(self) -> &'static str {
+        match self {
+            TranslateBackendKind::Ollama => DEFAULT_OLLAMA_ENDPOINT,
+            TranslateBackendKind::OpenAi => DEFAULT_OPENAI_ENDPOINT,
+        }
+    }
+
+    /// `"ollama"` or `"openai"`, as written in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            TranslateBackendKind::Ollama => "ollama",
+            TranslateBackendKind::OpenAi => "openai",
+        }
+    }
+}
+
+/// Default address of the Ollama backend (this machine).
+pub const DEFAULT_OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434";
+/// Default address of the OpenAI compatible backend (`llama-server`'s default port).
+pub const DEFAULT_OPENAI_ENDPOINT: &str = "http://127.0.0.1:8080";
+/// Default translation model.
+pub const DEFAULT_TRANSLATE_MODEL: &str = "translategemma:4b";
+
+/// Settings of the translation feature (`[translate]`, `docs/ARCHITECTURE.md` §4.14).
+///
+/// The text to translate is sent to `endpoint`. The default is a server on this machine; an
+/// address of another machine sends the document text there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// `"ollama"` (default) or `"openai"`.
+    pub backend: TranslateBackendKind,
+    /// Server address, `http://` only (the feature is meant for a local server, so no TLS).
+    /// `None` means the default of the backend (see [`TranslateConfig::endpoint`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Model name as the server knows it. A model picked in the app (`prefs.json`) wins.
+    pub model: String,
+    /// Target language code (`ko`, `en`, `ja`, ...).
+    pub target: String,
+    /// How long the server keeps the model loaded after the last request (Ollama only).
+    pub keep_alive_minutes: u32,
+    /// The word popup also translates the sentence the word is in.
+    pub word_with_sentence: bool,
+    /// Own instruction for passages; must contain `{text}`. `{target}` is the language name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passage_prompt: Option<String>,
+    /// Own instruction for words; must contain `{word}`. `{sentence}` is the sentence the word
+    /// is in, `{target}` the language name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub word_prompt: Option<String>,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> TranslateConfig {
+        TranslateConfig {
+            backend: TranslateBackendKind::default(),
+            endpoint: None,
+            model: DEFAULT_TRANSLATE_MODEL.to_string(),
+            target: "ko".to_string(),
+            keep_alive_minutes: 30,
+            word_with_sentence: true,
+            passage_prompt: None,
+            word_prompt: None,
+        }
+    }
+}
+
+impl TranslateConfig {
+    /// The server address without a trailing `/`: `endpoint`, or the default of the backend.
+    pub fn endpoint(&self) -> String {
+        let raw = self
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .unwrap_or(self.backend.default_endpoint());
+        raw.trim_end_matches('/').to_string()
+    }
+
+    fn from_table(t: &toml::Table, notes: &mut Vec<String>) -> TranslateConfig {
+        let d = TranslateConfig::default();
+        let backend = match t.get("backend") {
+            None => d.backend,
+            Some(v) => match v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                Some("ollama") => TranslateBackendKind::Ollama,
+                Some("openai") => TranslateBackendKind::OpenAi,
+                _ => {
+                    notes.push(format!(
+                        "translate.backend: {v} is not \"ollama\" or \"openai\""
+                    ));
+                    d.backend
+                }
+            },
+        };
+        let endpoint = take::<Option<String>>(t, "endpoint", None, notes).and_then(|e| {
+            let e = e.trim().to_string();
+            if is_http_endpoint(&e) {
+                Some(e)
+            } else {
+                if e.to_ascii_lowercase().starts_with("https://") {
+                    notes.push(format!(
+                        "translate.endpoint: {e:?}: https is not supported (local http:// servers only)"
+                    ));
+                } else {
+                    notes.push(format!("translate.endpoint: {e:?} is not an http:// address"));
+                }
+                None
+            }
+        });
+        let model = take(t, "model", d.model.clone(), notes);
+        let model = if model.trim().is_empty() {
+            notes.push("translate.model: empty".to_string());
+            d.model.clone()
+        } else {
+            model.trim().to_string()
+        };
+        let target = take(t, "target", d.target.clone(), notes);
+        let target = if target.trim().is_empty() {
+            notes.push("translate.target: empty".to_string());
+            d.target.clone()
+        } else {
+            target.trim().to_ascii_lowercase()
+        };
+        let minutes = take::<i64>(
+            t,
+            "keep_alive_minutes",
+            i64::from(d.keep_alive_minutes),
+            notes,
+        );
+        let keep_alive_minutes = match u32::try_from(minutes) {
+            Ok(m) if m > 0 => m,
+            _ => {
+                notes.push(format!(
+                    "translate.keep_alive_minutes: {minutes} is not positive"
+                ));
+                d.keep_alive_minutes
+            }
+        };
+        let passage_prompt = prompt_from(t, "passage_prompt", "{text}", notes);
+        let word_prompt = prompt_from(t, "word_prompt", "{word}", notes);
+        TranslateConfig {
+            backend,
+            endpoint,
+            model,
+            target,
+            keep_alive_minutes,
+            word_with_sentence: take(t, "word_with_sentence", d.word_with_sentence, notes),
+            passage_prompt,
+            word_prompt,
+        }
+    }
+}
+
+/// `http://` followed by something.
+fn is_http_endpoint(e: &str) -> bool {
+    e.len() > "http://".len()
+        && e.get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+}
+
+/// An own instruction template: `None` (and a note) when it lacks `placeholder`.
+fn prompt_from(
+    t: &toml::Table,
+    key: &str,
+    placeholder: &str,
+    notes: &mut Vec<String>,
+) -> Option<String> {
+    let text = take::<Option<String>>(t, key, None, notes)?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    if text.contains(placeholder) {
+        Some(text)
+    } else {
+        notes.push(format!(
+            "translate.{key}: has no {placeholder}; the built-in instruction is used"
+        ));
+        None
+    }
+}
+
 /// The user's settings.
 ///
 /// This file is edited by people, so the app never rewrites it by itself: [`Config::save`] exists
@@ -168,6 +365,8 @@ pub struct Config {
     pub scroll_speed: f32,
     /// `[capture]` table.
     pub capture: CaptureConfig,
+    /// `[translate]` table.
+    pub translate: TranslateConfig,
     /// `[keys]` table: command identifier to shortcut text. The app interprets the text.
     pub keys: BTreeMap<String, String>,
 }
@@ -183,6 +382,7 @@ impl Default for Config {
             texture_cache_mb: 2048,
             scroll_speed: DEFAULT_SCROLL_SPEED,
             capture: CaptureConfig::default(),
+            translate: TranslateConfig::default(),
             keys: BTreeMap::new(),
         }
     }
@@ -240,6 +440,7 @@ impl Config {
             texture_cache_mb: take(table, "texture_cache_mb", d.texture_cache_mb, notes),
             scroll_speed: scroll_speed_from(table, notes),
             capture: d.capture,
+            translate: d.translate,
             keys: BTreeMap::new(),
         };
         match table.get("capture") {
@@ -260,6 +461,11 @@ impl Config {
                 }
             }
             Some(_) => notes.push("capture: expected a table".to_string()),
+        }
+        match table.get("translate") {
+            None => {}
+            Some(toml::Value::Table(t)) => config.translate = TranslateConfig::from_table(t, notes),
+            Some(_) => notes.push("translate: expected a table".to_string()),
         }
         match table.get("keys") {
             None => {}
@@ -514,5 +720,115 @@ mod tests {
         assert_eq!(c.capture_dir(&paths), PathBuf::from("/r/captures"));
         c.capture.dir = Some(PathBuf::from("/custom"));
         assert_eq!(c.capture_dir(&paths), PathBuf::from("/custom"));
+    }
+
+    #[test]
+    fn translate_defaults() {
+        let t = Config::default().translate;
+        assert_eq!(t.backend, TranslateBackendKind::Ollama);
+        assert_eq!(t.endpoint, None);
+        assert_eq!(t.endpoint(), "http://127.0.0.1:11434");
+        assert_eq!(t.model, "translategemma:4b");
+        assert_eq!(t.target, "ko");
+        assert_eq!(t.keep_alive_minutes, 30);
+        assert!(t.word_with_sentence);
+        assert_eq!(t.passage_prompt, None);
+        assert_eq!(t.word_prompt, None);
+        assert_eq!(load_str("[translate]\n").translate, t);
+    }
+
+    #[test]
+    fn translate_items_are_read() {
+        let c = load_str(
+            r#"
+            [translate]
+            backend = "openai"
+            endpoint = "http://192.168.0.5:8080/"
+            model = "qwen2.5:7b"
+            target = "JA"
+            keep_alive_minutes = 5
+            word_with_sentence = false
+            passage_prompt = "To {target}: {text}"
+            word_prompt = "{word} in {sentence}"
+            "#,
+        );
+        let t = c.translate;
+        assert_eq!(t.backend, TranslateBackendKind::OpenAi);
+        assert_eq!(t.endpoint.as_deref(), Some("http://192.168.0.5:8080/"));
+        assert_eq!(t.endpoint(), "http://192.168.0.5:8080");
+        assert_eq!(t.model, "qwen2.5:7b");
+        assert_eq!(t.target, "ja");
+        assert_eq!(t.keep_alive_minutes, 5);
+        assert!(!t.word_with_sentence);
+        assert_eq!(t.passage_prompt.as_deref(), Some("To {target}: {text}"));
+        assert_eq!(t.word_prompt.as_deref(), Some("{word} in {sentence}"));
+    }
+
+    #[test]
+    fn the_openai_backend_has_its_own_default_address() {
+        let t = load_str("[translate]\nbackend = \"openai\"\n").translate;
+        assert_eq!(t.endpoint(), "http://127.0.0.1:8080");
+        let t = load_str("[translate]\nbackend = \"OpenAI\"\n").translate;
+        assert_eq!(t.backend, TranslateBackendKind::OpenAi);
+    }
+
+    #[test]
+    fn wrong_translate_values_fall_back_one_by_one() {
+        let c = load_str(
+            r#"
+            theme = "dark"
+            [translate]
+            backend = "llamafile"
+            endpoint = "ftp://x"
+            model = "  "
+            target = ""
+            keep_alive_minutes = 0
+            word_with_sentence = "yes"
+            passage_prompt = "no placeholder"
+            word_prompt = "uses {text} not word"
+            "#,
+        );
+        assert_eq!(c.translate, TranslateConfig::default());
+        assert_eq!(c.theme, Theme::Dark);
+        let negative = load_str("[translate]\nkeep_alive_minutes = -3\nmodel = \"m\"\n");
+        assert_eq!(negative.translate.keep_alive_minutes, 30);
+        assert_eq!(negative.translate.model, "m");
+        let not_table = load_str("translate = 3\ntexture_cache_mb = 7\n");
+        assert_eq!(not_table.translate, TranslateConfig::default());
+        assert_eq!(not_table.texture_cache_mb, 7);
+    }
+
+    #[test]
+    fn an_https_endpoint_falls_back_to_the_default() {
+        let t =
+            load_str("[translate]\nendpoint = \"https://example.com\"\nmodel = \"m\"\n").translate;
+        assert_eq!(t.endpoint, None);
+        assert_eq!(t.endpoint(), "http://127.0.0.1:11434");
+        assert_eq!(t.model, "m");
+        let t = load_str("[translate]\nendpoint = \"HTTP://localhost:1\"\n").translate;
+        assert_eq!(t.endpoint(), "HTTP://localhost:1");
+        let t = load_str("[translate]\nendpoint = \"http://\"\n").translate;
+        assert_eq!(t.endpoint, None);
+    }
+
+    #[test]
+    fn translate_settings_roundtrip_through_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let c = Config {
+            translate: TranslateConfig {
+                backend: TranslateBackendKind::OpenAi,
+                endpoint: Some("http://127.0.0.1:9000".into()),
+                model: "x".into(),
+                target: "de".into(),
+                keep_alive_minutes: 3,
+                word_with_sentence: false,
+                passage_prompt: Some("{text}".into()),
+                word_prompt: Some("{word}".into()),
+            },
+            ..Config::default()
+        };
+        c.save(&path).unwrap();
+        assert_eq!(Config::load(&path), c);
     }
 }

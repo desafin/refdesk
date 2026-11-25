@@ -93,6 +93,11 @@ impl Paths {
         self.state_dir.join("search_history.json")
     }
 
+    /// `<state_dir>/translations.json`: remembered translations.
+    pub fn translations_file(&self) -> PathBuf {
+        self.state_dir.join("translations.json")
+    }
+
     /// `<config_dir>/config.toml`.
     pub fn config_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")

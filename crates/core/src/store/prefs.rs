@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::atomic::{Loaded, atomic_write, load_with};
-use super::config::Config;
+use super::config::{Config, TranslateConfig};
 use super::{FORMAT_VERSION, json_version, warn_if_newer};
 
 /// Smallest scroll speed multiplier that is accepted.
@@ -38,6 +38,12 @@ pub struct Prefs {
     /// The scroll speed multiplier picked in the menu. `None` means "use `config.toml`".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scroll_speed: Option<f32>,
+    /// Whether translation mode is on. `None` (never switched) means off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate_mode: Option<bool>,
+    /// The translation model picked in the menu. `None` means "use `config.toml`".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate_model: Option<String>,
 }
 
 impl Default for Prefs {
@@ -45,6 +51,8 @@ impl Default for Prefs {
         Prefs {
             version: FORMAT_VERSION,
             scroll_speed: None,
+            translate_mode: None,
+            translate_model: None,
         }
     }
 }
@@ -71,10 +79,30 @@ impl Prefs {
                     }
                 },
             };
+            let translate_mode = match obj.get("translate_mode") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::Bool(b)) => Some(*b),
+                Some(v) => {
+                    log::warn!("prefs: translate_mode: expected true or false, got {v}; ignored");
+                    None
+                }
+            };
+            let translate_model = match obj.get("translate_model") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(m)) if !m.trim().is_empty() => {
+                    Some(m.trim().to_string())
+                }
+                Some(v) => {
+                    log::warn!("prefs: translate_model: expected a model name, got {v}; ignored");
+                    None
+                }
+            };
             Ok(Loaded {
                 value: Prefs {
                     version: FORMAT_VERSION,
                     scroll_speed,
+                    translate_mode,
+                    translate_model,
                 },
                 dropped: None,
             })
@@ -104,6 +132,31 @@ pub fn clamp_scroll_speed(speed: f32) -> f32 {
 /// allowed range.
 pub fn effective_scroll_speed(prefs: &Prefs, config: &Config) -> f32 {
     clamp_scroll_speed(prefs.scroll_speed.unwrap_or(config.scroll_speed))
+}
+
+/// Whether translation mode is on: the preference, off when it was never set.
+pub fn effective_translate_mode(prefs: &Prefs) -> bool {
+    prefs.translate_mode.unwrap_or(false)
+}
+
+/// The model to translate with: the one picked in the app if there is one, else
+/// `config.toml`'s.
+pub fn effective_translate_model(prefs: &Prefs, config: &TranslateConfig) -> String {
+    prefs
+        .translate_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map_or_else(|| config.model.clone(), str::to_string)
+}
+
+/// `config` with the model replaced by [`effective_translate_model`]: what the backend is built
+/// from.
+pub fn effective_translate_config(prefs: &Prefs, config: &TranslateConfig) -> TranslateConfig {
+    TranslateConfig {
+        model: effective_translate_model(prefs, config),
+        ..config.clone()
+    }
 }
 
 /// The multiplier one step above (`up`) or below `current` in [`SCROLL_SPEED_STEPS`]. A value
@@ -447,5 +500,75 @@ mod tests {
         assert_eq!(line_scroll_speed(3.0), 120.0);
         assert_eq!(line_scroll_speed(1.0), 40.0);
         assert_eq!(multiplier_of_line_scroll_speed(120.0), 3.0);
+    }
+
+    #[test]
+    fn translate_mode_and_model_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            translate_mode: Some(true),
+            translate_model: Some("qwen2.5:7b".into()),
+            ..Prefs::default()
+        };
+        prefs.save(&path).unwrap();
+        assert_eq!(Prefs::load(&path), prefs);
+        let off = Prefs {
+            translate_mode: Some(false),
+            ..Prefs::default()
+        };
+        off.save(&path).unwrap();
+        assert_eq!(Prefs::load(&path), off);
+    }
+
+    #[test]
+    fn a_prefs_file_without_translate_fields_reads_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        fs::write(&path, r#"{"version": 1, "scroll_speed": 3.0}"#).unwrap();
+        let prefs = Prefs::load(&path);
+        assert_eq!(prefs.scroll_speed, Some(3.0));
+        assert_eq!(prefs.translate_mode, None);
+        assert_eq!(prefs.translate_model, None);
+        assert!(!effective_translate_mode(&prefs));
+        // Unset fields are not written.
+        Prefs::default().save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("translate"), "{text}");
+        // Wrong types are dropped.
+        fs::write(&path, r#"{"translate_mode": "on", "translate_model": 5}"#).unwrap();
+        assert_eq!(Prefs::load(&path), Prefs::default());
+        fs::write(&path, r#"{"translate_model": "  "}"#).unwrap();
+        assert_eq!(Prefs::load(&path).translate_model, None);
+    }
+
+    #[test]
+    fn the_picked_model_wins_over_the_config() {
+        let config = TranslateConfig::default();
+        let none = Prefs::default();
+        assert_eq!(
+            effective_translate_model(&none, &config),
+            "translategemma:4b"
+        );
+        let picked = Prefs {
+            translate_model: Some("qwen2.5:7b".into()),
+            ..Prefs::default()
+        };
+        assert_eq!(effective_translate_model(&picked, &config), "qwen2.5:7b");
+        let effective = effective_translate_config(&picked, &config);
+        assert_eq!(effective.model, "qwen2.5:7b");
+        assert_eq!(effective.endpoint(), config.endpoint());
+        let blank = Prefs {
+            translate_model: Some(" ".into()),
+            ..Prefs::default()
+        };
+        assert_eq!(
+            effective_translate_model(&blank, &config),
+            "translategemma:4b"
+        );
+        assert!(effective_translate_mode(&Prefs {
+            translate_mode: Some(true),
+            ..Prefs::default()
+        }));
     }
 }

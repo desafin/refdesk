@@ -21,6 +21,7 @@ xxhash-rust.workspace = true
 unicode-normalization.workspace = true
 png.workspace = true
 regex.workspace = true
+ureq.workspace = true
 
 [features]
 # Test PDF generator (`testutil` module). Enabled for this crate's own tests through the

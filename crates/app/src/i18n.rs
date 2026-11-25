@@ -504,10 +504,12 @@ pub const TABLE: &[Row] = &[
   refdesk [옵션] [폴더] [파일[#page=N]]...
   refdesk --find 글 [폴더] [파일...]
   refdesk --diff 이전.pdf 이후.pdf
+  refdesk --translate 글
 
 옵션:
   --find 글              연 뒤 열린 모든 문서에서 그 글을 찾는다
   --diff A B             두 PDF 를 비교한다
+  --translate 글         설정된 모델로 번역해 출력하고 끝낸다 (창을 띄우지 않는다)
   --no-single-instance   실행 중인 인스턴스를 찾지 않고 새로 띄운다 (개발용)
   --no-restore           마지막 세션을 복원하지 않는다
   -h, --help             이 도움말을 보인다
@@ -520,10 +522,12 @@ pub const TABLE: &[Row] = &[
   refdesk [options] [folder] [file[#page=N]]...
   refdesk --find text [folder] [file...]
   refdesk --diff old.pdf new.pdf
+  refdesk --translate text
 
 Options:
   --find text            search all open documents for the text once they are open
   --diff A B             compare two PDF files
+  --translate text       translate the text with the configured model, print it and exit (no window)
   --no-single-instance   start a new instance without looking for a running one (for development)
   --no-restore           do not restore the last session
   -h, --help             show this help
@@ -562,6 +566,16 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "cli.find_twice",
         "--find 는 한 번만 쓸 수 있습니다",
         "--find can be used only once",
+    ),
+    (
+        "cli.translate_needs_text",
+        "--translate 에는 번역할 글이 필요합니다",
+        "--translate needs the text to translate",
+    ),
+    (
+        "cli.translate_alone",
+        "--translate 는 다른 인자와 함께 쓸 수 없습니다",
+        "--translate cannot be combined with other arguments",
     ),
     (
         "cli.find_with_diff",

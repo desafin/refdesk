@@ -22,12 +22,16 @@ pub mod search_history;
 pub mod session;
 
 pub use atomic::{atomic_write, bad_path, quarantine, read_json_or_default};
-pub use config::{CaptureConfig, Config, DefaultZoom, Language, Theme};
+pub use config::{
+    CaptureConfig, Config, DEFAULT_OLLAMA_ENDPOINT, DEFAULT_OPENAI_ENDPOINT,
+    DEFAULT_TRANSLATE_MODEL, DefaultZoom, Language, Theme, TranslateBackendKind, TranslateConfig,
+};
 pub use docstate::{DocRecord, DocStateDb, MAX_RECENT_FOLDERS, MAX_RECORDS, RecentFolder};
 pub use paths::Paths;
 pub use prefs::{
     BASE_LINE_SCROLL_SPEED, DEFAULT_SCROLL_SPEED, MAX_SCROLL_SPEED, MIN_SCROLL_SPEED, Prefs,
     SCROLL_SPEED_STEPS, ScrollSpeedItem, clamp_scroll_speed, effective_scroll_speed,
+    effective_translate_config, effective_translate_mode, effective_translate_model,
     line_scroll_speed, multiplier_of_line_scroll_speed, scroll_speed_label, scroll_speed_menu,
     step_scroll_speed,
 };

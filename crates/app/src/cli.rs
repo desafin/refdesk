@@ -5,6 +5,7 @@
 //! refdesk [--no-restore] [--no-single-instance] [folder] [file[#page=N]]...
 //! refdesk --find text [folder] [file...]
 //! refdesk --diff old.pdf new.pdf
+//! refdesk --translate text
 //! ```
 //!
 //! Paths stay as typed here. `main` makes them absolute against the current directory before
@@ -34,6 +35,9 @@ pub enum Cli {
     Help,
     /// Print the version and exit with status 0.
     Version,
+    /// Translate the text with the configured model, print it and exit (TR-10). No window, no
+    /// socket.
+    Translate(String),
     /// A mistake in the arguments: print the message and the usage to stderr, exit with status 2.
     Error(String),
 }
@@ -55,6 +59,8 @@ pub fn version_text() -> String {
 ///   combined with files or repeated.
 /// * `--find TEXT` takes the next argument as the text to search all open documents for
 ///   (FIND-12). It must not be empty, cannot be repeated and cannot be combined with `--diff`.
+/// * `--translate TEXT` takes the next argument as the text to translate (TR-10). It must not be
+///   empty and cannot be combined with any other argument.
 /// * `--` ends the options: everything after it is a file, even if it starts with `-`.
 /// * An argument that starts with `-` and is not a known option is an error (a lone `-` is a file
 ///   name). An argument that is not valid UTF-8 is a file without a page request.
@@ -66,8 +72,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
     let mut single_instance = true;
     let mut restore = true;
     let mut options_ended = false;
+    let mut translate: Option<String> = None;
+    // Any argument other than `--translate TEXT` (which must stand alone).
+    let mut other_arguments = false;
 
     while let Some(arg) = args.next() {
+        if !options_ended && arg.to_str() == Some("--translate") {
+            if translate.is_some() {
+                return Cli::Error(tr("cli.translate_alone").to_owned());
+            }
+            let text = args.next().map(|a| a.to_string_lossy().into_owned());
+            match text.filter(|t| !t.trim().is_empty()) {
+                Some(text) => translate = Some(text),
+                None => return Cli::Error(tr("cli.translate_needs_text").to_owned()),
+            }
+            continue;
+        }
+        other_arguments = true;
         if !options_ended && let Some(text) = arg.to_str() {
             match text {
                 "--" => {
@@ -114,6 +135,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
         targets.push(file_target(&arg));
     }
 
+    if let Some(text) = translate {
+        if other_arguments {
+            return Cli::Error(tr("cli.translate_alone").to_owned());
+        }
+        return Cli::Translate(text);
+    }
     let request = match diff {
         Some(_) if !targets.is_empty() => {
             return Cli::Error(tr("cli.diff_with_files").to_owned());
@@ -386,6 +413,7 @@ mod tests {
             "--no-restore",
             "--help",
             "--version",
+            "--translate",
             "#page=",
         ] {
             assert!(text.contains(needle), "usage lacks {needle}");
@@ -442,5 +470,41 @@ mod tests {
         ] {
             assert!(matches!(parse_strs(args), Cli::Error(_)), "{args:?}");
         }
+    }
+
+    #[test]
+    fn translate_takes_the_next_argument_as_the_text() {
+        assert_eq!(
+            parse_strs(&["--translate", "The watchdog supervises."]),
+            Cli::Translate("The watchdog supervises.".to_owned())
+        );
+        // The text may look like an option or a file.
+        assert_eq!(
+            parse_strs(&["--translate", "--diff"]),
+            Cli::Translate("--diff".to_owned())
+        );
+    }
+
+    #[test]
+    fn translate_without_a_text_is_an_error() {
+        assert!(matches!(parse_strs(&["--translate"]), Cli::Error(_)));
+        assert!(matches!(parse_strs(&["--translate", "  "]), Cli::Error(_)));
+    }
+
+    #[test]
+    fn translate_cannot_be_combined_with_other_arguments() {
+        for args in [
+            &["--translate", "x", "a.pdf"][..],
+            &["a.pdf", "--translate", "x"],
+            &["--translate", "x", "--no-single-instance"],
+            &["--no-restore", "--translate", "x"],
+            &["--translate", "x", "--find", "y"],
+            &["--translate", "x", "--diff", "a.pdf", "b.pdf"],
+            &["--translate", "x", "--translate", "y"],
+        ] {
+            assert!(matches!(parse_strs(args), Cli::Error(_)), "{args:?}");
+        }
+        // Help still wins.
+        assert_eq!(parse_strs(&["--translate", "x", "--help"]), Cli::Help);
     }
 }
