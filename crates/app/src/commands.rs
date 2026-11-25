@@ -9,6 +9,7 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 use refdesk_core::ZoomMode;
 
 use crate::action::Action;
+use crate::overlays::palette::PaletteMode;
 use crate::state::{AppState, TabId};
 use crate::windows::dock::SplitDir;
 
@@ -235,6 +236,24 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::ToggleToc),
+    },
+    Command {
+        id: "palette.commands",
+        name_key: "cmd.palette.commands",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::P)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ShowPalette(PaletteMode::Commands)),
+    },
+    Command {
+        id: "palette.quick_open",
+        name_key: "cmd.palette.quick_open",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::P)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ShowPalette(PaletteMode::QuickOpen)),
     },
     Command {
         id: "tab.next",
@@ -498,7 +517,8 @@ fn specificity(shortcut: &KeyboardShortcut) -> u8 {
 /// Call it once per frame. Nothing is consumed while a text field has the keyboard, so typing
 /// goes to the field.
 pub fn handle_shortcuts(ctx: &egui::Context, state: &AppState) -> Option<Action> {
-    if ctx.text_edit_focused() {
+    // While the palette is open it owns the keyboard, including the shortcuts that open it.
+    if ctx.text_edit_focused() || state.palette.open.is_some() {
         return None;
     }
     let mut bindings: Vec<(KeyboardShortcut, &Command)> = COMMANDS

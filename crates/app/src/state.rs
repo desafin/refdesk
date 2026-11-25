@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use refdesk_core::{DocumentHandle, ViewState};
 
 use crate::action::Action;
+use crate::overlays::palette::PaletteState;
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::views::preload::Preloader;
@@ -268,6 +269,8 @@ pub struct AppState {
     pub file_dialog_requested: bool,
     /// Recently closed PDF tabs, oldest first, at most [`MAX_CLOSED_TABS`].
     pub closed_tabs: Vec<ClosedTab>,
+    /// The command palette and quick open (WP-43).
+    pub palette: PaletteState,
     next_window: u64,
 }
 
@@ -294,6 +297,7 @@ impl AppState {
             actions: Vec::new(),
             file_dialog_requested: false,
             closed_tabs: Vec::new(),
+            palette: PaletteState::default(),
             next_window: 1,
         }
     }

@@ -194,6 +194,14 @@ pub fn show_window(
     window_index: usize,
     queue: &mut Vec<Action>,
 ) {
+    // The palette is drawn first so it takes its keys before the views behind it.
+    crate::overlays::palette::show(
+        ui.ctx(),
+        state,
+        window_index,
+        queue,
+        &crate::overlays::palette::no_recent_documents,
+    );
     let Some(window) = state.windows.get(window_index) else {
         return;
     };

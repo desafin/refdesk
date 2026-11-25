@@ -179,6 +179,21 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "--diff cannot be combined with other files",
     ),
     ("cmd.view.goto_page", "쪽으로 이동…", "Go to Page…"),
+    ("cmd.palette.commands", "명령 팔레트…", "Command Palette…"),
+    ("cmd.palette.quick_open", "빠른 열기…", "Quick Open…"),
+    (
+        "palette.hint_commands",
+        "명령 이름을 입력하세요",
+        "Type a command",
+    ),
+    (
+        "palette.hint_quick_open",
+        "열린 탭이나 최근 문서의 이름을 입력하세요",
+        "Type the name of an open tab or a recent document",
+    ),
+    ("palette.no_match", "일치하는 항목이 없습니다", "No matches"),
+    ("palette.recent", "최근 문서", "Recent"),
+    ("palette.window_n", "창 {n}", "Window {n}"),
     (
         "status.page",
         "{page} / {count} 쪽",

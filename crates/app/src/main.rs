@@ -5,6 +5,7 @@ mod app;
 mod cli;
 mod commands;
 mod i18n;
+mod overlays;
 mod panels;
 mod state;
 mod theme;

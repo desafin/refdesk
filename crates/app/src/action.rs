@@ -9,6 +9,7 @@ use std::sync::Arc;
 use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
+use crate::overlays::palette::{self, PaletteMode};
 use crate::panels::status_bar::GotoInput;
 use crate::state::{AppState, ClosedTab, DocId, PdfTab, Tab, TabId, WindowId, normalize_path};
 use crate::views::pdf_view::PdfViewUiState;
@@ -62,6 +63,8 @@ pub enum Action {
     },
     /// Open the page number field of the status bar for a PDF tab.
     ShowGoToPage(TabId),
+    /// Open the palette with this list, or close it when it already shows it (CMD-1, CMD-2).
+    ShowPalette(PaletteMode),
     /// Move a PDF tab to the top of a page (zero-based; limited to the document). Recorded in
     /// the history as a long jump.
     GoToPage {
@@ -134,7 +137,17 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::CloseTab(tab) => close_tab(state, tab),
         Action::CloseOtherTabs(tab) => close_other_tabs(state, tab),
         Action::ReopenClosedTab => reopen_closed_tab(state, ctx),
-        Action::FocusTab(tab) => focus_tab(state, tab),
+        Action::FocusTab(tab) => {
+            let before = state.focused_window_index();
+            focus_tab(state, tab);
+            // Quick open can pick a tab of another window: bring that window forward too.
+            if let Some(w) = state.window_of(tab)
+                && w != before
+            {
+                let id = state.windows[w].id;
+                windows::raise(ctx, state, id);
+            }
+        }
         Action::DuplicateTab(tab) => {
             duplicate_tab(state, tab);
         }
@@ -161,6 +174,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 pdf.ui.goto = Some(GotoInput::default());
             }
         }
+        Action::ShowPalette(mode) => palette::toggle(state, mode, ctx),
         Action::GoToPage { tab, page } => go_to_page(state, tab, page),
         Action::NewWindow => {
             transfer::new_window(state);
@@ -190,6 +204,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         }
         Action::Quit => quit(ctx),
     }
+    palette::after_dispatch(state);
 }
 
 /// Closes the main window, which ends the application (the state is saved on the way out).
