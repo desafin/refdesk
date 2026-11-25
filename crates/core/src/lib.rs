@@ -13,6 +13,7 @@ pub mod link;
 pub mod model;
 pub mod nav;
 pub mod outline;
+pub mod search;
 pub mod store;
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;
@@ -31,6 +32,9 @@ pub use model::{Location, ViewState, ZoomMode};
 pub use nav::dest::{DestKind, Destination};
 pub use nav::history::{History, Place};
 pub use outline::{Outline, OutlineItem, OutlineNode};
+pub use search::{
+    MatchPart, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery, SearchSnapshot,
+};
 pub use store::{
     CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths,
     Session, SessionTab, SessionWindow, Theme, atomic_write,

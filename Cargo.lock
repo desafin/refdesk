@@ -3123,6 +3123,7 @@ dependencies = [
  "notify",
  "png",
  "refdesk-core",
+ "regex",
  "serde",
  "serde_json",
  "similar",
