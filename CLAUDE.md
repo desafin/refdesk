@@ -20,6 +20,20 @@
 - `cargo run -p refdesk -- 파일.pdf` — 실행. **창이 사용자 화면에 뜬다.** 자동 검증에는 쓰지 않는다.
 - `scripts/clone-references.sh` — `references/` 를 다시 받는다.
 
+### 앱을 확인용으로 띄울 때
+
+앱은 세션과 문서 기록을 `~/.local/state/refdesk/` 에 저장하고, 실행 중인 인스턴스가 있으면 거기로 파일을 넘긴다.
+확인하려고 띄울 때는 사용자의 실제 상태를 건드리지 않게 임시 폴더와 `--no-single-instance` 를 쓴다.
+
+```sh
+X=$(mktemp -d); XDG_STATE_HOME=$X/state XDG_CONFIG_HOME=$X/config \
+  ./target/debug/refdesk --no-single-instance 파일.pdf
+```
+
+- `target/debug/refdesk` 는 주 작업 공간에서 `cargo build -p refdesk` 를 한 직후에만 실행한다(worktree 들이 `target/` 을 공유한다).
+- 이 머신(GNOME Wayland)에서 `orca computer` 는 화면 캡처, 키 입력, 스크롤을 지원하지 않는다. 되는 것은 접근성 트리 읽기(`get-app-state`)와 요소 클릭(`click --element-index`)이다. 메뉴 막대, 상태 표시줄, 탭은 트리에 보이고, 쪽 그림과 팝업 메뉴는 보이지 않는다.
+- 프로세스를 끝낼 때 `pkill -f <패턴>` 을 쓰면 그 명령을 실행하는 셸까지 죽는다. `pgrep -x refdesk` 로 찾고 PID 로 끝낸다.
+
 ## 반드시 지킬 것
 
 - `docs/ARCHITECTURE.md` §1 의 규칙. 자주 걸리는 것:
