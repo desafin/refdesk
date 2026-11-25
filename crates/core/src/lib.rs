@@ -4,6 +4,7 @@
 //! egui, eframe or winit (rule R-4 in `docs/ARCHITECTURE.md`). Modules are added by later
 //! work packages.
 
+pub mod diff;
 pub mod engine;
 pub mod fingerprint;
 pub mod geom;
