@@ -8,49 +8,10 @@ use std::sync::Arc;
 
 use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
 
+// `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
+pub use refdesk_core::OpenTarget;
+
 use crate::state::{AppState, PdfTab, Tab, TabId, normalize_path};
-
-/// A file to open, optionally at a page.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OpenTarget {
-    /// The file. May be relative; it is normalized when opened.
-    pub path: PathBuf,
-    /// Zero-based page to show first.
-    pub page: Option<u32>,
-}
-
-/// The marker that starts a page request in a command-line argument.
-const PAGE_MARKER: &str = "#page=";
-
-impl OpenTarget {
-    /// Parses a command-line argument: `a.pdf` or `a.pdf#page=12`.
-    ///
-    /// The page number is 1-based for people and becomes 0-based here. A fragment that is not a
-    /// positive number is dropped (and logged) so the file still opens, at its first page.
-    /// Only the exact marker `#page=` counts, so a file name that contains `#` is taken whole.
-    pub fn parse(arg: &str) -> OpenTarget {
-        if let Some(at) = arg.rfind(PAGE_MARKER) {
-            let (path, rest) = (&arg[..at], &arg[at + PAGE_MARKER.len()..]);
-            if !path.is_empty() {
-                let page = match rest.parse::<u32>() {
-                    Ok(n) if n >= 1 => Some(n - 1),
-                    _ => {
-                        log::warn!("ignoring invalid page number in argument {arg:?}");
-                        None
-                    }
-                };
-                return OpenTarget {
-                    path: PathBuf::from(path),
-                    page,
-                };
-            }
-        }
-        OpenTarget {
-            path: PathBuf::from(arg),
-            page: None,
-        }
-    }
-}
 
 /// Something the user (or the outside world) asked for.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +36,13 @@ pub enum Action {
         tab: TabId,
         /// The new zoom.
         zoom: ZoomMode,
+    },
+    /// Compare two documents.
+    StartDiff {
+        /// The older document.
+        left: PathBuf,
+        /// The newer document.
+        right: PathBuf,
     },
     /// Close the application.
     Quit,
@@ -106,6 +74,13 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::SetZoom { tab, zoom } => {
             if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
                 pdf.view.zoom = zoom;
+            }
+        }
+        Action::StartDiff { left, right } => {
+            // The comparison view is built by a later work package. Until then the two documents
+            // are only opened as tabs, left first, so the right one ends up focused.
+            for path in [left, right] {
+                open_file(state, OpenTarget { path, page: None }, ctx);
             }
         }
         Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -520,6 +495,35 @@ mod tests {
     }
 
     #[test]
+    fn start_diff_opens_both_documents_as_tabs() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(
+            &mut state,
+            Action::StartDiff {
+                left: PathBuf::from("/refdesk-test/old.pdf"),
+                right: PathBuf::from("/refdesk-test/new.pdf"),
+            },
+            &ctx,
+        );
+        assert_eq!(state.docs.len(), 2);
+        let tabs = state.main_window().tabs.clone();
+        assert_eq!(tabs.len(), 2);
+        let path_of = |tab: TabId| {
+            let pdf = state.tabs.pdf(tab).expect("a pdf tab");
+            state
+                .docs
+                .get(pdf.doc)
+                .expect("document")
+                .path()
+                .to_path_buf()
+        };
+        assert_eq!(path_of(tabs[0]), PathBuf::from("/refdesk-test/old.pdf"));
+        assert_eq!(path_of(tabs[1]), PathBuf::from("/refdesk-test/new.pdf"));
+        assert_eq!(state.focus, Some(tabs[1]));
+    }
+
+    #[test]
     fn dispatch_queued_runs_actions_in_order_and_empties_the_queue() {
         let ctx = egui::Context::default();
         let mut state = AppState::new();
@@ -531,56 +535,5 @@ mod tests {
         assert!(state.actions.is_empty());
         assert_eq!(state.docs.len(), 1);
         assert!(state.file_dialog_requested);
-    }
-
-    #[test]
-    fn parse_plain_path() {
-        let t = OpenTarget::parse("docs/a.pdf");
-        assert_eq!(t.path, PathBuf::from("docs/a.pdf"));
-        assert_eq!(t.page, None);
-    }
-
-    #[test]
-    fn parse_page_fragment_is_one_based_in_and_zero_based_out() {
-        let t = OpenTarget::parse("a.pdf#page=12");
-        assert_eq!(t.path, PathBuf::from("a.pdf"));
-        assert_eq!(t.page, Some(11));
-        assert_eq!(OpenTarget::parse("a.pdf#page=1").page, Some(0));
-    }
-
-    #[test]
-    fn parse_invalid_page_values_open_the_file_at_the_start() {
-        for arg in [
-            "a.pdf#page=abc",
-            "a.pdf#page=",
-            "a.pdf#page=0",
-            "a.pdf#page=-3",
-            "a.pdf#page=99999999999999",
-        ] {
-            let t = OpenTarget::parse(arg);
-            assert_eq!(t.path, PathBuf::from("a.pdf"), "{arg}");
-            assert_eq!(t.page, None, "{arg}");
-        }
-    }
-
-    #[test]
-    fn parse_keeps_a_hash_inside_the_file_name() {
-        let t = OpenTarget::parse("C#notes.pdf");
-        assert_eq!(t.path, PathBuf::from("C#notes.pdf"));
-        assert_eq!(t.page, None);
-
-        let t = OpenTarget::parse("C#notes.pdf#page=7");
-        assert_eq!(t.path, PathBuf::from("C#notes.pdf"));
-        assert_eq!(t.page, Some(6));
-
-        // Not the exact marker: part of the name.
-        let t = OpenTarget::parse("a.pdf#pages=7");
-        assert_eq!(t.path, PathBuf::from("a.pdf#pages=7"));
-        assert_eq!(t.page, None);
-
-        // No file name before the marker: take the whole argument as the path.
-        let t = OpenTarget::parse("#page=7");
-        assert_eq!(t.path, PathBuf::from("#page=7"));
-        assert_eq!(t.page, None);
     }
 }

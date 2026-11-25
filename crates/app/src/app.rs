@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use egui::{CentralPanel, Panel, ScrollArea, Ui};
-use refdesk_core::{DocStatus, DocumentHandle};
+use refdesk_core::{DocStatus, DocumentHandle, IpcListener, IpcRequest};
 
 use crate::action::{Action, OpenTarget, dispatch_queued};
 use crate::commands::{self, MenuGroup};
@@ -22,19 +22,30 @@ pub struct RefdeskApp {
     state: AppState,
     /// Receives the files chosen in the dialog. `Some` while a dialog is open.
     dialog: Option<Receiver<Vec<PathBuf>>>,
+    /// Requests from other `refdesk` processes (`refdesk_core::ipc`).
+    remote: Receiver<IpcRequest>,
+    /// Keeps the socket open for as long as the app lives.
+    _listener: Option<IpcListener>,
 }
 
 impl RefdeskApp {
-    /// Creates the app and queues `initial` files (from the command line) for opening.
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Vec<OpenTarget>) -> RefdeskApp {
+    /// Creates the app. `initial` is this process's own command line; it is handled like a
+    /// request from another process, but the window is not raised. `remote` delivers the requests
+    /// of other processes; `listener` is the open socket they arrive on, if there is one.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial: IpcRequest,
+        remote: Receiver<IpcRequest>,
+        listener: Option<IpcListener>,
+    ) -> RefdeskApp {
         theme::install(&cc.egui_ctx);
         let mut state = AppState::new();
-        if !initial.is_empty() {
-            state.actions.push(Action::OpenFiles(initial));
-        }
+        state.actions.extend(actions_for_request(initial));
         RefdeskApp {
             state,
             dialog: None,
+            remote,
+            _listener: listener,
         }
     }
 }
@@ -45,6 +56,9 @@ impl eframe::App for RefdeskApp {
             self.dialog = Some(spawn_file_dialog(ctx));
         }
         poll_file_dialog(&mut self.dialog, &mut self.state.actions);
+        if poll_remote_requests(&self.remote, &mut self.state.actions) {
+            bring_to_front(ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -62,6 +76,36 @@ impl eframe::App for RefdeskApp {
         self.state.actions.append(&mut queue);
         dispatch_queued(&mut self.state, &ctx);
     }
+}
+
+/// What a request asks the application to do.
+fn actions_for_request(request: IpcRequest) -> Vec<Action> {
+    match request {
+        IpcRequest::Open { targets } if targets.is_empty() => Vec::new(),
+        IpcRequest::Open { targets } => vec![Action::OpenFiles(targets)],
+        IpcRequest::Diff { left, right } => vec![Action::StartDiff { left, right }],
+    }
+}
+
+/// Moves the requests that other processes have sent so far into `actions`. Returns whether there
+/// was any (even an empty `Open`, which only asks for the window to come forward).
+fn poll_remote_requests(remote: &Receiver<IpcRequest>, actions: &mut Vec<Action>) -> bool {
+    let mut any = false;
+    while let Ok(request) = remote.try_recv() {
+        any = true;
+        actions.extend(actions_for_request(request));
+    }
+    any
+}
+
+/// Asks for the window to be shown. Wayland compositors may refuse a focus request from a window
+/// that was not just activated, so the user's attention is requested too (GNOME then shows its
+/// "is ready" notice).
+fn bring_to_front(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+        egui::UserAttentionType::Informational,
+    ));
 }
 
 /// Opens the file chooser on its own thread so the UI never waits for it (rule R-1). The result
@@ -312,5 +356,113 @@ mod tests {
         let mut actions = Vec::new();
         poll_file_dialog(&mut dialog, &mut actions);
         assert!(dialog.is_none() && actions.is_empty());
+    }
+
+    fn target(path: &str, page: Option<u32>) -> OpenTarget {
+        OpenTarget {
+            path: PathBuf::from(path),
+            page,
+        }
+    }
+
+    #[test]
+    fn an_open_request_becomes_open_files() {
+        let targets = vec![
+            target("/refdesk-test/a.pdf", Some(4)),
+            target("/b.pdf", None),
+        ];
+        assert_eq!(
+            actions_for_request(IpcRequest::Open {
+                targets: targets.clone()
+            }),
+            vec![Action::OpenFiles(targets)]
+        );
+    }
+
+    #[test]
+    fn an_empty_open_request_queues_nothing() {
+        assert!(actions_for_request(IpcRequest::Open { targets: vec![] }).is_empty());
+    }
+
+    #[test]
+    fn a_diff_request_becomes_start_diff() {
+        assert_eq!(
+            actions_for_request(IpcRequest::Diff {
+                left: PathBuf::from("/old.pdf"),
+                right: PathBuf::from("/new.pdf"),
+            }),
+            vec![Action::StartDiff {
+                left: PathBuf::from("/old.pdf"),
+                right: PathBuf::from("/new.pdf"),
+            }]
+        );
+    }
+
+    #[test]
+    fn remote_requests_are_drained_in_order_and_report_that_the_window_is_wanted() {
+        let (tx, rx) = mpsc::channel();
+        let mut actions = Vec::new();
+
+        // Nothing sent: nothing happens and the window is left alone.
+        assert!(!poll_remote_requests(&rx, &mut actions));
+        assert!(actions.is_empty());
+
+        tx.send(IpcRequest::Open {
+            targets: vec![target("/a.pdf", None)],
+        })
+        .expect("receiver alive");
+        tx.send(IpcRequest::Diff {
+            left: PathBuf::from("/b.pdf"),
+            right: PathBuf::from("/c.pdf"),
+        })
+        .expect("receiver alive");
+        assert!(poll_remote_requests(&rx, &mut actions));
+        assert_eq!(
+            actions,
+            vec![
+                Action::OpenFiles(vec![target("/a.pdf", None)]),
+                Action::StartDiff {
+                    left: PathBuf::from("/b.pdf"),
+                    right: PathBuf::from("/c.pdf"),
+                },
+            ]
+        );
+        assert!(
+            !poll_remote_requests(&rx, &mut actions),
+            "channel was emptied"
+        );
+
+        // An empty open request queues nothing but still asks for the window.
+        let mut actions = Vec::new();
+        tx.send(IpcRequest::Open { targets: vec![] })
+            .expect("receiver alive");
+        assert!(poll_remote_requests(&rx, &mut actions));
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn a_closed_remote_channel_is_not_a_request() {
+        let (tx, rx) = mpsc::channel::<IpcRequest>();
+        drop(tx);
+        let mut actions = Vec::new();
+        assert!(!poll_remote_requests(&rx, &mut actions));
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn bringing_the_window_to_the_front_sends_focus_and_attention_commands() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |_ui| bring_to_front(&ctx));
+        let commands: Vec<_> = output
+            .viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter().cloned())
+            .collect();
+        output.drop_without_applying_deltas();
+        assert!(commands.contains(&egui::ViewportCommand::Focus));
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational)
+        )));
     }
 }

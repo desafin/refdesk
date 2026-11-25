@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=refdesk
+Comment=Read several software documentation PDFs side by side
+Comment[ko]=소프트웨어 기술문서 PDF 를 여러 개 띄워 놓고 읽는 뷰어
+Exec=refdesk %F
+Icon=refdesk
+MimeType=application/pdf;
+Categories=Office;Viewer;
+StartupWMClass=refdesk
+Terminal=false

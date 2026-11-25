@@ -7,6 +7,7 @@
 pub mod engine;
 pub mod fingerprint;
 pub mod geom;
+pub mod ipc;
 pub mod layout;
 pub mod link;
 pub mod model;
@@ -23,6 +24,7 @@ pub use engine::{
 };
 pub use fingerprint::{FileStamp, fingerprint_file, stamp};
 pub use geom::{Point, Quad, Rect, Size};
+pub use ipc::{IpcListener, IpcRequest, OpenTarget};
 pub use layout::{LayoutParams, PageLayout};
 pub use link::{Link, LinkTarget, RawLink};
 pub use model::{Location, ViewState, ZoomMode};

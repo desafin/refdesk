@@ -52,6 +52,53 @@ pub const TABLE: &[Row] = &[
     ("doc.failed", "열 수 없습니다: {}", "Could not open: {}"),
     ("dialog.title", "PDF 파일 열기", "Open PDF files"),
     ("dialog.filter", "PDF 문서", "PDF documents"),
+    (
+        "cli.help",
+        "사용법:
+  refdesk [옵션] [파일[#page=N]]...
+  refdesk --diff 이전.pdf 이후.pdf
+
+옵션:
+  --diff A B             두 PDF 를 비교한다
+  --no-single-instance   실행 중인 인스턴스를 찾지 않고 새로 띄운다 (개발용)
+  -h, --help             이 도움말을 보인다
+  -V, --version          버전을 보인다
+  --                     이 뒤의 인자는 모두 파일로 본다
+
+이미 실행 중이면 새 창을 띄우지 않고 그 창에 탭으로 연다.",
+        "Usage:
+  refdesk [options] [file[#page=N]]...
+  refdesk --diff old.pdf new.pdf
+
+Options:
+  --diff A B             compare two PDF files
+  --no-single-instance   start a new instance without looking for a running one (for development)
+  -h, --help             show this help
+  -V, --version          show the version
+  --                     treat everything after it as a file
+
+If refdesk is already running, the files open as tabs in its window instead of a new one.",
+    ),
+    (
+        "cli.unknown_option",
+        "알 수 없는 옵션: {}",
+        "unknown option: {}",
+    ),
+    (
+        "cli.diff_needs_two",
+        "--diff 에는 파일 두 개가 필요합니다",
+        "--diff needs two files",
+    ),
+    (
+        "cli.diff_twice",
+        "--diff 는 한 번만 쓸 수 있습니다",
+        "--diff can be used only once",
+    ),
+    (
+        "cli.diff_with_files",
+        "--diff 는 다른 파일과 함께 쓸 수 없습니다",
+        "--diff cannot be combined with other files",
+    ),
 ];
 
 /// Picks the language from the value of `LANG`.
