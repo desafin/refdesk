@@ -179,6 +179,23 @@ pub const TABLE: &[Row] = &[
     ("cmd.view.zoom_reset", "100%", "Actual Size"),
     ("cmd.view.fit_width", "폭 맞춤", "Fit Width"),
     ("cmd.view.fit_page", "쪽 맞춤", "Fit Page"),
+    (
+        "cmd.view.scroll_faster",
+        "스크롤 속도 높이기",
+        "Increase Scroll Speed",
+    ),
+    (
+        "cmd.view.scroll_slower",
+        "스크롤 속도 낮추기",
+        "Decrease Scroll Speed",
+    ),
+    ("menu.scroll_speed", "스크롤 속도", "Scroll Speed"),
+    (
+        "menu.scroll_speed_default",
+        "기본값으로",
+        "Reset to Default",
+    ),
+    ("status.scroll_speed", "스크롤 속도 {}", "Scroll speed {}"),
     ("cmd.app.quit", "종료", "Quit"),
     ("cmd.view.toggle_toc", "목차 패널", "Table of Contents"),
     (

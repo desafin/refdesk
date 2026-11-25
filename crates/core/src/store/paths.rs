@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// The directories and files refdesk uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paths {
-    /// Holds `session.json` and `documents.json`.
+    /// Holds `session.json`, `documents.json` and `prefs.json`.
     pub state_dir: PathBuf,
     /// Holds `config.toml`.
     pub config_dir: PathBuf,
@@ -81,6 +81,11 @@ impl Paths {
     /// `<state_dir>/documents.json`.
     pub fn documents_file(&self) -> PathBuf {
         self.state_dir.join("documents.json")
+    }
+
+    /// `<state_dir>/prefs.json`.
+    pub fn prefs_file(&self) -> PathBuf {
+        self.state_dir.join("prefs.json")
     }
 
     /// `<config_dir>/config.toml`.

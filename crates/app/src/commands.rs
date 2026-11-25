@@ -207,6 +207,12 @@ fn set_zoom(state: &AppState, zoom: ZoomMode) -> Option<Action> {
     Some(Action::SetZoom { tab, zoom })
 }
 
+/// Sets the scroll speed one step up or down the menu's list (VIEW-12).
+fn scroll_speed_step(state: &AppState, up: bool) -> Option<Action> {
+    let speed = refdesk_core::step_scroll_speed(state.scroll_speed(), up);
+    Some(Action::SetScrollSpeed(Some(speed)))
+}
+
 /// The command table. Order is the order within each menu.
 pub static COMMANDS: &[Command] = &[
     Command {
@@ -334,6 +340,24 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_zoom_focus,
         action: |s| set_zoom(s, ZoomMode::FitPage),
+    },
+    Command {
+        id: "view.scroll_faster",
+        name_key: "cmd.view.scroll_faster",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |s| scroll_speed_step(s, true),
+    },
+    Command {
+        id: "view.scroll_slower",
+        name_key: "cmd.view.scroll_slower",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |s| scroll_speed_step(s, false),
     },
     Command {
         id: "nav.back",
@@ -1514,6 +1538,52 @@ mod tests {
             lookup(Lang::Ko, command.name_key),
             Some("절 경로 표시 켜기/끄기")
         );
+    }
+
+    #[test]
+    fn the_scroll_speed_commands_are_in_the_view_menu_without_shortcuts() {
+        for id in ["view.scroll_faster", "view.scroll_slower"] {
+            let command = command(id).expect("command");
+            assert_eq!(command.menu, MenuGroup::View);
+            assert!(in_menu(MenuGroup::View).any(|c| c.id == id));
+            assert_eq!(command.all_shortcuts().count(), 0, "{id}");
+            for lang in [Lang::Ko, Lang::En] {
+                assert!(lookup(lang, command.name_key).is_some());
+            }
+        }
+        assert_eq!(
+            lookup(Lang::Ko, "cmd.view.scroll_faster"),
+            Some("스크롤 속도 높이기")
+        );
+        assert_eq!(
+            lookup(Lang::Ko, "cmd.view.scroll_slower"),
+            Some("스크롤 속도 낮추기")
+        );
+    }
+
+    #[test]
+    fn the_scroll_speed_commands_step_through_the_list() {
+        let mut state = AppState::new();
+        let faster = find("view.scroll_faster");
+        let slower = find("view.scroll_slower");
+        // 2.5 is the default.
+        assert_eq!(faster.run(&state), Some(Action::SetScrollSpeed(Some(3.0))));
+        assert_eq!(slower.run(&state), Some(Action::SetScrollSpeed(Some(2.0))));
+        state.prefs.scroll_speed = Some(8.0);
+        assert_eq!(faster.run(&state), Some(Action::SetScrollSpeed(Some(8.0))));
+        state.prefs.scroll_speed = Some(0.5);
+        assert_eq!(slower.run(&state), Some(Action::SetScrollSpeed(Some(0.5))));
+        state.prefs.scroll_speed = Some(2.2);
+        assert_eq!(faster.run(&state), Some(Action::SetScrollSpeed(Some(2.5))));
+        assert_eq!(slower.run(&state), Some(Action::SetScrollSpeed(Some(2.0))));
+    }
+
+    #[test]
+    fn the_scroll_speed_commands_are_in_the_palette_list() {
+        // The palette lists every row of the table.
+        for id in ["view.scroll_faster", "view.scroll_slower"] {
+            assert!(COMMANDS.iter().any(|c| c.id == id));
+        }
     }
 
     fn find(id: &str) -> &'static Command {

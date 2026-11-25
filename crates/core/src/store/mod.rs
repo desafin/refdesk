@@ -17,12 +17,19 @@ pub mod atomic;
 pub mod config;
 pub mod docstate;
 pub mod paths;
+pub mod prefs;
 pub mod session;
 
 pub use atomic::{atomic_write, bad_path, quarantine, read_json_or_default};
 pub use config::{CaptureConfig, Config, DefaultZoom, Language, Theme};
 pub use docstate::{DocRecord, DocStateDb, MAX_RECENT_FOLDERS, MAX_RECORDS, RecentFolder};
 pub use paths::Paths;
+pub use prefs::{
+    BASE_LINE_SCROLL_SPEED, DEFAULT_SCROLL_SPEED, MAX_SCROLL_SPEED, MIN_SCROLL_SPEED, Prefs,
+    SCROLL_SPEED_STEPS, ScrollSpeedItem, clamp_scroll_speed, effective_scroll_speed,
+    line_scroll_speed, multiplier_of_line_scroll_speed, scroll_speed_label, scroll_speed_menu,
+    step_scroll_speed,
+};
 pub use session::{LayoutNode, Session, SessionTab, SessionWindow, SessionWorkspace};
 
 /// The format version written to every stored file.

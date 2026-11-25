@@ -41,8 +41,10 @@ pub use search::{
     MatchPart, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery, SearchSnapshot,
 };
 pub use store::{
-    CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths,
-    RecentFolder, Session, SessionTab, SessionWindow, SessionWorkspace, Theme, atomic_write,
+    CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths, Prefs,
+    RecentFolder, ScrollSpeedItem, Session, SessionTab, SessionWindow, SessionWorkspace, Theme,
+    atomic_write, clamp_scroll_speed, effective_scroll_speed, line_scroll_speed,
+    multiplier_of_line_scroll_speed, scroll_speed_label, scroll_speed_menu, step_scroll_speed,
 };
 pub use text::{
     CopyOptions, PageText, Selection, TextBlock, TextChar, TextLine, TextPos, selection_text,

@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::atomic::{Loaded, atomic_write, load_with};
+use super::prefs::{DEFAULT_SCROLL_SPEED, MAX_SCROLL_SPEED, MIN_SCROLL_SPEED};
 use super::{FORMAT_VERSION, warn_if_newer};
 use crate::model::ZoomMode;
 use crate::store::paths::Paths;
@@ -161,6 +162,10 @@ pub struct Config {
     pub default_zoom: DefaultZoom,
     /// Budget of the page texture cache in MiB.
     pub texture_cache_mb: u32,
+    /// Scroll speed multiplier (0.25 to 10; 1 is egui's default of 40 logical pixels per wheel
+    /// notch). A value picked in the app's menu (`prefs.json`) wins over this one.
+    #[serde(serialize_with = "serialize_scroll_speed")]
+    pub scroll_speed: f32,
     /// `[capture]` table.
     pub capture: CaptureConfig,
     /// `[keys]` table: command identifier to shortcut text. The app interprets the text.
@@ -176,6 +181,7 @@ impl Default for Config {
             restore_session: true,
             default_zoom: DefaultZoom::default(),
             texture_cache_mb: 2048,
+            scroll_speed: DEFAULT_SCROLL_SPEED,
             capture: CaptureConfig::default(),
             keys: BTreeMap::new(),
         }
@@ -232,6 +238,7 @@ impl Config {
             restore_session: take(table, "restore_session", d.restore_session, notes),
             default_zoom: take(table, "default_zoom", d.default_zoom, notes),
             texture_cache_mb: take(table, "texture_cache_mb", d.texture_cache_mb, notes),
+            scroll_speed: scroll_speed_from(table, notes),
             capture: d.capture,
             keys: BTreeMap::new(),
         };
@@ -270,6 +277,25 @@ impl Config {
         }
         config
     }
+}
+
+/// `scroll_speed`: a number from 0.25 to 10, else the default.
+fn scroll_speed_from(table: &toml::Table, notes: &mut Vec<String>) -> f32 {
+    let speed = take(table, "scroll_speed", DEFAULT_SCROLL_SPEED, notes);
+    if (MIN_SCROLL_SPEED..=MAX_SCROLL_SPEED).contains(&speed) {
+        speed
+    } else {
+        // A value of the wrong type already gave the default (in range), so this is a number.
+        notes.push(format!(
+            "scroll_speed: {speed} is not between {MIN_SCROLL_SPEED} and {MAX_SCROLL_SPEED}"
+        ));
+        DEFAULT_SCROLL_SPEED
+    }
+}
+
+/// Writes the multiplier without the noise of the f32 to f64 conversion (2.2, not 2.2000000477).
+fn serialize_scroll_speed<S: Serializer>(speed: &f32, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64((f64::from(*speed) * 100.0).round() / 100.0)
 }
 
 /// The value at `key` converted to `T`, or `default` (and a note) if it does not convert.

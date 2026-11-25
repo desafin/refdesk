@@ -538,16 +538,18 @@ pub enum NavKey {
     End,
 }
 
-/// The scroll offset after a key, before clamping (End uses the given maximum).
-pub fn key_scroll(key: NavKey, scroll: Point, viewport: Size, max: Point) -> Point {
+/// The scroll offset after a key, before clamping (End uses the given maximum). The arrow keys
+/// move `ARROW_STEP` times `speed`, the scroll speed multiplier; the other keys ignore it.
+pub fn key_scroll(key: NavKey, scroll: Point, viewport: Size, max: Point, speed: f32) -> Point {
     let page = viewport.h * PAGE_STEP;
+    let arrow = ARROW_STEP * speed;
     match key {
         NavKey::PageDown => Point::new(scroll.x, scroll.y + page),
         NavKey::PageUp => Point::new(scroll.x, scroll.y - page),
-        NavKey::Down => Point::new(scroll.x, scroll.y + ARROW_STEP),
-        NavKey::Up => Point::new(scroll.x, scroll.y - ARROW_STEP),
-        NavKey::Left => Point::new(scroll.x - ARROW_STEP, scroll.y),
-        NavKey::Right => Point::new(scroll.x + ARROW_STEP, scroll.y),
+        NavKey::Down => Point::new(scroll.x, scroll.y + arrow),
+        NavKey::Up => Point::new(scroll.x, scroll.y - arrow),
+        NavKey::Left => Point::new(scroll.x - arrow, scroll.y),
+        NavKey::Right => Point::new(scroll.x + arrow, scroll.y),
         NavKey::Home => Point::new(scroll.x, 0.0),
         NavKey::End => Point::new(scroll.x, max.y),
     }
@@ -794,10 +796,15 @@ fn show_document(
                 .map(|(_, _, nav)| *nav)
                 .collect()
         });
+        // The wheel speed lives in egui's options (set by `SetScrollSpeed`); the arrow keys use
+        // the same multiplier.
+        let speed = refdesk_core::multiplier_of_line_scroll_speed(
+            ui.ctx().options(|o| o.input_options.line_scroll_speed),
+        );
         for nav in pressed {
             if let Some(layout) = state.layout() {
                 let max = layout.max_scroll(viewport);
-                let to = key_scroll(nav, state.scroll(), viewport, max);
+                let to = key_scroll(nav, state.scroll(), viewport, max, speed);
                 state.scroll_to(to);
             }
         }
@@ -1844,15 +1851,18 @@ mod tests {
         let vp = Size::new(800.0, 600.0);
         let max = Point::new(100.0, 9000.0);
         let at = Point::new(10.0, 1000.0);
-        assert_eq!(key_scroll(NavKey::PageDown, at, vp, max).y, 1540.0);
-        assert_eq!(key_scroll(NavKey::PageUp, at, vp, max).y, 460.0);
-        assert_eq!(key_scroll(NavKey::Down, at, vp, max).y, 1048.0);
-        assert_eq!(key_scroll(NavKey::Up, at, vp, max).y, 952.0);
-        assert_eq!(key_scroll(NavKey::Left, at, vp, max).x, -38.0);
-        assert_eq!(key_scroll(NavKey::Right, at, vp, max).x, 58.0);
-        assert_eq!(key_scroll(NavKey::Home, at, vp, max), Point::new(10.0, 0.0));
+        assert_eq!(key_scroll(NavKey::PageDown, at, vp, max, 1.0).y, 1540.0);
+        assert_eq!(key_scroll(NavKey::PageUp, at, vp, max, 1.0).y, 460.0);
+        assert_eq!(key_scroll(NavKey::Down, at, vp, max, 1.0).y, 1048.0);
+        assert_eq!(key_scroll(NavKey::Up, at, vp, max, 1.0).y, 952.0);
+        assert_eq!(key_scroll(NavKey::Left, at, vp, max, 1.0).x, -38.0);
+        assert_eq!(key_scroll(NavKey::Right, at, vp, max, 1.0).x, 58.0);
         assert_eq!(
-            key_scroll(NavKey::End, at, vp, max),
+            key_scroll(NavKey::Home, at, vp, max, 1.0),
+            Point::new(10.0, 0.0)
+        );
+        assert_eq!(
+            key_scroll(NavKey::End, at, vp, max, 1.0),
             Point::new(10.0, 9000.0)
         );
     }

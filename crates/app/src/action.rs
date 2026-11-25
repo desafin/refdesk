@@ -15,7 +15,9 @@ use crate::panels::search;
 use crate::panels::status_bar::GotoInput;
 use crate::panels::toc::TocState;
 use crate::session;
-use crate::state::{AppState, ClosedTab, DocId, PdfTab, Tab, TabId, WindowId, normalize_path};
+use crate::state::{
+    AppState, ClosedTab, DocId, PdfTab, StatusNotice, Tab, TabId, WindowId, normalize_path,
+};
 use crate::views::diff_view::{self, DiffDialog, DiffTab};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::windows::dock::SplitDir;
@@ -61,6 +63,9 @@ pub enum Action {
         /// The new zoom.
         zoom: ZoomMode,
     },
+    /// Set the scroll speed multiplier, or `None` to go back to the value of `config.toml`
+    /// (VIEW-12). The choice is kept in `prefs.json`.
+    SetScrollSpeed(Option<f32>),
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
     /// clipboard (SEL-2).
     CopySelection(TabId),
@@ -197,6 +202,33 @@ pub(crate) fn notifier(ctx: &egui::Context) -> Notifier {
     Arc::new(move || ctx.request_repaint())
 }
 
+/// Seconds the "scroll speed" notice stays in the status bar.
+const SCROLL_NOTICE_SECS: f64 = 2.0;
+
+/// Gives egui the scroll speed in effect. egui has one setting for all windows.
+pub(crate) fn apply_scroll_speed(state: &AppState, ctx: &egui::Context) {
+    let line = refdesk_core::line_scroll_speed(state.scroll_speed());
+    ctx.options_mut(|o| o.input_options.line_scroll_speed = line);
+}
+
+/// Changes the scroll speed preference, applies it, saves `prefs.json` (when there is a place to
+/// save) and tells the user. A failed save is only logged: the speed still applies until exit.
+fn set_scroll_speed(state: &mut AppState, speed: Option<f32>, ctx: &egui::Context) {
+    state.prefs.scroll_speed = speed.map(refdesk_core::clamp_scroll_speed);
+    apply_scroll_speed(state, ctx);
+    if let Some(paths) = &state.paths
+        && let Err(err) = state.prefs.save(&paths.prefs_file())
+    {
+        log::warn!("could not save {}: {err}", paths.prefs_file().display());
+    }
+    let label = refdesk_core::scroll_speed_label(state.scroll_speed());
+    state.status_notice = Some(StatusNotice {
+        text: crate::i18n::tr("status.scroll_speed").replace("{}", &label),
+        until: ctx.input(|i| i.time) + SCROLL_NOTICE_SECS,
+    });
+    ctx.request_repaint();
+}
+
 /// Applies one action to the state.
 pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
     match action {
@@ -247,6 +279,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             Some(Tab::Diff(diff)) => diff.side_mut(diff.active).view.zoom = zoom,
             _ => {}
         },
+        Action::SetScrollSpeed(speed) => set_scroll_speed(state, speed, ctx),
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
         Action::Find(tab) => search::find(state, tab, false, ctx),
         Action::FindSelection(tab) => search::find(state, tab, true, ctx),
@@ -756,6 +789,132 @@ fn focus_next_pane(state: &mut AppState) {
     let w = state.focused_window_index();
     if let Some(tab) = state.windows[w].dock.focus_next_pane() {
         state.focus = Some(tab);
+    }
+}
+
+/// Tests of the scroll speed setting (VIEW-12).
+#[cfg(test)]
+pub(crate) mod scroll_tests {
+    use super::*;
+    use refdesk_core::{Config, Paths, Prefs};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A directory under the system temp directory, removed on drop. Tests never touch the real
+    /// home directory: every path is injected from here.
+    pub(crate) struct ScratchDir(pub PathBuf);
+
+    impl ScratchDir {
+        pub(crate) fn new(name: &str) -> ScratchDir {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "refdesk-wp18-{}-{}-{name}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            ScratchDir(path)
+        }
+
+        pub(crate) fn paths(&self) -> Paths {
+            Paths::under(&self.0)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn line_speed(ctx: &egui::Context) -> f32 {
+        ctx.options(|o| o.input_options.line_scroll_speed)
+    }
+
+    fn state_with_paths(dir: &ScratchDir) -> AppState {
+        let mut state = AppState::new();
+        state.paths = Some(dir.paths());
+        state
+    }
+
+    #[test]
+    fn setting_a_speed_changes_the_state_egui_and_the_saved_file() {
+        let dir = ScratchDir::new("set");
+        let ctx = egui::Context::default();
+        let mut state = state_with_paths(&dir);
+        dispatch(&mut state, Action::SetScrollSpeed(Some(3.0)), &ctx);
+        assert_eq!(state.scroll_speed(), 3.0);
+        assert_eq!(line_speed(&ctx), 120.0);
+        let saved = Prefs::load(&dir.paths().prefs_file());
+        assert_eq!(saved.scroll_speed, Some(3.0));
+        assert!(!refdesk_core::store::bad_path(&dir.paths().prefs_file()).exists());
+    }
+
+    #[test]
+    fn a_speed_outside_the_range_is_limited() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(&mut state, Action::SetScrollSpeed(Some(99.0)), &ctx);
+        assert_eq!(state.scroll_speed(), 10.0);
+        assert_eq!(line_speed(&ctx), 400.0);
+        dispatch(&mut state, Action::SetScrollSpeed(Some(0.0)), &ctx);
+        assert_eq!(state.scroll_speed(), 0.25);
+    }
+
+    #[test]
+    fn none_goes_back_to_the_config_value_and_clears_the_saved_item() {
+        let dir = ScratchDir::new("reset");
+        let ctx = egui::Context::default();
+        let mut state = state_with_paths(&dir);
+        state.config = Config {
+            scroll_speed: 4.0,
+            ..Config::default()
+        };
+        dispatch(&mut state, Action::SetScrollSpeed(Some(1.0)), &ctx);
+        assert_eq!(state.scroll_speed(), 1.0);
+        assert_eq!(line_speed(&ctx), 40.0);
+
+        dispatch(&mut state, Action::SetScrollSpeed(None), &ctx);
+        assert_eq!(state.scroll_speed(), 4.0);
+        assert_eq!(line_speed(&ctx), 160.0);
+        assert_eq!(state.prefs.scroll_speed, None);
+        let text = std::fs::read_to_string(dir.paths().prefs_file()).expect("prefs.json");
+        assert!(!text.contains("scroll_speed"), "{text}");
+        assert_eq!(Prefs::load(&dir.paths().prefs_file()).scroll_speed, None);
+    }
+
+    #[test]
+    fn without_a_save_path_nothing_is_written_and_the_speed_still_applies() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        assert!(state.paths.is_none());
+        dispatch(&mut state, Action::SetScrollSpeed(Some(3.0)), &ctx);
+        assert_eq!(state.scroll_speed(), 3.0);
+        assert_eq!(line_speed(&ctx), 120.0);
+    }
+
+    #[test]
+    fn a_failed_save_does_not_stop_the_change() {
+        let dir = ScratchDir::new("unwritable");
+        // The state directory is a file, so `prefs.json` cannot be created inside it.
+        std::fs::write(dir.0.join("state"), b"in the way").expect("write blocker");
+        let ctx = egui::Context::default();
+        let mut state = state_with_paths(&dir);
+        dispatch(&mut state, Action::SetScrollSpeed(Some(5.0)), &ctx);
+        assert_eq!(state.scroll_speed(), 5.0);
+        assert_eq!(line_speed(&ctx), 200.0);
+        assert!(!dir.paths().prefs_file().exists());
+    }
+
+    #[test]
+    fn changing_the_speed_shows_a_notice_that_runs_out() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        assert!(state.status_notice.is_none());
+        dispatch(&mut state, Action::SetScrollSpeed(Some(2.5)), &ctx);
+        let notice = state.status_notice.clone().expect("a notice");
+        assert!(notice.text.contains("2.5×"), "{}", notice.text);
+        assert!(notice.until > 0.0);
     }
 }
 

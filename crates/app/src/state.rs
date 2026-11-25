@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use refdesk_core::{Config, DocStateDb, DocumentHandle, Paths, ViewState};
+use refdesk_core::{Config, DocStateDb, DocumentHandle, Paths, Prefs, ViewState};
 
 use crate::action::Action;
 use crate::overlays::capture::Clipboard;
@@ -261,6 +261,15 @@ pub struct ClosedTab {
     pub view: ViewState,
 }
 
+/// A short message in the status bar that goes away by itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatusNotice {
+    /// The text shown.
+    pub text: String,
+    /// When it goes away, in egui time (seconds).
+    pub until: f64,
+}
+
 /// How many closed tabs are remembered.
 pub const MAX_CLOSED_TABS: usize = 20;
 
@@ -293,6 +302,10 @@ pub struct AppState {
     pub paths: Option<Paths>,
     /// The settings from `config.toml`, read once at start. The app never writes that file.
     pub config: Config,
+    /// The settings changed inside the app (`prefs.json`); they win over `config`.
+    pub prefs: Prefs,
+    /// A short message at the right end of the status bar, e.g. the new scroll speed.
+    pub status_notice: Option<StatusNotice>,
     /// What is remembered about each document (`documents.json`, SES-3).
     pub doc_db: DocStateDb,
     /// The section path line above PDF views is shown (TOC-6). Not saved.
@@ -332,12 +345,19 @@ impl AppState {
             palette: PaletteState::default(),
             paths: None,
             config: Config::default(),
+            prefs: Prefs::default(),
+            status_notice: None,
             doc_db: DocStateDb::default(),
             show_breadcrumb: true,
             capture_clipboard: None,
             memory: Memory::default(),
             next_window: 1,
         }
+    }
+
+    /// The scroll speed multiplier in effect: the preference, else `config.toml`'s (VIEW-12).
+    pub fn scroll_speed(&self) -> f32 {
+        refdesk_core::effective_scroll_speed(&self.prefs, &self.config)
     }
 
     /// Issues a window id that was never used before, even by a window that is closed now.

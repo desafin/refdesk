@@ -184,6 +184,10 @@ fn menu_bar(ui: &mut Ui, state: &AppState, index: usize, queue: &mut Vec<Action>
                     if ui.add_enabled(enabled, button).clicked() {
                         queue.extend(command.run(state));
                     }
+                    // The speed list sits with the two commands that step through it.
+                    if command.id == "view.scroll_slower" {
+                        scroll_speed_menu(ui, state, queue);
+                    }
                 }
                 if group == MenuGroup::Window {
                     ui.separator();
@@ -197,6 +201,57 @@ fn menu_bar(ui: &mut Ui, state: &AppState, index: usize, queue: &mut Vec<Action>
             });
         }
     });
+}
+
+/// The row text of the scroll speed menu: the multiplier, with a check mark for the current one.
+fn scroll_speed_row_text(item: refdesk_core::ScrollSpeedItem) -> String {
+    let label = refdesk_core::scroll_speed_label(item.speed);
+    if item.checked {
+        format!("✓ {label}")
+    } else {
+        // An em space keeps the numbers aligned with the checked row.
+        format!("\u{2003} {label}")
+    }
+}
+
+/// "Scroll Speed ▸": the multipliers, then "Reset to Default" (VIEW-12).
+fn scroll_speed_menu(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
+    ui.menu_button(tr("menu.scroll_speed"), |ui| {
+        for item in refdesk_core::scroll_speed_menu(state.scroll_speed()) {
+            let button = egui::Button::new(scroll_speed_row_text(item)).selected(item.checked);
+            if ui.add(button).clicked() {
+                queue.push(Action::SetScrollSpeed(Some(item.speed)));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button(tr("menu.scroll_speed_default")).clicked() {
+            queue.push(Action::SetScrollSpeed(None));
+            ui.close();
+        }
+    });
+}
+
+/// Draws the notice of the status bar (if one is up) at the right end of the bar, and asks for
+/// the frame in which it ends.
+fn show_status_notice(ui: &Ui, state: &mut AppState, bar: egui::Rect) {
+    let now = ui.input(|i| i.time);
+    let Some(notice) = &state.status_notice else {
+        return;
+    };
+    if now >= notice.until {
+        state.status_notice = None;
+        return;
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs_f64(notice.until - now));
+    ui.painter().text(
+        egui::pos2(bar.right() - 8.0, bar.center().y),
+        egui::Align2::RIGHT_CENTER,
+        &notice.text,
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
 }
 
 /// Draws the content of window `window_index`: its status bar and its panes. Widgets only queue
@@ -254,10 +309,11 @@ pub fn show_window(
         .any(|t| matches!(state.tabs.get(*t), Some(Tab::Start)))
         .then(|| session::start_page(state, ui.ctx()));
 
-    Panel::bottom(Id::unique(("status_bar", window_id))).show(ui, |ui| {
+    let bar = Panel::bottom(Id::unique(("status_bar", window_id))).show(ui, |ui| {
         // The status bar describes the focused tab of this window.
         status_bar::show(ui, state, window_focus, queue);
     });
+    show_status_notice(ui, state, bar.response.rect);
 
     if toc_open {
         // The panel shows the contents of this window's focused tab; the width the user
@@ -1119,5 +1175,51 @@ mod tests {
         output.drop_without_applying_deltas();
         assert!(commands.contains(&ViewportCommand::Focus), "{commands:?}");
         assert_eq!(state.windows.len(), 1, "the emptied window closed");
+    }
+
+    #[test]
+    fn scroll_speed_rows_show_the_check_mark_only_on_the_current_speed() {
+        let rows: Vec<String> = refdesk_core::scroll_speed_menu(2.5)
+            .into_iter()
+            .map(scroll_speed_row_text)
+            .collect();
+        assert_eq!(rows.iter().filter(|r| r.starts_with('✓')).count(), 1);
+        assert!(rows.contains(&"✓ 2.5×".to_string()));
+        assert!(
+            rows.iter()
+                .any(|r| r.ends_with(" 1×") && !r.starts_with('✓'))
+        );
+        // A value from the configuration file gets its own checked row.
+        let odd: Vec<String> = refdesk_core::scroll_speed_menu(2.2)
+            .into_iter()
+            .map(scroll_speed_row_text)
+            .collect();
+        assert_eq!(odd.len(), rows.len() + 1);
+        assert!(odd.contains(&"✓ 2.2×".to_string()));
+    }
+
+    #[test]
+    fn the_status_notice_goes_away_when_its_time_is_up() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        state.status_notice = Some(crate::state::StatusNotice {
+            text: "x".into(),
+            until: 5.0,
+        });
+        let frame_at = |time: f64, state: &mut AppState| {
+            let input = egui::RawInput {
+                time: Some(time),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                let rect = ui.max_rect();
+                show_status_notice(ui, state, rect);
+            })
+            .drop_without_applying_deltas();
+        };
+        frame_at(1.0, &mut state);
+        assert!(state.status_notice.is_some());
+        frame_at(5.5, &mut state);
+        assert!(state.status_notice.is_none());
     }
 }

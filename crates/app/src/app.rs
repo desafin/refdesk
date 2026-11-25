@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use egui::Ui;
-use refdesk_core::{IpcListener, IpcRequest, Theme};
+use refdesk_core::{IpcListener, IpcRequest, Prefs, Theme};
 
-use crate::action::{Action, OpenTarget, dispatch_queued};
+use crate::action::{Action, OpenTarget, apply_scroll_speed, dispatch_queued};
 use crate::i18n::tr;
 use crate::session::{self, Saver, Startup};
 use crate::state::AppState;
@@ -65,8 +65,18 @@ impl RefdeskApp {
 fn initial_state(startup: Startup, initial: IpcRequest, ctx: &egui::Context) -> (AppState, Saver) {
     let mut state = AppState::new();
     let saver = session::start(&mut state, startup, ctx);
+    start_prefs(&mut state, ctx);
     state.actions.extend(actions_for_request(initial));
     (state, saver)
+}
+
+/// Reads `prefs.json` (when there is a place to read it from) and gives egui the scroll speed in
+/// effect. egui has one setting for every window, so once is enough.
+fn start_prefs(state: &mut AppState, ctx: &egui::Context) {
+    if let Some(paths) = &state.paths {
+        state.prefs = Prefs::load(&paths.prefs_file());
+    }
+    apply_scroll_speed(state, ctx);
 }
 
 /// Applies the `theme` setting.
@@ -391,6 +401,59 @@ mod tests {
         let mut actions = Vec::new();
         poll_file_dialog(&mut dialog, &mut actions);
         assert!(dialog.is_none() && actions.is_empty());
+    }
+
+    fn line_speed(ctx: &egui::Context) -> f32 {
+        ctx.options(|o| o.input_options.line_scroll_speed)
+    }
+
+    fn startup_at(dir: &crate::action::scroll_tests::ScratchDir) -> Startup {
+        let mut startup = Startup::empty();
+        startup.paths = Some(dir.paths());
+        startup
+    }
+
+    #[test]
+    fn the_scroll_speed_starts_at_the_default_and_follows_the_config_file() {
+        let ctx = egui::Context::default();
+        let (state, _saver) = initial_state(Startup::empty(), open_request(&[]), &ctx);
+        assert_eq!(state.scroll_speed(), 2.5);
+        assert_eq!(line_speed(&ctx), 100.0);
+
+        let ctx = egui::Context::default();
+        let mut startup = Startup::empty();
+        startup.config.scroll_speed = 4.0;
+        let (state, _saver) = initial_state(startup, open_request(&[]), &ctx);
+        assert_eq!(state.scroll_speed(), 4.0);
+        assert_eq!(line_speed(&ctx), 160.0);
+    }
+
+    #[test]
+    fn a_changed_scroll_speed_is_there_again_after_a_restart() {
+        let dir = crate::action::scroll_tests::ScratchDir::new("restart");
+        let ctx = egui::Context::default();
+        let (mut state, _saver) = initial_state(startup_at(&dir), open_request(&[]), &ctx);
+        crate::action::dispatch(&mut state, Action::SetScrollSpeed(Some(3.0)), &ctx);
+        drop(state);
+
+        // A new process: a new egui context and a new state over the same files.
+        let ctx = egui::Context::default();
+        assert_eq!(line_speed(&ctx), 40.0, "egui starts with its own default");
+        let (state, _saver) = initial_state(startup_at(&dir), open_request(&[]), &ctx);
+        assert_eq!(state.scroll_speed(), 3.0);
+        assert_eq!(line_speed(&ctx), 120.0);
+    }
+
+    #[test]
+    fn a_damaged_prefs_file_starts_with_the_config_speed_and_keeps_a_bad_copy() {
+        let dir = crate::action::scroll_tests::ScratchDir::new("damaged");
+        let prefs_file = dir.paths().prefs_file();
+        std::fs::create_dir_all(prefs_file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&prefs_file, b"{ not json").expect("write");
+        let ctx = egui::Context::default();
+        let (state, _saver) = initial_state(startup_at(&dir), open_request(&[]), &ctx);
+        assert_eq!(state.scroll_speed(), 2.5);
+        assert!(refdesk_core::store::bad_path(&prefs_file).exists());
     }
 
     fn target(path: &str, page: Option<u32>) -> OpenTarget {
