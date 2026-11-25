@@ -28,6 +28,7 @@ use refdesk_core::{
 use crate::action::{Action, OpenTarget};
 use crate::commands;
 use crate::i18n::tr;
+use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
 use crate::state::{DocId, PdfTab, TabId};
 use crate::views::links::{self, ClickButton, ClickMods, LinkAction, LinkHit, LinkState};
@@ -191,6 +192,9 @@ pub struct PdfViewUiState {
     /// The link under the pointer, the mark of the last landing place, and the scroll standstill
     /// timer of the history (LINK-5, LINK-9, LINK-3). Boxed to keep tabs small.
     pub links: Box<LinkState>,
+    /// The search bar's query, what it found and the current match (FIND-1). Boxed to keep tabs
+    /// small.
+    pub search: Box<SearchState>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -777,6 +781,7 @@ fn show_document(
         pixels,
         cx.textures,
     );
+    paint_search(ui, view_rect, state);
     paint_selection(ui, view_rect, state, &texts);
     paint_link_hover(ui, view_rect, state, hover.as_ref());
     paint_arrival(ui, view_rect, state, now);
@@ -1125,6 +1130,30 @@ fn paint_selection(ui: &Ui, view_rect: Rect, state: &PdfViewUiState, texts: sele
             view_rect.min + vec2(h.rect.x1, h.rect.y1),
         );
         painter.rect_filled(rect, 0.0, color);
+    }
+}
+
+/// Tints the matches of the search on the visible pages; the current match gets a border (FIND-1).
+fn paint_search(ui: &Ui, view_rect: Rect, state: &PdfViewUiState) {
+    let Some(layout) = state.layout() else {
+        return;
+    };
+    let (all, current, border) = search::highlight_colors();
+    let painter = ui.painter_at(view_rect);
+    for h in state
+        .search
+        .highlights(layout, state.scroll(), state.viewport())
+    {
+        let rect = Rect::from_min_max(
+            view_rect.min + vec2(h.rect.x0, h.rect.y0),
+            view_rect.min + vec2(h.rect.x1, h.rect.y1),
+        );
+        if h.current {
+            painter.rect_filled(rect, 2.0, current);
+            painter.rect_stroke(rect, 2.0, border, StrokeKind::Outside);
+        } else {
+            painter.rect_filled(rect, 2.0, all);
+        }
     }
 }
 

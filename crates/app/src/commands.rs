@@ -246,6 +246,33 @@ pub static COMMANDS: &[Command] = &[
         action: |s| s.focus.map(Action::CopySelection),
     },
     Command {
+        id: "edit.find",
+        name_key: "cmd.edit.find",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::F)),
+        aliases: &[],
+        enabled: has_pdf_focus,
+        action: |s| s.focus.map(Action::Find),
+    },
+    Command {
+        id: "edit.find_next",
+        name_key: "cmd.edit.find_next",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F3)),
+        aliases: &[],
+        enabled: has_pdf_focus,
+        action: |s| s.focus.map(Action::FindNext),
+    },
+    Command {
+        id: "edit.find_prev",
+        name_key: "cmd.edit.find_prev",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::F3)),
+        aliases: &[],
+        enabled: has_pdf_focus,
+        action: |s| s.focus.map(Action::FindPrev),
+    },
+    Command {
         id: "view.zoom_in",
         name_key: "cmd.view.zoom_in",
         menu: MenuGroup::View,
@@ -558,7 +585,7 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
 ];
 
 /// One entry of the menu shown on a right click in a PDF view when text is selected (SEL-3).
-/// It acts on the clicked view. Later work adds rows (for example "Search for This Text").
+/// It acts on the clicked view.
 pub struct SelectionMenuEntry {
     /// i18n key of the displayed name.
     pub name_key: &'static str,
@@ -575,12 +602,20 @@ fn tab_has_selection(tab: &PdfTab) -> bool {
 }
 
 /// The selection menu, in display order.
-pub static SELECTION_MENU: &[SelectionMenuEntry] = &[SelectionMenuEntry {
-    name_key: "cmd.edit.copy",
-    command_id: Some("edit.copy"),
-    enabled: tab_has_selection,
-    action: Action::CopySelection,
-}];
+pub static SELECTION_MENU: &[SelectionMenuEntry] = &[
+    SelectionMenuEntry {
+        name_key: "cmd.edit.copy",
+        command_id: Some("edit.copy"),
+        enabled: tab_has_selection,
+        action: Action::CopySelection,
+    },
+    SelectionMenuEntry {
+        name_key: "cmd.edit.search_selection",
+        command_id: None,
+        enabled: tab_has_selection,
+        action: Action::FindSelection,
+    },
+];
 
 /// The command with this identifier.
 pub fn command(id: &str) -> Option<&'static Command> {

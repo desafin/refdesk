@@ -10,6 +10,7 @@ use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, ZoomM
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::overlays::palette::{self, PaletteMode};
+use crate::panels::search;
 use crate::panels::status_bar::GotoInput;
 use crate::panels::toc::TocState;
 use crate::session;
@@ -62,6 +63,15 @@ pub enum Action {
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
     /// clipboard (SEL-2).
     CopySelection(TabId),
+    /// Open the search bar of a PDF tab; a selected text of one line is searched for (FIND-1,
+    /// FIND-6).
+    Find(TabId),
+    /// Search for the selected text of a PDF tab, even over several lines (FIND-6).
+    FindSelection(TabId),
+    /// Move a PDF tab to the next match of its search (FIND-1).
+    FindNext(TabId),
+    /// Move a PDF tab to the previous match of its search (FIND-1).
+    FindPrev(TabId),
     /// Compare two documents in a new comparison tab of the focused pane (DIFF-1).
     StartDiff {
         /// The older document.
@@ -216,6 +226,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             _ => {}
         },
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
+        Action::Find(tab) => search::find(state, tab, false, ctx),
+        Action::FindSelection(tab) => search::find(state, tab, true, ctx),
+        Action::FindNext(tab) => search::step(state, tab, true, ctx),
+        Action::FindPrev(tab) => search::step(state, tab, false, ctx),
         Action::StartDiff { left, right } => {
             let tab = insert_diff_tab(state, &left, &right, ctx);
             place_new_tab(state, tab, None);

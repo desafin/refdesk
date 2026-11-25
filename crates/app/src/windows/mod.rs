@@ -22,6 +22,7 @@ use refdesk_core::{DocStatus, DocumentHandle};
 use crate::action::Action;
 use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
+use crate::panels::search;
 use crate::panels::status_bar;
 use crate::panels::toc;
 use crate::session;
@@ -270,6 +271,9 @@ pub fn show_window(
             window.toc_width = shown.response.rect.width();
         }
     }
+
+    // The matches of the search of this window's focused tab (FIND-4).
+    search::show_results_panel(ui, &mut state.tabs, &state.docs, window_id, window_focus);
 
     let AppState {
         windows,
@@ -552,6 +556,7 @@ impl DockHost for WindowHost<'_> {
 /// Draws the content of a PDF tab: the PDF view (WP-15). It gets the tab (whose view state it
 /// may change), the document handle, the shared textures and the action queue.
 pub fn draw_pdf_tab(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, cx: ViewContext<'_>) {
+    search::show_bar(ui, tab, doc, cx.tab_id, cx.focused);
     pdf_view::show(ui, tab, doc, cx);
 }
 
