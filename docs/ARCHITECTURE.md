@@ -105,7 +105,7 @@ crates/core/src/
   text.rs            PageText, 선택
   search/            normalize.rs, job.rs
   diff/              extract.rs, noise.rs, align.rs, refine.rs, result.rs, job.rs
-  store/             paths.rs, atomic.rs, config.rs, docstate.rs, recent.rs, session.rs
+  store/             paths.rs, atomic.rs, config.rs, docstate.rs, session.rs
   fingerprint.rs
   ipc.rs
   testutil.rs        테스트용 PDF 생성기 (feature "testutil")
@@ -197,7 +197,8 @@ pub struct RenderedImage { pub width: u32, pub height: u32, pub rgb: Vec<u8> }
 연속 세로 배치의 계산을 전부 맡는다. 순수 함수라 단위 테스트한다.
 
 ```rust
-pub struct LayoutParams { pub viewport: Size, pub zoom: ZoomMode, pub gap: f32, pub margin: f32 } // 모두 논리 픽셀
+pub struct LayoutParams { pub viewport: Size, pub zoom: ZoomMode, pub gap: f32, pub margin: f32, // 논리 픽셀
+                           pub fit_page: u32 }                    // FitPage 의 기준 쪽
 
 impl PageLayout {
     pub fn new(page_sizes: &[Size], params: LayoutParams) -> PageLayout;
@@ -207,10 +208,15 @@ impl PageLayout {
     pub fn visible_pages(&self, scroll: Point, viewport: Size) -> Range<u32>;
     pub fn location_at(&self, content: Point) -> Location;        // 쪽 사이·바깥은 가장 가까운 쪽으로
     pub fn content_pos(&self, loc: Location) -> Point;
+    pub fn max_scroll(&self, viewport: Size) -> Point;
+    pub fn clamp_scroll(&self, scroll: Point, viewport: Size) -> Point;
+    /// loc 이 뷰포트 안의 viewport_pos 자리에 오게 하는 스크롤. 줌할 때 커서 아래 지점을 고정하는 데 쓴다.
+    pub fn scroll_to_keep(&self, loc: Location, viewport_pos: Point, viewport: Size) -> Point;
 }
 ```
 
-- `FitWidth` 는 문서에서 가장 넓은 쪽을 기준으로 한다(쪽마다 배율이 달라지지 않게). `FitPage` 는 `anchor` 가 있는 쪽 기준.
+- `FitWidth` 는 문서에서 가장 넓은 쪽을 기준으로 한다(쪽마다 배율이 달라지지 않게). `FitPage` 는 `fit_page`(보통 `anchor` 가 있는 쪽) 기준.
+- 줌은 10% ~ 800% 로 제한한다(`MIN_ZOOM`, `MAX_ZOOM`).
 - 쪽은 가로 가운데 정렬. 내용이 뷰포트보다 넓으면 가로 스크롤.
 - 뷰의 스크롤 상태는 `ViewState.anchor` 가 원본이다. 배치가 바뀌면(줌, 창 크기) `content_pos(anchor)` 로 스크롤을 다시 구한다 — 그래서 읽던 곳이 유지된다.
 
@@ -367,9 +373,11 @@ impl DiffJob {
 ### 4.10 store — 저장
 
 ```rust
-pub fn state_dir() -> PathBuf;      // $XDG_STATE_HOME/refdesk   (기본 ~/.local/state/refdesk)
-pub fn config_dir() -> PathBuf;     // $XDG_CONFIG_HOME/refdesk
-pub fn socket_path() -> PathBuf;    // $XDG_RUNTIME_DIR/refdesk.sock
+pub struct Paths { pub state_dir: PathBuf, pub config_dir: PathBuf, pub socket_path: PathBuf, pub capture_dir: PathBuf }
+impl Paths {
+    pub fn from_env() -> Paths;         // $XDG_STATE_HOME/refdesk, $XDG_CONFIG_HOME/refdesk, $XDG_RUNTIME_DIR/refdesk.sock, ~/Pictures/refdesk
+    pub fn under(root: &Path) -> Paths; // 테스트용: 모든 경로를 root 아래로
+}
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()>;   // 임시 파일 → fsync → rename (R-8)
 ```
 
@@ -397,13 +405,16 @@ pub enum SessionTab { Pdf { path: PathBuf, view: ViewState }, Diff { left: PathB
 pub struct DocRecord { pub path: PathBuf, pub fingerprint: Option<String>, pub size: u64, pub mtime: i64,
                        pub last_opened: i64, pub view: ViewState, pub toc_collapsed: Vec<Vec<String>> }
 impl DocStateDb {
-    pub fn load() -> DocStateDb;                     // 실패해도 빈 DB 로 뜬다 (R-8)
+    pub fn load(path: &Path) -> DocStateDb;          // 실패해도 빈 DB 로 뜬다 (R-8)
     pub fn lookup(&self, path: &Path, fingerprint: Option<&str>) -> Option<&DocRecord>; // 경로 또는 해시, 최근 것 우선 (SES-4)
     pub fn record(&mut self, rec: DocRecord);
     pub fn recent(&self, n: usize) -> Vec<&DocRecord>;        // SES-7
-    pub fn save(&self) -> io::Result<()>;
+    pub fn save(&self, path: &Path) -> io::Result<()>;
 }
 ```
+
+저장 함수들은 경로를 인자로 받는다(전역 경로를 몰래 쓰지 않는다 — 테스트가 홈 디렉터리를 건드리지 않게). 시각도 호출자가 넘긴다.
+최근 문서 목록은 따로 저장하지 않고 `DocStateDb::recent` 로 얻는다.
 
 `fingerprint` 는 파일 전체의 XXH3-128. 백그라운드에서 계산하고 (size, mtime) 이 같으면 다시 계산하지 않는다.
 경로가 같으면 지문이 달라도 같은 문서로 본다(같은 자리에 새 버전이 온 경우).
