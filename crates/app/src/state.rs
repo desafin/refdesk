@@ -8,10 +8,20 @@ use std::path::{Component, Path, PathBuf};
 use refdesk_core::{DocumentHandle, ViewState};
 
 use crate::action::Action;
+use crate::views::pdf_view::PdfViewUiState;
+use crate::views::textures::TextureCache;
 
 /// Identifies one open document. Issued by [`DocStore`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DocId(u64);
+
+impl DocId {
+    /// A document id made up for tests that do not go through a [`DocStore`].
+    #[cfg(test)]
+    pub fn for_test(n: u64) -> DocId {
+        DocId(n)
+    }
+}
 
 /// Identifies one tab. Issued by [`TabStore`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -82,6 +92,11 @@ impl DocStore {
         }
     }
 
+    /// Every open document, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (DocId, &DocumentHandle)> {
+        self.docs.iter().map(|(id, handle)| (*id, handle))
+    }
+
     /// Number of open documents.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -96,6 +111,8 @@ pub struct PdfTab {
     pub doc: DocId,
     /// Scroll position, zoom and history of this view.
     pub view: ViewState,
+    /// View state that is not saved: scroll in pixels, cached layout, inputs (WP-15).
+    pub ui: PdfViewUiState,
 }
 
 /// The content of a tab.
@@ -243,6 +260,8 @@ pub struct AppState {
     pub windows: Vec<WindowState>,
     /// The tab commands apply to.
     pub focus: Option<TabId>,
+    /// Textures of rendered pages, shared by all views and windows.
+    pub textures: TextureCache,
     /// Actions collected during this frame.
     pub actions: Vec<Action>,
     /// Set by `dispatch` when the file dialog should be opened; the app starts it on the next
@@ -273,6 +292,7 @@ impl AppState {
             tabs,
             windows: vec![window],
             focus: Some(start),
+            textures: TextureCache::default(),
             actions: Vec::new(),
             file_dialog_requested: false,
             next_window: 1,

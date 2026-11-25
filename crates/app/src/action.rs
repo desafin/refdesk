@@ -9,9 +9,10 @@ use std::sync::Arc;
 use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
-pub use refdesk_core::OpenTarget;
-
+use crate::panels::status_bar::GotoInput;
 use crate::state::{AppState, PdfTab, Tab, TabId, normalize_path};
+use crate::views::pdf_view::PdfViewUiState;
+pub use refdesk_core::OpenTarget;
 
 /// Something the user (or the outside world) asked for.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +44,16 @@ pub enum Action {
         left: PathBuf,
         /// The newer document.
         right: PathBuf,
+    },
+    /// Open the page number field of the status bar for a PDF tab.
+    ShowGoToPage(TabId),
+    /// Move a PDF tab to the top of a page (zero-based; limited to the document). Recorded in
+    /// the history as a long jump.
+    GoToPage {
+        /// The tab to move.
+        tab: TabId,
+        /// Zero-based page.
+        page: u32,
     },
     /// Close the application.
     Quit,
@@ -83,6 +94,12 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 open_file(state, OpenTarget { path, page: None }, ctx);
             }
         }
+        Action::ShowGoToPage(tab) => {
+            if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+                pdf.ui.goto = Some(GotoInput::default());
+            }
+        }
+        Action::GoToPage { tab, page } => go_to_page(state, tab, page),
         Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
     }
 }
@@ -127,7 +144,11 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
         view.anchor = loc;
         view.history = refdesk_core::History::new(Place { doc: path, loc });
     }
-    let tab = state.tabs.insert(Tab::Pdf(PdfTab { doc, view }));
+    let tab = state.tabs.insert(Tab::Pdf(PdfTab {
+        doc,
+        view,
+        ui: PdfViewUiState::default(),
+    }));
 
     // The start page makes room for the first document.
     let start_tabs: Vec<TabId> = state
@@ -176,6 +197,28 @@ fn jump_to_page(state: &mut AppState, tab: TabId, page: u32) {
     }
 }
 
+/// Jumps a PDF tab to the top of `page`, limited to the pages of its document when they are
+/// known.
+fn go_to_page(state: &mut AppState, tab: TabId, page: u32) {
+    let Some(pdf) = state.tabs.pdf(tab) else {
+        return;
+    };
+    let count = state
+        .docs
+        .get(pdf.doc)
+        .and_then(|doc| doc.info())
+        .map(|info| info.page_sizes.len() as u32);
+    let page = match count {
+        Some(0) => return,
+        Some(n) => page.min(n - 1),
+        None => page,
+    };
+    jump_to_page(state, tab, page);
+    if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+        pdf.ui.goto = None;
+    }
+}
+
 /// Closes a tab, drops its document when no other tab shows it, and keeps the window non-empty by
 /// showing the start page after the last tab.
 fn close_tab(state: &mut AppState, tab: TabId) {
@@ -202,9 +245,11 @@ fn close_tab(state: &mut AppState, tab: TabId) {
 
 /// Adds a new tab on the same document, with a copy of the view state.
 fn duplicate_tab(state: &mut AppState, tab: TabId) {
-    let Some(source) = state.tabs.pdf(tab).cloned() else {
+    let Some(mut source) = state.tabs.pdf(tab).cloned() else {
         return;
     };
+    // The copy starts with a fresh view; its scroll follows from the copied anchor.
+    source.ui = PdfViewUiState::default();
     let new = state.tabs.insert(Tab::Pdf(source));
     state.main_window_mut().insert_after(tab, new);
     focus_tab(state, new);
@@ -484,6 +529,56 @@ mod tests {
             state.tabs.pdf(tab).expect("tab").view.zoom,
             ZoomMode::FitPage
         );
+    }
+
+    #[test]
+    fn go_to_page_moves_to_the_top_of_the_page_and_records_history() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::ShowGoToPage(tab), &ctx);
+        assert!(state.tabs.pdf(tab).expect("tab").ui.goto.is_some());
+
+        dispatch(&mut state, Action::GoToPage { tab, page: 6 }, &ctx);
+        let pdf = state.tabs.pdf(tab).expect("tab");
+        assert_eq!(pdf.view.anchor, Location::new(6, 0.0, 0.0));
+        assert!(pdf.view.history.can_back());
+        assert!(pdf.ui.goto.is_none(), "the field closes");
+    }
+
+    #[test]
+    fn go_to_page_is_limited_to_the_document() {
+        use refdesk_core::testutil::PdfBuilder;
+        let pdf = PdfBuilder::new()
+            .page(200.0, 200.0, |_| {})
+            .page(200.0, 200.0, |_| {})
+            .write_temp("goto-limit");
+        let ctx = egui::Context::default();
+        let repaints = crate::views::test_support::watch_repaints(&ctx);
+        let mut state = AppState::new();
+        open(
+            &mut state,
+            &ctx,
+            pdf.path().to_str().expect("utf-8 temp path"),
+        );
+        let (tab, p) = state.focused_pdf().expect("pdf tab");
+        let doc = state.docs.get(p.doc).expect("doc").clone();
+        repaints.wait_until("the document info", || doc.info().is_some());
+        dispatch(&mut state, Action::GoToPage { tab, page: 99 }, &ctx);
+        assert_eq!(state.tabs.pdf(tab).expect("tab").view.anchor.page, 1);
+    }
+
+    #[test]
+    fn duplicated_tabs_start_with_a_fresh_view_state() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::ShowGoToPage(tab), &ctx);
+        dispatch(&mut state, Action::DuplicateTab(tab), &ctx);
+        let (_, copy) = state.focused_pdf().expect("copy");
+        assert!(copy.ui.goto.is_none());
     }
 
     #[test]

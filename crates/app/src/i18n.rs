@@ -99,6 +99,19 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "--diff 는 다른 파일과 함께 쓸 수 없습니다",
         "--diff cannot be combined with other files",
     ),
+    ("cmd.view.goto_page", "쪽으로 이동…", "Go to Page…"),
+    (
+        "status.page",
+        "{page} / {count} 쪽",
+        "Page {page} of {count}",
+    ),
+    ("status.goto", "이동할 쪽:", "Go to page:"),
+    ("doc.password_submit", "열기", "Open"),
+    (
+        "doc.password_wrong",
+        "암호가 맞지 않습니다",
+        "The password is not correct",
+    ),
 ];
 
 /// Picks the language from the value of `LANG`.

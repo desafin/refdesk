@@ -20,6 +20,7 @@ log.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
+refdesk-core = { workspace = true, features = ["testutil"] }
 
 [lints]
 workspace = true

@@ -93,11 +93,18 @@ fn can_close_tab(state: &AppState) -> bool {
     state.focus.is_some_and(|tab| state.tabs.pdf(tab).is_some())
 }
 
-fn zoom_action(state: &AppState, change: fn(ZoomMode) -> ZoomMode) -> Option<Action> {
+fn has_ready_pdf_focus(state: &AppState) -> bool {
+    state
+        .focused_pdf()
+        .and_then(|(_, pdf)| state.docs.get(pdf.doc))
+        .is_some_and(|doc| doc.info().is_some())
+}
+
+fn zoom_action(state: &AppState, change: fn(ZoomMode, Option<f32>) -> ZoomMode) -> Option<Action> {
     let (tab, pdf) = state.focused_pdf()?;
     Some(Action::SetZoom {
         tab,
-        zoom: change(pdf.view.zoom),
+        zoom: change(pdf.view.zoom, pdf.ui.effective_zoom),
     })
 }
 
@@ -181,6 +188,15 @@ pub static COMMANDS: &[Command] = &[
         action: |s| set_zoom(s, ZoomMode::FitPage),
     },
     Command {
+        id: "view.goto_page",
+        name_key: "cmd.view.goto_page",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::G)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| s.focus.map(Action::ShowGoToPage),
+    },
+    Command {
         id: "tab.next",
         name_key: "cmd.tab.next",
         menu: MenuGroup::Tab,
@@ -219,18 +235,18 @@ const ZOOM_STEPS: &[f32] = &[
     0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0,
 ];
 
-/// The factor a zoom mode stands for when stepping. The fit modes depend on the viewport, which
-/// the table does not know, so they step from 100%.
-fn base_zoom(zoom: ZoomMode) -> f32 {
+/// The factor a zoom mode stands for when stepping. The fit modes depend on the viewport: they
+/// step from `actual`, the factor the view last laid out with, or from 100% before that.
+fn base_zoom(zoom: ZoomMode, actual: Option<f32>) -> f32 {
     match zoom {
         ZoomMode::Custom(z) => z,
-        ZoomMode::FitWidth | ZoomMode::FitPage => 1.0,
+        ZoomMode::FitWidth | ZoomMode::FitPage => actual.unwrap_or(1.0),
     }
 }
 
-/// The next larger step.
-pub fn zoom_in(zoom: ZoomMode) -> ZoomMode {
-    let base = base_zoom(zoom);
+/// The next larger step. `actual` is the view's actual zoom factor, if known.
+pub fn zoom_in(zoom: ZoomMode, actual: Option<f32>) -> ZoomMode {
+    let base = base_zoom(zoom, actual);
     let next = ZOOM_STEPS
         .iter()
         .copied()
@@ -240,9 +256,9 @@ pub fn zoom_in(zoom: ZoomMode) -> ZoomMode {
     ZoomMode::Custom(next)
 }
 
-/// The next smaller step.
-pub fn zoom_out(zoom: ZoomMode) -> ZoomMode {
-    let base = base_zoom(zoom);
+/// The next smaller step. `actual` is the view's actual zoom factor, if known.
+pub fn zoom_out(zoom: ZoomMode, actual: Option<f32>) -> ZoomMode {
+    let base = base_zoom(zoom, actual);
     let next = ZOOM_STEPS
         .iter()
         .rev()
@@ -251,6 +267,15 @@ pub fn zoom_out(zoom: ZoomMode) -> ZoomMode {
         .or_else(|| ZOOM_STEPS.first().copied())
         .unwrap_or(base);
     ZoomMode::Custom(next)
+}
+
+/// The displayed shortcut of a command, formatted for this platform.
+pub fn shortcut_text(ctx: &egui::Context, id: &str) -> Option<String> {
+    COMMANDS
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.shortcut)
+        .map(|s| ctx.format_shortcut(&s))
 }
 
 /// How many modifier keys a combination needs beyond the primary one. Shortcuts are matched most
@@ -477,10 +502,53 @@ mod tests {
 
     #[test]
     fn zoom_steps_are_clamped_at_both_ends() {
-        assert_eq!(zoom_in(ZoomMode::Custom(5.0)), ZoomMode::Custom(5.0));
-        assert_eq!(zoom_out(ZoomMode::Custom(0.25)), ZoomMode::Custom(0.25));
-        assert_eq!(zoom_in(ZoomMode::Custom(1.3)), ZoomMode::Custom(1.5));
-        assert_eq!(zoom_out(ZoomMode::Custom(1.3)), ZoomMode::Custom(1.25));
+        assert_eq!(zoom_in(ZoomMode::Custom(5.0), None), ZoomMode::Custom(5.0));
+        assert_eq!(
+            zoom_out(ZoomMode::Custom(0.25), None),
+            ZoomMode::Custom(0.25)
+        );
+        assert_eq!(zoom_in(ZoomMode::Custom(1.3), None), ZoomMode::Custom(1.5));
+        assert_eq!(
+            zoom_out(ZoomMode::Custom(1.3), None),
+            ZoomMode::Custom(1.25)
+        );
+    }
+
+    #[test]
+    fn fit_modes_step_from_their_actual_zoom() {
+        // A fit-width view laid out at 137%.
+        assert_eq!(
+            zoom_in(ZoomMode::FitWidth, Some(1.37)),
+            ZoomMode::Custom(1.5)
+        );
+        assert_eq!(
+            zoom_out(ZoomMode::FitPage, Some(1.37)),
+            ZoomMode::Custom(1.25)
+        );
+        // A custom zoom steps from itself whatever the layout said.
+        assert_eq!(
+            zoom_in(ZoomMode::Custom(1.0), Some(3.0)),
+            ZoomMode::Custom(1.1)
+        );
+    }
+
+    #[test]
+    fn goto_page_command_needs_an_open_document() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let find = |id: &str| COMMANDS.iter().find(|c| c.id == id).expect("command");
+        assert_eq!(
+            find("view.goto_page").shortcut,
+            Some(KeyboardShortcut::new(CTRL, Key::G))
+        );
+        assert!(find("view.goto_page").run(&state).is_none());
+        // A document that cannot open has no pages to go to.
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/missing.pdf")]),
+            &ctx,
+        );
+        assert!(find("view.goto_page").run(&state).is_none());
     }
 
     /// Runs one headless frame. The texture deltas are discarded: there is no renderer.

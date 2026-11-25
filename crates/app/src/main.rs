@@ -5,8 +5,10 @@ mod app;
 mod cli;
 mod commands;
 mod i18n;
+mod panels;
 mod state;
 mod theme;
+mod views;
 
 use std::path::Path;
 use std::sync::mpsc;

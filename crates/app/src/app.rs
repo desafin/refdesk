@@ -9,13 +9,16 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use egui::{CentralPanel, Panel, ScrollArea, Ui};
-use refdesk_core::{DocStatus, DocumentHandle, IpcListener, IpcRequest};
+use refdesk_core::{DocumentHandle, IpcListener, IpcRequest};
 
 use crate::action::{Action, OpenTarget, dispatch_queued};
 use crate::commands::{self, MenuGroup};
 use crate::i18n::tr;
+use crate::panels::status_bar;
 use crate::state::{AppState, PdfTab, Tab, TabId};
 use crate::theme;
+use crate::views::pdf_view::{self, ViewContext};
+use crate::views::textures;
 
 /// The application.
 pub struct RefdeskApp {
@@ -59,6 +62,8 @@ impl eframe::App for RefdeskApp {
         if poll_remote_requests(&self.remote, &mut self.state.actions) {
             bring_to_front(ctx);
         }
+        // WP-15: upload finished renders; drop textures of closed documents.
+        textures::collect_rendered(ctx, &self.state.docs, &mut self.state.textures);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -69,6 +74,8 @@ impl eframe::App for RefdeskApp {
 
         Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &self.state, &mut queue));
         Panel::top("tab_strip").show(ui, |ui| tab_strip(ui, &self.state, &mut queue));
+        Panel::bottom("status_bar")
+            .show(ui, |ui| status_bar::show(ui, &mut self.state, &mut queue));
         CentralPanel::default().show(ui, |ui| {
             tab_content(ui, &mut self.state, &mut queue);
         });
@@ -223,10 +230,24 @@ fn tab_content(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
         return;
     };
     // Disjoint fields: the tab is borrowed mutably, the document handle immutably.
-    let AppState { docs, tabs, .. } = state;
+    let AppState {
+        docs,
+        tabs,
+        textures,
+        focus,
+        ..
+    } = state;
     match tabs.get_mut(active) {
         Some(Tab::Pdf(tab)) => match docs.get(tab.doc) {
-            Some(doc) => draw_pdf_tab(ui, tab, doc, queue),
+            Some(doc) => {
+                let cx = ViewContext {
+                    tab_id: active,
+                    focused: *focus == Some(active),
+                    textures,
+                    queue,
+                };
+                draw_pdf_tab(ui, tab, doc, cx);
+            }
             None => {
                 ui.label(tr("tab.unknown"));
             }
@@ -236,38 +257,10 @@ fn tab_content(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
     }
 }
 
-/// Draws the content of a PDF tab: the file name and the state of the document.
-///
-/// **WP-15 replaces the body of this function with the PDF view.** It gets the tab (whose view
-/// state it may change), the document handle, and the action queue.
-pub fn draw_pdf_tab(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, queue: &mut Vec<Action>) {
-    let _ = (&tab.view, &queue);
-    let name = doc
-        .path()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    ui.heading(name);
-    ui.label(format!("{}: {}", tr("doc.path"), doc.path().display()));
-    ui.add_space(8.0);
-    match doc.status() {
-        DocStatus::Loading => {
-            ui.label(tr("doc.loading"));
-        }
-        DocStatus::Ready => {
-            let pages = doc.info().map_or(0, |info| info.page_sizes.len());
-            ui.label(tr("doc.pages").replace("{}", &pages.to_string()));
-        }
-        DocStatus::NeedsPassword => {
-            ui.label(tr("doc.needs_password"));
-        }
-        DocStatus::Failed(message) => {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                tr("doc.failed").replace("{}", &message),
-            );
-        }
-    }
+/// Draws the content of a PDF tab: the PDF view (WP-15). It gets the tab (whose view state it
+/// may change), the document handle, the shared textures and the action queue.
+pub fn draw_pdf_tab(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, cx: ViewContext<'_>) {
+    pdf_view::show(ui, tab, doc, cx);
 }
 
 /// Draws the start page: the application name and a button to open files.
