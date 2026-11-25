@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/app"]
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+# Pinned together with the feature sets verified on this machine (docs/ARCHITECTURE.md §2.1).
+mupdf = { version = "0.8.0", default-features = false, features = ["system-fonts", "base14-fonts"] }
+eframe = "0.37"
+egui = "0.37"
+egui_dock = "0.22"
+# eframe's system_fonts (fontique) enables fontconfig in dlopen mode; font-kit must match or the build breaks.
+font-kit = { version = "0.14", features = ["source-fontconfig-dlopen"] }
+
+similar = "3.2.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.2"
+thiserror = "2.0.21"
+log = "0.4.35"
+# xdg-desktop-portal backend only: the GTK backends need system development packages.
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal", "wayland"] }
+notify = "9.0.0"
+directories = "6.0.0"
+xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
+unicode-normalization = "0.1.26"
+png = "0.18.1"
+
+egui_kittest = "0.37.0"
+
+refdesk-core = { path = "crates/core" }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.dev.package."*"]
+opt-level = 2

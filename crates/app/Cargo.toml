@@ -1,0 +1,25 @@
+[package]
+name = "refdesk"
+description = "Desktop viewer for reading several software documentation PDFs at once"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "refdesk"
+path = "src/main.rs"
+
+[dependencies]
+refdesk-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_dock.workspace = true
+rfd.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+
+[lints]
+workspace = true
