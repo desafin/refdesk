@@ -196,7 +196,8 @@ impl PdfViewUiState {
         self.scroll
     }
 
-    fn viewport(&self) -> Size {
+    /// The viewport size of the last laid-out frame; zero before the first one.
+    pub fn viewport(&self) -> Size {
         self.geometry
             .as_ref()
             .map_or(Size::default(), |g| g.key.viewport)

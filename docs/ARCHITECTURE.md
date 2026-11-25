@@ -568,7 +568,8 @@ pub struct WindowState { pub id: WindowId, pub dock: DockLayout, pub toc_open: b
 pub enum Action {
     OpenFiles(Vec<OpenTarget>), CloseTab(TabId), DuplicateTab(TabId), FocusTab(TabId),
     DetachTab(TabId), MoveTab { tab: TabId, to: WindowId }, MergeAllWindows, NewWindow, CloseWindow(WindowId),
-    Navigate { tab: TabId, to: Place, how: OpenHow },   // 히스토리에 기록되는 긴 점프
+    Navigate { tab: TabId, to: Location, how: OpenHow }, // 히스토리에 기록되는 긴 점프. 문서는 그 탭의 문서(WP-31)
+    ToggleToc,                                           // 포커스된 창의 목차 패널을 켜고 끈다
     Back(TabId), Forward(TabId),
     SetZoom { tab: TabId, zoom: ZoomMode }, StartDiff { left: PathBuf, right: PathBuf },
     // ...
@@ -665,6 +666,20 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 
 `session.rs` 가 `AppState` → `Session` 변환과 그 반대를 맡는다. 구조나 위치가 바뀌면 2초 뒤 저장(연속 변경은 한 번으로), 종료 시 즉시 저장.
 복원 시 파일이 없는 탭은 지우지 않고 오류 상태의 탭으로 만든다(SES-6).
+
+### 5.9 목차 패널 (WP-31)
+
+`panels/toc.rs`. 창마다 왼쪽 옆 패널(`WindowState.toc_open`, `toc_width`), 내용은 그 창에서 포커스된 탭의 `Outline`.
+
+- 탭마다 `PdfTab.toc: TocState`(필터 글, 접힌 항목, 저장하지 않음). 접힌 항목은 색인 집합이고, 세션 저장용으로는
+  제목 경로 `Vec<Vec<String>>` 로 내보내고 되읽는다(`TocState::collapsed_paths` / `set_collapsed_paths`, `DocRecord.toc_collapsed` 의 형태).
+  같은 부모 아래 같은 제목의 형제는 경로 마디 끝에 NUL 을 앞선 형제 수만큼 붙여 구별한다. 문서에 없는 경로는 되읽을 때 무시한다.
+  되읽은 경로는 목차가 처음 그려질 때 적용된다. 문서 세대가 바뀌면 접힘 상태는 처음(최상위만)으로 돌아간다.
+- 보이는 줄 계산(`visible_rows`), 필터(`filtered_rows`, 일치 구간 포함), 현재 절(`TocState::prepare`), 스크롤 판단(`scroll_target`)은 egui 없는 순수 함수다.
+- 현재 절은 `anchor` 가 아니라 뷰포트 높이의 1/4 아래 지점(`reading_location`)으로 `Outline::current` 를 구한다.
+  현재 절이 **바뀐 프레임에만** 그 경로를 펼치고(필터 중에는 펼치지 않음), 포인터가 패널 밖일 때만 그 줄로 스크롤한다.
+- 목차 항목을 눌러 가는 곳의 x 는 0 으로 둔다(제목 목적지의 x 는 쪽 여백이라, 확대한 뷰가 옆으로 밀리지 않게).
+- `Navigate` 는 `Here`(히스토리에 `jump`), `NewTab`(= `DuplicateTab` 후 이동), `SplitSide`(= 오른쪽 `SplitTab` 후 이동)다. 쪽 번호는 문서 쪽수로 줄인다.
 
 ## 6. M0 에서 확정될 것
 

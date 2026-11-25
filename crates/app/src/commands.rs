@@ -228,6 +228,15 @@ pub static COMMANDS: &[Command] = &[
         action: |s| s.focus.map(Action::ShowGoToPage),
     },
     Command {
+        id: "view.toggle_toc",
+        name_key: "cmd.view.toggle_toc",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F9)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ToggleToc),
+    },
+    Command {
         id: "tab.next",
         name_key: "cmd.tab.next",
         menu: MenuGroup::Tab,
@@ -1093,5 +1102,30 @@ mod tests {
         });
         assert!(ctx.text_edit_focused());
         assert_eq!(press(&ctx, &state, Modifiers::CTRL, Key::O), None);
+    }
+
+    #[test]
+    fn the_toc_command_is_f9_in_the_view_menu_and_always_possible() {
+        let view_menu: Vec<&str> = in_menu(MenuGroup::View).map(|c| c.id).collect();
+        assert!(view_menu.contains(&"view.toggle_toc"));
+        let command = COMMANDS
+            .iter()
+            .find(|c| c.id == "view.toggle_toc")
+            .expect("command");
+        assert_eq!(
+            command.shortcut,
+            Some(KeyboardShortcut::new(Modifiers::NONE, Key::F9))
+        );
+        // Also on the start page, where the panel shows a hint.
+        let ctx = egui::Context::default();
+        let state = AppState::new();
+        assert_eq!(command.run(&state), Some(Action::ToggleToc));
+        assert_eq!(
+            press(&ctx, &state, Modifiers::NONE, Key::F9),
+            Some(Action::ToggleToc)
+        );
+        for lang in [Lang::Ko, Lang::En] {
+            assert!(lookup(lang, command.name_key).is_some());
+        }
     }
 }

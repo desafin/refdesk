@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use refdesk_core::{DocumentHandle, ViewState};
 
 use crate::action::Action;
+use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::views::preload::Preloader;
 use crate::views::textures::TextureCache;
@@ -128,9 +129,15 @@ pub struct PdfTab {
     pub view: ViewState,
     /// View state that is not saved: scroll in pixels, cached layout, inputs (WP-15).
     pub ui: PdfViewUiState,
+    /// Filter text and collapsed entries of the table of contents panel; not saved (WP-31).
+    /// Boxed so that the `Tab` enum stays small.
+    pub toc: Box<TocState>,
 }
 
 /// The content of a tab.
+// Nearly every tab is a PDF tab (there is at most one start page per window), so boxing the
+// large variant would only add an indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Tab {
     /// A PDF document.
@@ -209,6 +216,10 @@ pub struct WindowState {
     pub id: WindowId,
     /// The panes and tabs of the window.
     pub dock: DockLayout,
+    /// The table of contents panel is shown (TOC-3).
+    pub toc_open: bool,
+    /// Width of the table of contents panel in logical pixels.
+    pub toc_width: f32,
 }
 
 impl WindowState {
@@ -217,6 +228,8 @@ impl WindowState {
         WindowState {
             id,
             dock: DockLayout::new(),
+            toc_open: false,
+            toc_width: DEFAULT_TOC_WIDTH,
         }
     }
 }

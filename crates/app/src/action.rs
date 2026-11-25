@@ -85,8 +85,32 @@ pub enum Action {
     MergeAllWindows,
     /// Close a window and its tabs. For the main window this quits the application (WIN-5).
     CloseWindow(WindowId),
+    /// Move a PDF tab to a place in its document as a recorded long jump (LINK-3), here or in a
+    /// new view. The place is limited to the pages of the document. Used by the table of
+    /// contents and by links.
+    Navigate {
+        /// The tab to move, or whose view is copied for the other [`OpenHow`] kinds.
+        tab: TabId,
+        /// Where to go.
+        to: Location,
+        /// Which view shows the place.
+        how: OpenHow,
+    },
+    /// Show or hide the table of contents panel of the focused window (TOC-3).
+    ToggleToc,
     /// Close the application.
     Quit,
+}
+
+/// Which view an [`Action::Navigate`] moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenHow {
+    /// The view that asked.
+    Here,
+    /// A new tab on the same document, next to the asking one. The asking view stays where it is.
+    NewTab,
+    /// A new tab on the same document in a new pane to the right. The asking view stays.
+    SplitSide,
 }
 
 /// The notifier handed to documents: it asks egui for a new frame.
@@ -111,8 +135,12 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::CloseOtherTabs(tab) => close_other_tabs(state, tab),
         Action::ReopenClosedTab => reopen_closed_tab(state, ctx),
         Action::FocusTab(tab) => focus_tab(state, tab),
-        Action::DuplicateTab(tab) => duplicate_tab(state, tab),
-        Action::SplitTab { tab, dir } => split_tab(state, tab, dir),
+        Action::DuplicateTab(tab) => {
+            duplicate_tab(state, tab);
+        }
+        Action::SplitTab { tab, dir } => {
+            split_tab(state, tab, dir);
+        }
         Action::NextTab => cycle_tab(state, true),
         Action::PrevTab => cycle_tab(state, false),
         Action::FocusNextPane => focus_next_pane(state),
@@ -151,6 +179,13 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 quit(ctx);
             } else {
                 transfer::close_window(state, id);
+            }
+        }
+        Action::Navigate { tab, to, how } => navigate(state, tab, to, how),
+        Action::ToggleToc => {
+            let w = state.focused_window_index();
+            if let Some(window) = state.windows.get_mut(w) {
+                window.toc_open = !window.toc_open;
             }
         }
         Action::Quit => quit(ctx),
@@ -223,6 +258,7 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
         doc,
         view,
         ui: PdfViewUiState::default(),
+        toc: Box::default(),
     }));
     place_new_tab(state, tab, None);
 }
@@ -243,42 +279,68 @@ fn existing_tab_for(state: &AppState, doc: DocId) -> Option<TabId> {
         })
 }
 
-/// Moves a view to the top of `page` as a recorded long jump.
-fn jump_to_page(state: &mut AppState, tab: TabId, page: u32) {
+/// Moves a view to `to` as a recorded long jump: the place the view is at now and the new place
+/// go into the history (LINK-3), and a jump to the same spot adds nothing.
+fn jump_to(state: &mut AppState, tab: TabId, to: Location) {
     if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
         let doc = pdf.view.history.current().doc.clone();
         let from = Place {
             doc: doc.clone(),
             loc: pdf.view.anchor,
         };
-        let to = Place {
-            doc,
-            loc: Location::new(page, 0.0, 0.0),
-        };
+        let to = Place { doc, loc: to };
         pdf.view.anchor = to.loc;
         pdf.view.history.jump(from, to);
+    }
+}
+
+/// Moves a view to the top of `page` as a recorded long jump.
+fn jump_to_page(state: &mut AppState, tab: TabId, page: u32) {
+    jump_to(state, tab, Location::new(page, 0.0, 0.0));
+}
+
+/// `page` limited to the pages of the document of `tab`, when they are known. `None` for a
+/// document without pages.
+fn limit_page(state: &AppState, tab: TabId, page: u32) -> Option<u32> {
+    let pdf = state.tabs.pdf(tab)?;
+    let count = state
+        .docs
+        .get(pdf.doc)
+        .and_then(|doc| doc.info())
+        .map(|info| info.page_sizes.len() as u32);
+    match count {
+        Some(0) => None,
+        Some(n) => Some(page.min(n - 1)),
+        None => Some(page),
     }
 }
 
 /// Jumps a PDF tab to the top of `page`, limited to the pages of its document when they are
 /// known.
 fn go_to_page(state: &mut AppState, tab: TabId, page: u32) {
-    let Some(pdf) = state.tabs.pdf(tab) else {
+    let Some(page) = limit_page(state, tab, page) else {
         return;
-    };
-    let count = state
-        .docs
-        .get(pdf.doc)
-        .and_then(|doc| doc.info())
-        .map(|info| info.page_sizes.len() as u32);
-    let page = match count {
-        Some(0) => return,
-        Some(n) => page.min(n - 1),
-        None => page,
     };
     jump_to_page(state, tab, page);
     if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
         pdf.ui.goto = None;
+    }
+}
+
+/// Moves `tab` (or a new view copied from it) to `to` as a recorded long jump. A new view
+/// copies the history of `tab` first, so going back there leads to where `tab` was.
+fn navigate(state: &mut AppState, tab: TabId, to: Location, how: OpenHow) {
+    let Some(page) = limit_page(state, tab, to.page) else {
+        return;
+    };
+    let to = Location { page, ..to };
+    let target = match how {
+        OpenHow::Here => Some(tab),
+        OpenHow::NewTab => duplicate_tab(state, tab),
+        OpenHow::SplitSide => split_tab(state, tab, SplitDir::Right),
+    };
+    if let Some(target) = target {
+        jump_to(state, target, to);
     }
 }
 
@@ -348,6 +410,7 @@ fn reopen_closed_tab(state: &mut AppState, ctx: &egui::Context) {
         doc,
         view: closed.view,
         ui: PdfViewUiState::default(),
+        toc: Box::default(),
     }));
     place_new_tab(state, tab, None);
 }
@@ -361,28 +424,26 @@ fn copy_view(state: &mut AppState, tab: TabId) -> Option<TabId> {
     Some(state.tabs.insert(Tab::Pdf(source)))
 }
 
-/// Adds a new tab on the same document right after `tab`, with a copy of the view state.
-fn duplicate_tab(state: &mut AppState, tab: TabId) {
-    if state.window_of(tab).is_none() {
-        return;
-    }
-    if let Some(new) = copy_view(state, tab) {
-        place_new_tab(state, new, Some(tab));
-    }
+/// Adds a new tab on the same document right after `tab`, with a copy of the view state, and
+/// returns it.
+fn duplicate_tab(state: &mut AppState, tab: TabId) -> Option<TabId> {
+    state.window_of(tab)?;
+    let new = copy_view(state, tab)?;
+    place_new_tab(state, new, Some(tab));
+    Some(new)
 }
 
 /// Splits the pane of `tab` and shows a copy of its view in the new pane, which gets the focus.
-fn split_tab(state: &mut AppState, tab: TabId, dir: SplitDir) {
-    let Some(w) = state.window_of(tab) else {
-        return;
-    };
-    let Some(new) = copy_view(state, tab) else {
-        return;
-    };
+/// Returns the new tab.
+fn split_tab(state: &mut AppState, tab: TabId, dir: SplitDir) -> Option<TabId> {
+    let w = state.window_of(tab)?;
+    let new = copy_view(state, tab)?;
     if state.windows[w].dock.split(tab, new, dir) {
         state.focus = Some(new);
+        Some(new)
     } else {
         state.tabs.remove(new);
+        None
     }
 }
 
@@ -1048,5 +1109,256 @@ mod tests {
         assert_eq!(state.focus, Some(a));
         assert_eq!(state.main_window().dock.focused_tab(), Some(a));
         assert_eq!(state.tabs.len(), 3);
+    }
+
+    fn at(page: u32, x: f32, y: f32) -> Location {
+        Location::new(page, x, y)
+    }
+
+    fn view(state: &AppState, tab: TabId) -> &ViewState {
+        &state.tabs.pdf(tab).expect("pdf tab").view
+    }
+
+    #[test]
+    fn navigate_here_moves_the_view_and_back_returns_to_the_exact_spot() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        // The reader has scrolled into the middle of page 2.
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+            pdf.view.anchor = at(1, 12.0, 250.0);
+        }
+        let to = at(5, 0.0, 120.0);
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab,
+                to,
+                how: OpenHow::Here,
+            },
+            &ctx,
+        );
+        assert_eq!(view(&state, tab).anchor, to);
+        assert!(view(&state, tab).history.can_back());
+        assert_eq!(view(&state, tab).history.len(), 2);
+
+        // Going back leads to where the reader was, including the position inside the page.
+        let current = Place {
+            doc: PathBuf::from("/refdesk-test/a.pdf"),
+            loc: to,
+        };
+        let mut history = view(&state, tab).history.clone();
+        let back = history
+            .back(current)
+            .expect("there is a place to go back to");
+        assert_eq!(back.loc, at(1, 12.0, 250.0));
+        let forward = history.forward(back).expect("and forward again");
+        assert_eq!(forward.loc, to);
+    }
+
+    #[test]
+    fn navigating_to_the_same_spot_does_not_grow_the_history() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        let to = at(3, 0.0, 80.0);
+        for _ in 0..3 {
+            dispatch(
+                &mut state,
+                Action::Navigate {
+                    tab,
+                    to,
+                    how: OpenHow::Here,
+                },
+                &ctx,
+            );
+        }
+        assert_eq!(view(&state, tab).history.len(), 2);
+        assert_eq!(view(&state, tab).anchor, to);
+        // A spot a few points away on the same page is the same spot too (LINK-3).
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab,
+                to: at(3, 0.0, 81.0),
+                how: OpenHow::Here,
+            },
+            &ctx,
+        );
+        assert_eq!(view(&state, tab).history.len(), 2);
+    }
+
+    #[test]
+    fn go_to_page_uses_the_same_path_as_navigate() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::DuplicateTab(a), &ctx);
+        let (b, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::GoToPage { tab: a, page: 4 }, &ctx);
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab: b,
+                to: at(4, 0.0, 0.0),
+                how: OpenHow::Here,
+            },
+            &ctx,
+        );
+        assert_eq!(view(&state, a).anchor, view(&state, b).anchor);
+        assert_eq!(view(&state, a).history, view(&state, b).history);
+    }
+
+    #[test]
+    fn navigate_in_a_new_tab_leaves_the_original_where_it_was() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let before = view(&state, a).clone();
+        let to = at(7, 0.0, 33.0);
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab: a,
+                to,
+                how: OpenHow::NewTab,
+            },
+            &ctx,
+        );
+        assert_eq!(view(&state, a), &before, "the asking view did not move");
+        let (new, _) = state.focused_pdf().expect("the new tab is focused");
+        assert_ne!(new, a);
+        assert_eq!(view(&state, new).anchor, to);
+        assert!(
+            view(&state, new).history.can_back(),
+            "back in the new tab leads to where it came from"
+        );
+        // Same pane, right after the original; same document.
+        assert_eq!(state.main_window().dock.pane_tabs(a), vec![a, new]);
+        assert_eq!(state.docs.len(), 1);
+        assert_eq!(
+            state.tabs.pdf(a).map(|t| t.doc),
+            state.tabs.pdf(new).map(|t| t.doc)
+        );
+    }
+
+    #[test]
+    fn navigate_to_a_split_adds_a_pane() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let before = view(&state, a).clone();
+        assert_eq!(state.main_window().dock.pane_count(), 1);
+        let to = at(2, 0.0, 10.0);
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab: a,
+                to,
+                how: OpenHow::SplitSide,
+            },
+            &ctx,
+        );
+        assert_eq!(state.main_window().dock.pane_count(), 2);
+        assert_eq!(view(&state, a), &before);
+        let (new, _) = state.focused_pdf().expect("the new view is focused");
+        assert_eq!(view(&state, new).anchor, to);
+        let panes: Vec<Vec<TabId>> = state
+            .main_window()
+            .dock
+            .pane_rects()
+            .into_iter()
+            .map(|(_, tabs)| tabs)
+            .collect();
+        assert_eq!(panes, vec![vec![a], vec![new]]);
+    }
+
+    #[test]
+    fn navigate_ignores_tabs_that_are_not_pdf_tabs() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let start = state.main_window().dock.tabs()[0];
+        for how in [OpenHow::Here, OpenHow::NewTab, OpenHow::SplitSide] {
+            dispatch(
+                &mut state,
+                Action::Navigate {
+                    tab: start,
+                    to: at(1, 0.0, 0.0),
+                    how,
+                },
+                &ctx,
+            );
+        }
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.main_window().dock.pane_count(), 1);
+    }
+
+    #[test]
+    fn navigate_limits_the_page_to_the_document() {
+        use refdesk_core::testutil::PdfBuilder;
+        let pdf = PdfBuilder::new()
+            .page(200.0, 200.0, |_| {})
+            .page(200.0, 200.0, |_| {})
+            .write_temp("navigate-limit");
+        let ctx = egui::Context::default();
+        let repaints = crate::views::test_support::watch_repaints(&ctx);
+        let mut state = AppState::new();
+        open(
+            &mut state,
+            &ctx,
+            pdf.path().to_str().expect("utf-8 temp path"),
+        );
+        let (tab, p) = state.focused_pdf().expect("pdf tab");
+        let doc = state.docs.get(p.doc).expect("doc").clone();
+        repaints.wait_until("the document info", || doc.info().is_some());
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab,
+                to: at(99, 0.0, 40.0),
+                how: OpenHow::Here,
+            },
+            &ctx,
+        );
+        assert_eq!(view(&state, tab).anchor, at(1, 0.0, 40.0));
+    }
+
+    #[test]
+    fn toggle_toc_changes_only_the_focused_window() {
+        use crate::panels::toc::DEFAULT_TOC_WIDTH;
+        use crate::state::WindowState;
+        use crate::windows::dock::DockLayout;
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let id = state.new_window_id();
+        let second_tab = state.tabs.insert(Tab::Start);
+        let mut dock = DockLayout::new();
+        dock.add_tab(second_tab, None);
+        state.windows.push(WindowState {
+            id,
+            dock,
+            toc_open: false,
+            toc_width: DEFAULT_TOC_WIDTH,
+        });
+        let open_flags =
+            |state: &AppState| -> Vec<bool> { state.windows.iter().map(|w| w.toc_open).collect() };
+        assert_eq!(open_flags(&state), vec![false, false]);
+
+        state.focus = Some(second_tab);
+        dispatch(&mut state, Action::ToggleToc, &ctx);
+        assert_eq!(open_flags(&state), vec![false, true]);
+        dispatch(&mut state, Action::ToggleToc, &ctx);
+        assert_eq!(open_flags(&state), vec![false, false]);
+
+        let first_tab = state.main_window().dock.tabs()[0];
+        state.focus = Some(first_tab);
+        dispatch(&mut state, Action::ToggleToc, &ctx);
+        assert_eq!(open_flags(&state), vec![true, false]);
+        assert_eq!(state.windows[1].toc_width, DEFAULT_TOC_WIDTH);
     }
 }

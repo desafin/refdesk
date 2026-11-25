@@ -23,6 +23,7 @@ use crate::action::Action;
 use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
 use crate::panels::status_bar;
+use crate::panels::toc;
 use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore, WindowId};
 use crate::views::pdf_view::{self, ViewContext};
 use crate::views::textures::TextureCache;
@@ -199,6 +200,7 @@ pub fn show_window(
     let window_id = window.id;
     let shown = window.dock.tabs();
     let window_focus = window.dock.focused_tab();
+    let (toc_open, toc_width) = (window.toc_open, window.toc_width);
 
     // Everything the tab bars and menus show is worked out before the window's layout is
     // borrowed for drawing.
@@ -215,6 +217,20 @@ pub fn show_window(
         // The status bar describes the focused tab of this window.
         status_bar::show(ui, state, window_focus, queue);
     });
+
+    if toc_open {
+        // The panel shows the contents of this window's focused tab; the width the user
+        // dragged it to is remembered per window.
+        let shown = Panel::left(Id::unique(("toc", window_id)))
+            .default_size(toc_width)
+            .size_range(toc::TOC_WIDTH_RANGE.0..=toc::TOC_WIDTH_RANGE.1)
+            .show(ui, |ui| {
+                toc::show(ui, &mut state.tabs, &state.docs, window_focus, queue);
+            });
+        if let Some(window) = state.windows.get_mut(window_index) {
+            window.toc_width = shown.response.rect.width();
+        }
+    }
 
     let AppState {
         windows,
