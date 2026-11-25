@@ -1,0 +1,586 @@
+//! Actions and `dispatch`, the only place that changes the application structure (rule R-6).
+//!
+//! Widgets push [`Action`]s onto a queue; the queue is dispatched at the end of the frame
+//! (`docs/ARCHITECTURE.md` §5.2). `dispatch` only changes state, so tests run it without a window.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
+
+use crate::state::{AppState, PdfTab, Tab, TabId, normalize_path};
+
+/// A file to open, optionally at a page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenTarget {
+    /// The file. May be relative; it is normalized when opened.
+    pub path: PathBuf,
+    /// Zero-based page to show first.
+    pub page: Option<u32>,
+}
+
+/// The marker that starts a page request in a command-line argument.
+const PAGE_MARKER: &str = "#page=";
+
+impl OpenTarget {
+    /// Parses a command-line argument: `a.pdf` or `a.pdf#page=12`.
+    ///
+    /// The page number is 1-based for people and becomes 0-based here. A fragment that is not a
+    /// positive number is dropped (and logged) so the file still opens, at its first page.
+    /// Only the exact marker `#page=` counts, so a file name that contains `#` is taken whole.
+    pub fn parse(arg: &str) -> OpenTarget {
+        if let Some(at) = arg.rfind(PAGE_MARKER) {
+            let (path, rest) = (&arg[..at], &arg[at + PAGE_MARKER.len()..]);
+            if !path.is_empty() {
+                let page = match rest.parse::<u32>() {
+                    Ok(n) if n >= 1 => Some(n - 1),
+                    _ => {
+                        log::warn!("ignoring invalid page number in argument {arg:?}");
+                        None
+                    }
+                };
+                return OpenTarget {
+                    path: PathBuf::from(path),
+                    page,
+                };
+            }
+        }
+        OpenTarget {
+            path: PathBuf::from(arg),
+            page: None,
+        }
+    }
+}
+
+/// Something the user (or the outside world) asked for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    /// Open these files; the last one gets the focus.
+    OpenFiles(Vec<OpenTarget>),
+    /// Ask for the file chooser.
+    OpenFileDialog,
+    /// Close a tab.
+    CloseTab(TabId),
+    /// Show a tab and make it the target of commands.
+    FocusTab(TabId),
+    /// Open another view of the same document, copying the view state.
+    DuplicateTab(TabId),
+    /// Activate the tab after the active one, wrapping around.
+    NextTab,
+    /// Activate the tab before the active one, wrapping around.
+    PrevTab,
+    /// Change the zoom of a PDF tab.
+    SetZoom {
+        /// The tab to change.
+        tab: TabId,
+        /// The new zoom.
+        zoom: ZoomMode,
+    },
+    /// Close the application.
+    Quit,
+}
+
+/// The notifier handed to documents: it asks egui for a new frame.
+fn notifier(ctx: &egui::Context) -> Notifier {
+    let ctx = ctx.clone();
+    Arc::new(move || ctx.request_repaint())
+}
+
+/// Applies one action to the state.
+pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
+    match action {
+        Action::OpenFiles(targets) => {
+            for target in targets {
+                open_file(state, target, ctx);
+            }
+        }
+        Action::OpenFileDialog => {
+            state.file_dialog_requested = true;
+            ctx.request_repaint();
+        }
+        Action::CloseTab(tab) => close_tab(state, tab),
+        Action::FocusTab(tab) => focus_tab(state, tab),
+        Action::DuplicateTab(tab) => duplicate_tab(state, tab),
+        Action::NextTab => cycle_tab(state, 1),
+        Action::PrevTab => cycle_tab(state, -1),
+        Action::SetZoom { tab, zoom } => {
+            if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+                pdf.view.zoom = zoom;
+            }
+        }
+        Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+    }
+}
+
+/// Dispatches everything in `state.actions`, in order.
+pub fn dispatch_queued(state: &mut AppState, ctx: &egui::Context) {
+    let queue = std::mem::take(&mut state.actions);
+    for action in queue {
+        dispatch(state, action, ctx);
+    }
+}
+
+/// Makes `tab` the active tab of the main window and the focus, if the window has it.
+fn focus_tab(state: &mut AppState, tab: TabId) {
+    if state.main_window_mut().activate(tab) {
+        state.focus = Some(tab);
+    }
+}
+
+/// Opens a document and shows it in a tab. An already open document is not opened again: its
+/// existing tab gets the focus instead (OPEN-5).
+fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
+    let path = normalize_path(&target.path);
+    if let Some(doc) = state.docs.find(&path) {
+        if let Some(tab) = existing_tab_for(state, doc) {
+            if let Some(page) = target.page {
+                jump_to_page(state, tab, page);
+            }
+            focus_tab(state, tab);
+            return;
+        }
+        // A document without a tab should not exist (closing the last tab drops it). Recover by
+        // dropping the stale entry and opening it again.
+        state.docs.remove(doc);
+    }
+
+    let handle = DocumentHandle::open(&path, notifier(ctx));
+    let doc = state.docs.insert(handle);
+    let mut view = ViewState::new(path.clone());
+    if let Some(page) = target.page {
+        let loc = Location::new(page, 0.0, 0.0);
+        view.anchor = loc;
+        view.history = refdesk_core::History::new(Place { doc: path, loc });
+    }
+    let tab = state.tabs.insert(Tab::Pdf(PdfTab { doc, view }));
+
+    // The start page makes room for the first document.
+    let start_tabs: Vec<TabId> = state
+        .main_window()
+        .tabs
+        .iter()
+        .copied()
+        .filter(|t| matches!(state.tabs.get(*t), Some(Tab::Start)))
+        .collect();
+    let only_start = start_tabs.len() == state.main_window().tabs.len();
+    if only_start {
+        for t in start_tabs {
+            state.main_window_mut().remove_tab(t);
+            state.tabs.remove(t);
+        }
+    }
+
+    state.main_window_mut().push_tab(tab);
+    focus_tab(state, tab);
+}
+
+/// The tab to show for a document that is already open: the focused one if it shows the
+/// document, else the first in window order.
+fn existing_tab_for(state: &AppState, doc: crate::state::DocId) -> Option<TabId> {
+    let shows_doc = |t: &TabId| matches!(state.tabs.get(*t), Some(Tab::Pdf(p)) if p.doc == doc);
+    state
+        .focus
+        .filter(|t| shows_doc(t) && state.main_window().tabs.contains(t))
+        .or_else(|| state.main_window().tabs.iter().copied().find(shows_doc))
+}
+
+/// Moves a view to the top of `page` as a recorded long jump.
+fn jump_to_page(state: &mut AppState, tab: TabId, page: u32) {
+    if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+        let doc = pdf.view.history.current().doc.clone();
+        let from = Place {
+            doc: doc.clone(),
+            loc: pdf.view.anchor,
+        };
+        let to = Place {
+            doc,
+            loc: Location::new(page, 0.0, 0.0),
+        };
+        pdf.view.anchor = to.loc;
+        pdf.view.history.jump(from, to);
+    }
+}
+
+/// Closes a tab, drops its document when no other tab shows it, and keeps the window non-empty by
+/// showing the start page after the last tab.
+fn close_tab(state: &mut AppState, tab: TabId) {
+    if !state.main_window().tabs.contains(&tab) {
+        return;
+    }
+    // Closing the start page when it is the only tab would just bring it back.
+    if state.main_window().tabs.len() == 1 && matches!(state.tabs.get(tab), Some(Tab::Start)) {
+        return;
+    }
+    state.main_window_mut().remove_tab(tab);
+    if let Some(Tab::Pdf(pdf)) = state.tabs.remove(tab)
+        && !state.tabs.doc_in_use(pdf.doc)
+    {
+        state.docs.remove(pdf.doc);
+    }
+    if state.main_window().tabs.is_empty() {
+        let start = state.tabs.insert(Tab::Start);
+        state.main_window_mut().push_tab(start);
+        state.main_window_mut().activate(start);
+    }
+    state.focus = state.main_window().active;
+}
+
+/// Adds a new tab on the same document, with a copy of the view state.
+fn duplicate_tab(state: &mut AppState, tab: TabId) {
+    let Some(source) = state.tabs.pdf(tab).cloned() else {
+        return;
+    };
+    let new = state.tabs.insert(Tab::Pdf(source));
+    state.main_window_mut().insert_after(tab, new);
+    focus_tab(state, new);
+}
+
+/// Activates the neighbor of the active tab, wrapping around.
+fn cycle_tab(state: &mut AppState, step: isize) {
+    if let Some(tab) = state.main_window().cycle(step) {
+        focus_tab(state, tab);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn open(state: &mut AppState, ctx: &egui::Context, path: &str) {
+        dispatch(
+            state,
+            Action::OpenFiles(vec![OpenTarget {
+                path: PathBuf::from(path),
+                page: None,
+            }]),
+            ctx,
+        );
+    }
+
+    fn active(state: &AppState) -> Option<TabId> {
+        state.main_window().active
+    }
+
+    #[test]
+    fn open_files_creates_a_document_and_a_focused_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+
+        assert_eq!(state.docs.len(), 1);
+        // The start page made room for the document.
+        assert_eq!(state.tabs.len(), 1);
+        let tab = active(&state).expect("a tab is active");
+        assert_eq!(state.focus, Some(tab));
+        let pdf = state.tabs.pdf(tab).expect("a pdf tab");
+        let doc = state.docs.get(pdf.doc).expect("the document exists");
+        assert_eq!(doc.path(), Path::new("/refdesk-test/a.pdf"));
+    }
+
+    #[test]
+    fn opening_several_files_focuses_the_last() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![
+                OpenTarget::parse("/refdesk-test/a.pdf"),
+                OpenTarget::parse("/refdesk-test/b.pdf#page=3"),
+            ]),
+            &ctx,
+        );
+        assert_eq!(state.main_window().tabs.len(), 2);
+        let last = *state.main_window().tabs.last().expect("two tabs");
+        assert_eq!(state.focus, Some(last));
+        let pdf = state.tabs.pdf(last).expect("a pdf tab");
+        assert_eq!(pdf.view.anchor.page, 2);
+        assert_eq!(pdf.view.history.current().loc.page, 2);
+    }
+
+    #[test]
+    fn opening_a_missing_file_still_creates_a_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/does/not/exist.pdf");
+        assert_eq!(state.docs.len(), 1);
+        assert!(state.focused_pdf().is_some());
+    }
+
+    #[test]
+    fn opening_the_same_path_twice_focuses_the_existing_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let first = state.main_window().tabs[0];
+        assert_ne!(state.focus, Some(first));
+
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        assert_eq!(state.docs.len(), 2);
+        assert_eq!(state.main_window().tabs.len(), 2);
+        assert_eq!(state.focus, Some(first));
+        assert_eq!(active(&state), Some(first));
+    }
+
+    #[test]
+    fn differently_spelled_paths_of_one_file_are_one_document() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let cwd = std::env::current_dir().expect("cwd");
+        let absolute = cwd.join("refdesk-test-missing.pdf");
+
+        open(&mut state, &ctx, "./refdesk-test-missing.pdf");
+        open(&mut state, &ctx, absolute.to_str().expect("utf-8 cwd"));
+        open(&mut state, &ctx, "sub/../refdesk-test-missing.pdf");
+
+        assert_eq!(state.docs.len(), 1);
+        assert_eq!(state.main_window().tabs.len(), 1);
+    }
+
+    #[test]
+    fn reopening_with_a_page_jumps_the_existing_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/a.pdf#page=5")]),
+            &ctx,
+        );
+        assert_eq!(state.main_window().tabs.len(), 1);
+        let (_, pdf) = state.focused_pdf().expect("pdf tab");
+        assert_eq!(pdf.view.anchor.page, 4);
+        assert!(pdf.view.history.can_back());
+    }
+
+    #[test]
+    fn duplicate_tab_makes_a_second_tab_on_the_same_document() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(
+            &mut state,
+            Action::SetZoom {
+                tab,
+                zoom: ZoomMode::Custom(2.0),
+            },
+            &ctx,
+        );
+        dispatch(&mut state, Action::DuplicateTab(tab), &ctx);
+
+        assert_eq!(state.docs.len(), 1);
+        assert_eq!(state.main_window().tabs.len(), 2);
+        let (copy, copy_tab) = state.focused_pdf().expect("the copy is focused");
+        assert_ne!(copy, tab);
+        let original = state.tabs.pdf(tab).expect("original");
+        assert_eq!(copy_tab.doc, original.doc);
+        assert_eq!(copy_tab.view, original.view);
+        assert_eq!(copy_tab.view.zoom, ZoomMode::Custom(2.0));
+        // The copy sits next to its source.
+        assert_eq!(state.main_window().tabs, vec![tab, copy]);
+    }
+
+    #[test]
+    fn duplicating_the_start_page_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let start = state.main_window().tabs[0];
+        dispatch(&mut state, Action::DuplicateTab(start), &ctx);
+        assert_eq!(state.main_window().tabs.len(), 1);
+    }
+
+    #[test]
+    fn closing_the_last_tab_of_a_document_drops_the_document() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::DuplicateTab(tab), &ctx);
+        assert_eq!(state.docs.len(), 1);
+
+        // One tab left on the document: it stays.
+        dispatch(&mut state, Action::CloseTab(tab), &ctx);
+        assert_eq!(state.docs.len(), 1);
+        let (rest, _) = state.focused_pdf().expect("the copy remains");
+
+        // The last one goes: the document goes too.
+        dispatch(&mut state, Action::CloseTab(rest), &ctx);
+        assert_eq!(state.docs.len(), 0);
+        assert!(state.docs.find(Path::new("/refdesk-test/a.pdf")).is_none());
+    }
+
+    #[test]
+    fn closing_the_active_tab_activates_a_neighbor() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        for name in ["a", "b", "c"] {
+            open(&mut state, &ctx, &format!("/refdesk-test/{name}.pdf"));
+        }
+        let tabs = state.main_window().tabs.clone();
+        dispatch(&mut state, Action::FocusTab(tabs[1]), &ctx);
+
+        dispatch(&mut state, Action::CloseTab(tabs[1]), &ctx);
+        assert_eq!(active(&state), Some(tabs[2]));
+        assert_eq!(state.focus, Some(tabs[2]));
+
+        dispatch(&mut state, Action::CloseTab(tabs[2]), &ctx);
+        assert_eq!(active(&state), Some(tabs[0]));
+        assert_eq!(state.focus, Some(tabs[0]));
+    }
+
+    #[test]
+    fn closing_an_inactive_tab_keeps_the_active_one() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let tabs = state.main_window().tabs.clone();
+        dispatch(&mut state, Action::CloseTab(tabs[0]), &ctx);
+        assert_eq!(active(&state), Some(tabs[1]));
+        assert_eq!(state.docs.len(), 1);
+    }
+
+    #[test]
+    fn closing_the_last_tab_shows_the_start_page() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::CloseTab(tab), &ctx);
+
+        assert_eq!(state.main_window().tabs.len(), 1);
+        let shown = active(&state).expect("a tab is active");
+        assert!(matches!(state.tabs.get(shown), Some(Tab::Start)));
+        assert_eq!(state.focus, Some(shown));
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.docs.len(), 0);
+
+        // Closing the start page itself changes nothing.
+        dispatch(&mut state, Action::CloseTab(shown), &ctx);
+        assert_eq!(active(&state), Some(shown));
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn next_and_prev_tab_wrap_around() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        for name in ["a", "b", "c"] {
+            open(&mut state, &ctx, &format!("/refdesk-test/{name}.pdf"));
+        }
+        let tabs = state.main_window().tabs.clone();
+        assert_eq!(active(&state), Some(tabs[2]));
+
+        dispatch(&mut state, Action::NextTab, &ctx);
+        assert_eq!(active(&state), Some(tabs[0]));
+        assert_eq!(state.focus, Some(tabs[0]));
+        dispatch(&mut state, Action::PrevTab, &ctx);
+        assert_eq!(active(&state), Some(tabs[2]));
+        dispatch(&mut state, Action::PrevTab, &ctx);
+        assert_eq!(active(&state), Some(tabs[1]));
+    }
+
+    #[test]
+    fn set_zoom_changes_only_pdf_tabs() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let start = state.main_window().tabs[0];
+        dispatch(
+            &mut state,
+            Action::SetZoom {
+                tab: start,
+                zoom: ZoomMode::FitPage,
+            },
+            &ctx,
+        );
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(
+            &mut state,
+            Action::SetZoom {
+                tab,
+                zoom: ZoomMode::FitPage,
+            },
+            &ctx,
+        );
+        assert_eq!(
+            state.tabs.pdf(tab).expect("tab").view.zoom,
+            ZoomMode::FitPage
+        );
+    }
+
+    #[test]
+    fn file_dialog_action_only_sets_a_request_flag() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(&mut state, Action::OpenFileDialog, &ctx);
+        assert!(state.file_dialog_requested);
+    }
+
+    #[test]
+    fn dispatch_queued_runs_actions_in_order_and_empties_the_queue() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        state.actions.push(Action::OpenFiles(vec![OpenTarget::parse(
+            "/refdesk-test/a.pdf",
+        )]));
+        state.actions.push(Action::OpenFileDialog);
+        dispatch_queued(&mut state, &ctx);
+        assert!(state.actions.is_empty());
+        assert_eq!(state.docs.len(), 1);
+        assert!(state.file_dialog_requested);
+    }
+
+    #[test]
+    fn parse_plain_path() {
+        let t = OpenTarget::parse("docs/a.pdf");
+        assert_eq!(t.path, PathBuf::from("docs/a.pdf"));
+        assert_eq!(t.page, None);
+    }
+
+    #[test]
+    fn parse_page_fragment_is_one_based_in_and_zero_based_out() {
+        let t = OpenTarget::parse("a.pdf#page=12");
+        assert_eq!(t.path, PathBuf::from("a.pdf"));
+        assert_eq!(t.page, Some(11));
+        assert_eq!(OpenTarget::parse("a.pdf#page=1").page, Some(0));
+    }
+
+    #[test]
+    fn parse_invalid_page_values_open_the_file_at_the_start() {
+        for arg in [
+            "a.pdf#page=abc",
+            "a.pdf#page=",
+            "a.pdf#page=0",
+            "a.pdf#page=-3",
+            "a.pdf#page=99999999999999",
+        ] {
+            let t = OpenTarget::parse(arg);
+            assert_eq!(t.path, PathBuf::from("a.pdf"), "{arg}");
+            assert_eq!(t.page, None, "{arg}");
+        }
+    }
+
+    #[test]
+    fn parse_keeps_a_hash_inside_the_file_name() {
+        let t = OpenTarget::parse("C#notes.pdf");
+        assert_eq!(t.path, PathBuf::from("C#notes.pdf"));
+        assert_eq!(t.page, None);
+
+        let t = OpenTarget::parse("C#notes.pdf#page=7");
+        assert_eq!(t.path, PathBuf::from("C#notes.pdf"));
+        assert_eq!(t.page, Some(6));
+
+        // Not the exact marker: part of the name.
+        let t = OpenTarget::parse("a.pdf#pages=7");
+        assert_eq!(t.path, PathBuf::from("a.pdf#pages=7"));
+        assert_eq!(t.page, None);
+
+        // No file name before the marker: take the whole argument as the path.
+        let t = OpenTarget::parse("#page=7");
+        assert_eq!(t.path, PathBuf::from("#page=7"));
+        assert_eq!(t.page, None);
+    }
+}
