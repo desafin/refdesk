@@ -64,6 +64,9 @@ egui·eframe·egui_dock·mupdf 의 현재 API 는 모델이 기억하는 것과 
 - `TopBottomPanel` 은 없다. `egui::Panel::top(id)` / `Panel::bottom(id)` 를 `.show(ui, ..)` 로 그린다. `CentralPanel` 도 `Ui` 를 받는다.
 - `ctx.screen_rect()` 는 없다. `ctx.viewport_rect()` / `ctx.content_rect()` 를 쓴다.
 - 메뉴를 닫는 것은 `ui.close()` 다(`close_menu` 는 없다). `egui::Id::new` 는 폐기 예정이고 `Id::unique(..)` 를 쓴다.
+- 메뉴 막대는 `egui::MenuBar::new().ui(ui, |ui| ui.menu_button(..))`.
+- 창 없는 테스트는 `Context::run_ui(RawInput, |ui| ..)` 로 돌린다. 돌려받은 `FullOutput` 은 `.drop_without_applying_deltas()` 로 버려야 한다(안 그러면 drop 에서 panic).
+- 단축키 비교(`consume_shortcut`)는 여분의 Shift 를 무시한다. Ctrl+Shift+Tab 을 Ctrl+Tab 보다 먼저 검사해야 한다. Ctrl+Shift+= 는 `Key::Plus` 로 온다.
 - 글꼴 추가는 `ctx.add_font(FontInsert::new(..))`. eframe 은 `NativeOptions::system_font_fallback`(기본 켜짐)으로 없는 글리프를 시스템 글꼴에서 찾는다.
 - egui_dock 0.22: `TabViewer::context_menu(ui, tab, path: NodePath)`, `is_closeable(&self, &Tab)`, `allowed_in_windows(&self, &mut Tab)`.
   `find_tab_from` / `remove_tab` 은 `TabPath` 를 쓴다. 드래그 상태는 비공개이고, 끄는 탭의 `Response` 는 따로 만들어지므로
@@ -498,6 +501,7 @@ pub struct AppState {
     pub config: Config,
     pub doc_db: DocStateDb,
     pub actions: Vec<Action>,      // 이번 프레임에 쌓인 것
+    pub file_dialog_requested: bool, // dispatch 가 세우고 logic() 이 파일 선택기 스레드를 띄운다
 }
 pub enum Tab { Pdf(PdfTab), Diff(DiffTab), Start }
 pub struct PdfTab { pub doc: DocId, pub view: ViewState, pub ui: PdfViewUiState } // ui: 선택, 검색, 호버 등 저장하지 않는 상태
