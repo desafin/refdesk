@@ -10,6 +10,7 @@ use refdesk_core::{DocumentHandle, ViewState};
 use crate::action::Action;
 use crate::views::pdf_view::PdfViewUiState;
 use crate::views::textures::TextureCache;
+use crate::windows::dock::DockLayout;
 
 /// Identifies one open document. Issued by [`DocStore`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -26,6 +27,14 @@ impl DocId {
 /// Identifies one tab. Issued by [`TabStore`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TabId(u64);
+
+impl TabId {
+    /// A tab id made up for tests that do not go through a [`TabStore`].
+    #[cfg(test)]
+    pub fn for_test(n: u64) -> TabId {
+        TabId(n)
+    }
+}
 
 /// Identifies one application window. Issued by [`AppState`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -182,73 +191,27 @@ impl TabStore {
     }
 }
 
-/// One application window. For now a plain tab list; WP-20 replaces it with a dock layout.
+/// One application window: its tab layout (`docs/ARCHITECTURE.md` §5.1, §5.4).
 #[derive(Clone, Debug)]
 pub struct WindowState {
-    /// The window's id. Read once there is more than one window (WP-20/21).
-    #[allow(dead_code)]
+    /// The window's id.
     pub id: WindowId,
-    /// The tabs in display order.
-    pub tabs: Vec<TabId>,
-    /// The shown tab.
-    pub active: Option<TabId>,
+    /// The panes and tabs of the window.
+    pub dock: DockLayout,
 }
 
-impl WindowState {
-    /// Appends a tab to the end of the list.
-    pub fn push_tab(&mut self, tab: TabId) {
-        self.tabs.push(tab);
-    }
-
-    /// Inserts `tab` right after `after`, or at the end when `after` is not in this window.
-    pub fn insert_after(&mut self, after: TabId, tab: TabId) {
-        match self.tabs.iter().position(|t| *t == after) {
-            Some(i) => self.tabs.insert(i + 1, tab),
-            None => self.tabs.push(tab),
-        }
-    }
-
-    /// Removes a tab. When it was the active one, its right neighbor becomes active, or its left
-    /// neighbor when it was last. Returns false when the tab is not in this window.
-    pub fn remove_tab(&mut self, tab: TabId) -> bool {
-        let Some(index) = self.tabs.iter().position(|t| *t == tab) else {
-            return false;
-        };
-        self.tabs.remove(index);
-        if self.active == Some(tab) {
-            self.active = self
-                .tabs
-                .get(index)
-                .or_else(|| index.checked_sub(1).and_then(|i| self.tabs.get(i)))
-                .copied();
-        }
-        true
-    }
-
-    /// Makes `tab` the active one. Returns false when the tab is not in this window.
-    pub fn activate(&mut self, tab: TabId) -> bool {
-        if self.tabs.contains(&tab) {
-            self.active = Some(tab);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// The tab `step` places after the active one, wrapping around (negative steps go back).
-    pub fn cycle(&self, step: isize) -> Option<TabId> {
-        let len = self.tabs.len() as isize;
-        if len == 0 {
-            return None;
-        }
-        let current = self
-            .active
-            .and_then(|a| self.tabs.iter().position(|t| *t == a))
-            .unwrap_or(0) as isize;
-        let next = (current + step).rem_euclid(len);
-        self.tabs.get(next as usize).copied()
-    }
+/// A closed PDF tab, remembered so it can be reopened (TAB-4). Only the path is kept, not the
+/// document handle, so a closed document is really closed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosedTab {
+    /// The document the tab showed.
+    pub path: PathBuf,
+    /// Where the tab was.
+    pub view: ViewState,
 }
+
+/// How many closed tabs are remembered.
+pub const MAX_CLOSED_TABS: usize = 20;
 
 /// Everything the application knows. Widgets read it; `dispatch` changes it.
 pub struct AppState {
@@ -267,6 +230,8 @@ pub struct AppState {
     /// Set by `dispatch` when the file dialog should be opened; the app starts it on the next
     /// frame and clears the flag.
     pub file_dialog_requested: bool,
+    /// Recently closed PDF tabs, oldest first, at most [`MAX_CLOSED_TABS`].
+    pub closed_tabs: Vec<ClosedTab>,
     #[allow(dead_code)] // used by `new_window_id` (WP-21)
     next_window: u64,
 }
@@ -282,10 +247,11 @@ impl AppState {
     pub fn new() -> AppState {
         let mut tabs = TabStore::new();
         let start = tabs.insert(Tab::Start);
+        let mut dock = DockLayout::new();
+        dock.add_tab(start, None);
         let window = WindowState {
             id: WindowId(0),
-            tabs: vec![start],
-            active: Some(start),
+            dock,
         };
         AppState {
             docs: DocStore::new(),
@@ -295,6 +261,7 @@ impl AppState {
             textures: TextureCache::default(),
             actions: Vec::new(),
             file_dialog_requested: false,
+            closed_tabs: Vec::new(),
             next_window: 1,
         }
     }
@@ -308,14 +275,26 @@ impl AppState {
     }
 
     /// The main window.
+    #[allow(dead_code)] // used by tests; windows are told apart from WP-21 on
     pub fn main_window(&self) -> &WindowState {
         // `new` creates window 0 and nothing removes it.
         &self.windows[0]
     }
 
-    /// The main window, for changing.
-    pub fn main_window_mut(&mut self) -> &mut WindowState {
-        &mut self.windows[0]
+    /// The index in `windows` of the window that holds `tab`.
+    pub fn window_of(&self, tab: TabId) -> Option<usize> {
+        self.windows.iter().position(|w| w.dock.contains(tab))
+    }
+
+    /// The index of the window that holds the focused tab; the main window when no window does.
+    pub fn focused_window_index(&self) -> usize {
+        self.focus.and_then(|t| self.window_of(t)).unwrap_or(0)
+    }
+
+    /// The window that holds the focused tab (see [`AppState::focused_window_index`]).
+    pub fn focused_window(&self) -> &WindowState {
+        // `focused_window_index` returns a valid index or 0, and window 0 always exists.
+        &self.windows[self.focused_window_index()]
     }
 
     /// The PDF tab commands apply to: the focused tab, if it is a PDF tab.
@@ -328,54 +307,6 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn window(n: u64) -> (WindowState, Vec<TabId>) {
-        let ids: Vec<TabId> = (0..n).map(TabId).collect();
-        let w = WindowState {
-            id: WindowId(0),
-            tabs: ids.clone(),
-            active: ids.first().copied(),
-        };
-        (w, ids)
-    }
-
-    #[test]
-    fn removing_the_active_tab_activates_the_right_neighbor_then_the_left() {
-        let (mut w, ids) = window(3);
-        w.active = Some(ids[1]);
-        assert!(w.remove_tab(ids[1]));
-        assert_eq!(w.active, Some(ids[2]));
-        assert!(w.remove_tab(ids[2]));
-        assert_eq!(w.active, Some(ids[0]));
-        assert!(w.remove_tab(ids[0]));
-        assert_eq!(w.active, None);
-    }
-
-    #[test]
-    fn removing_another_tab_keeps_the_active_one() {
-        let (mut w, ids) = window(3);
-        w.active = Some(ids[2]);
-        assert!(w.remove_tab(ids[0]));
-        assert_eq!(w.active, Some(ids[2]));
-        assert!(!w.remove_tab(ids[0]));
-    }
-
-    #[test]
-    fn cycle_wraps_in_both_directions() {
-        let (mut w, ids) = window(3);
-        w.active = Some(ids[2]);
-        assert_eq!(w.cycle(1), Some(ids[0]));
-        w.active = Some(ids[0]);
-        assert_eq!(w.cycle(-1), Some(ids[2]));
-    }
-
-    #[test]
-    fn insert_after_places_the_tab_next_to_its_source() {
-        let (mut w, ids) = window(2);
-        let new = TabId(99);
-        w.insert_after(ids[0], new);
-        assert_eq!(w.tabs, vec![ids[0], new, ids[1]]);
-    }
 
     #[test]
     fn normalize_handles_dot_and_dotdot_for_missing_files() {

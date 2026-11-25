@@ -1258,7 +1258,7 @@ mod widget_tests {
     }
 
     fn draw_active(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
-        let Some(active) = state.main_window().active else {
+        let Some(active) = state.main_window().dock.focused_tab() else {
             return;
         };
         let AppState {

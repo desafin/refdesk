@@ -9,7 +9,8 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 use refdesk_core::ZoomMode;
 
 use crate::action::Action;
-use crate::state::AppState;
+use crate::state::{AppState, TabId};
+use crate::windows::dock::SplitDir;
 
 /// The menu a command appears in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,8 +86,25 @@ fn has_pdf_focus(state: &AppState) -> bool {
     state.focused_pdf().is_some()
 }
 
+/// The focused pane has more than one tab.
 fn has_several_tabs(state: &AppState) -> bool {
-    state.main_window().tabs.len() > 1
+    let dock = &state.focused_window().dock;
+    dock.focused_tab()
+        .is_some_and(|tab| dock.pane_tabs(tab).len() > 1)
+}
+
+/// The focused window is split.
+fn has_several_panes(state: &AppState) -> bool {
+    state.focused_window().dock.pane_count() > 1
+}
+
+fn has_closed_tabs(state: &AppState) -> bool {
+    !state.closed_tabs.is_empty()
+}
+
+fn split_focused(state: &AppState, dir: SplitDir) -> Option<Action> {
+    let (tab, _) = state.focused_pdf()?;
+    Some(Action::SplitTab { tab, dir })
 }
 
 fn can_close_tab(state: &AppState) -> bool {
@@ -223,6 +241,106 @@ pub static COMMANDS: &[Command] = &[
         enabled: has_pdf_focus,
         action: |s| s.focus.map(Action::DuplicateTab),
     },
+    Command {
+        id: "tab.split_right",
+        name_key: "cmd.tab.split_right",
+        menu: MenuGroup::Tab,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::Backslash)),
+        aliases: &[],
+        enabled: has_pdf_focus,
+        action: |s| split_focused(s, SplitDir::Right),
+    },
+    Command {
+        id: "tab.split_down",
+        name_key: "cmd.tab.split_down",
+        menu: MenuGroup::Tab,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::Backslash)),
+        // With Shift held, most layouts report `\` as `|`.
+        aliases: &[KeyboardShortcut::new(CTRL_SHIFT, Key::Pipe)],
+        enabled: has_pdf_focus,
+        action: |s| split_focused(s, SplitDir::Down),
+    },
+    Command {
+        id: "tab.focus_next_pane",
+        name_key: "cmd.tab.focus_next_pane",
+        menu: MenuGroup::Tab,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F6)),
+        aliases: &[],
+        enabled: has_several_panes,
+        action: |_| Some(Action::FocusNextPane),
+    },
+    Command {
+        id: "tab.reopen_closed",
+        name_key: "cmd.tab.reopen_closed",
+        menu: MenuGroup::Tab,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::T)),
+        aliases: &[],
+        enabled: has_closed_tabs,
+        action: |_| Some(Action::ReopenClosedTab),
+    },
+];
+
+/// One entry of the menu shown on a right click on a tab. Unlike [`Command`] it acts on the
+/// clicked tab, not on the focused one.
+pub struct TabMenuEntry {
+    /// i18n key of the displayed name.
+    pub name_key: &'static str,
+    /// The command whose shortcut is displayed next to the entry, if any.
+    pub command_id: Option<&'static str>,
+    /// Whether the entry can run for this tab now.
+    pub enabled: fn(&AppState, TabId) -> bool,
+    /// The action for this tab.
+    pub action: fn(TabId) -> Action,
+}
+
+fn is_pdf_tab(state: &AppState, tab: TabId) -> bool {
+    state.tabs.pdf(tab).is_some()
+}
+
+fn has_pane_siblings(state: &AppState, tab: TabId) -> bool {
+    state
+        .window_of(tab)
+        .is_some_and(|w| state.windows[w].dock.pane_tabs(tab).len() > 1)
+}
+
+/// The tab menu, in display order. Later work adds rows here (for example "Move to New Window").
+pub static TAB_MENU: &[TabMenuEntry] = &[
+    TabMenuEntry {
+        name_key: "cmd.tab.close",
+        command_id: Some("tab.close"),
+        enabled: is_pdf_tab,
+        action: Action::CloseTab,
+    },
+    TabMenuEntry {
+        name_key: "cmd.tab.close_others",
+        command_id: None,
+        enabled: has_pane_siblings,
+        action: Action::CloseOtherTabs,
+    },
+    TabMenuEntry {
+        name_key: "cmd.tab.duplicate",
+        command_id: Some("tab.duplicate"),
+        enabled: is_pdf_tab,
+        action: Action::DuplicateTab,
+    },
+    TabMenuEntry {
+        name_key: "cmd.tab.split_right",
+        command_id: Some("tab.split_right"),
+        enabled: is_pdf_tab,
+        action: |tab| Action::SplitTab {
+            tab,
+            dir: SplitDir::Right,
+        },
+    },
+    TabMenuEntry {
+        name_key: "cmd.tab.split_down",
+        command_id: Some("tab.split_down"),
+        enabled: is_pdf_tab,
+        action: |tab| Action::SplitTab {
+            tab,
+            dir: SplitDir::Down,
+        },
+    },
 ];
 
 /// The commands listed in a menu, in table order.
@@ -352,6 +470,157 @@ mod tests {
             for lang in [Lang::Ko, Lang::En] {
                 assert!(lookup(lang, g.name_key()).is_some());
             }
+        }
+    }
+
+    #[test]
+    fn pane_commands_are_in_the_tab_menu_with_their_shortcuts() {
+        let tab_menu: Vec<&str> = in_menu(MenuGroup::Tab).map(|c| c.id).collect();
+        for (id, shortcut) in [
+            (
+                "tab.split_right",
+                KeyboardShortcut::new(CTRL, Key::Backslash),
+            ),
+            (
+                "tab.split_down",
+                KeyboardShortcut::new(CTRL_SHIFT, Key::Backslash),
+            ),
+            (
+                "tab.focus_next_pane",
+                KeyboardShortcut::new(Modifiers::NONE, Key::F6),
+            ),
+            (
+                "tab.reopen_closed",
+                KeyboardShortcut::new(CTRL_SHIFT, Key::T),
+            ),
+        ] {
+            assert!(tab_menu.contains(&id), "{id} is not in the Tab menu");
+            let c = COMMANDS.iter().find(|c| c.id == id).expect("command");
+            assert_eq!(c.shortcut, Some(shortcut), "{id}");
+        }
+        for id in ["tab.next", "tab.prev", "tab.duplicate"] {
+            assert!(tab_menu.contains(&id), "{id} is not in the Tab menu");
+        }
+    }
+
+    #[test]
+    fn tab_menu_entries_have_texts_and_known_commands() {
+        let names: Vec<&str> = TAB_MENU.iter().map(|e| e.name_key).collect();
+        assert_eq!(
+            names,
+            vec![
+                "cmd.tab.close",
+                "cmd.tab.close_others",
+                "cmd.tab.duplicate",
+                "cmd.tab.split_right",
+                "cmd.tab.split_down",
+            ]
+        );
+        for e in TAB_MENU {
+            for lang in [Lang::Ko, Lang::En] {
+                assert!(lookup(lang, e.name_key).is_some(), "{}", e.name_key);
+            }
+            if let Some(id) = e.command_id {
+                assert!(COMMANDS.iter().any(|c| c.id == id), "unknown command {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_menu_availability_follows_the_clicked_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let start = state.main_window().dock.tabs()[0];
+        assert!(TAB_MENU.iter().all(|e| !(e.enabled)(&state, start)));
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/a.pdf")]),
+            &ctx,
+        );
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let enabled: Vec<bool> = TAB_MENU.iter().map(|e| (e.enabled)(&state, a)).collect();
+        assert_eq!(enabled, vec![true, false, true, true, true]);
+        assert_eq!((TAB_MENU[0].action)(a), Action::CloseTab(a));
+        dispatch(&mut state, Action::DuplicateTab(a), &ctx);
+        assert!((TAB_MENU[1].enabled)(&state, a));
+    }
+
+    #[test]
+    fn pane_command_availability() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let find = |id: &str| COMMANDS.iter().find(|c| c.id == id).expect("command");
+        for id in [
+            "tab.split_right",
+            "tab.split_down",
+            "tab.focus_next_pane",
+            "tab.reopen_closed",
+        ] {
+            assert!(find(id).run(&state).is_none(), "{id} should be unavailable");
+        }
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/a.pdf")]),
+            &ctx,
+        );
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        assert_eq!(
+            find("tab.split_right").run(&state),
+            Some(Action::SplitTab {
+                tab: a,
+                dir: SplitDir::Right
+            })
+        );
+        assert_eq!(
+            find("tab.split_down").run(&state),
+            Some(Action::SplitTab {
+                tab: a,
+                dir: SplitDir::Down
+            })
+        );
+        assert!(find("tab.focus_next_pane").run(&state).is_none());
+        dispatch(
+            &mut state,
+            Action::SplitTab {
+                tab: a,
+                dir: SplitDir::Right,
+            },
+            &ctx,
+        );
+        assert_eq!(
+            find("tab.focus_next_pane").run(&state),
+            Some(Action::FocusNextPane)
+        );
+        // Each pane has one tab: next/previous tab have nothing to switch to.
+        assert!(find("tab.next").run(&state).is_none());
+        dispatch(&mut state, Action::CloseTab(a), &ctx);
+        assert_eq!(
+            find("tab.reopen_closed").run(&state),
+            Some(Action::ReopenClosedTab)
+        );
+    }
+
+    #[test]
+    fn split_shortcuts_are_told_apart() {
+        let ctx = egui::Context::default();
+        let state = state_with_tabs(&ctx, 1);
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        assert_eq!(
+            press(&ctx, &state, Modifiers::CTRL, Key::Backslash),
+            Some(Action::SplitTab {
+                tab,
+                dir: SplitDir::Right
+            })
+        );
+        for key in [Key::Backslash, Key::Pipe] {
+            assert_eq!(
+                press(&ctx, &state, CTRL_SHIFT, key),
+                Some(Action::SplitTab {
+                    tab,
+                    dir: SplitDir::Down
+                }),
+                "{key:?}"
+            );
         }
     }
 

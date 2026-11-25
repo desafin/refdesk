@@ -8,17 +8,16 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use egui::{CentralPanel, Panel, ScrollArea, Ui};
-use refdesk_core::{DocumentHandle, IpcListener, IpcRequest};
+use egui::{Panel, Ui};
+use refdesk_core::{IpcListener, IpcRequest};
 
 use crate::action::{Action, OpenTarget, dispatch_queued};
 use crate::commands::{self, MenuGroup};
 use crate::i18n::tr;
-use crate::panels::status_bar;
-use crate::state::{AppState, PdfTab, Tab, TabId};
+use crate::state::AppState;
 use crate::theme;
-use crate::views::pdf_view::{self, ViewContext};
 use crate::views::textures;
+use crate::windows;
 
 /// The application.
 pub struct RefdeskApp {
@@ -73,12 +72,7 @@ impl eframe::App for RefdeskApp {
         queue.extend(commands::handle_shortcuts(&ctx, &self.state));
 
         Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &self.state, &mut queue));
-        Panel::top("tab_strip").show(ui, |ui| tab_strip(ui, &self.state, &mut queue));
-        Panel::bottom("status_bar")
-            .show(ui, |ui| status_bar::show(ui, &mut self.state, &mut queue));
-        CentralPanel::default().show(ui, |ui| {
-            tab_content(ui, &mut self.state, &mut queue);
-        });
+        windows::show_window(ui, &mut self.state, 0, &mut queue);
 
         self.state.actions.append(&mut queue);
         dispatch_queued(&mut self.state, &ctx);
@@ -181,101 +175,6 @@ fn menu_bar(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
     });
 }
 
-/// The title shown on a tab.
-fn tab_title(state: &AppState, tab: TabId) -> String {
-    match state.tabs.get(tab) {
-        Some(Tab::Pdf(pdf)) => state
-            .docs
-            .get(pdf.doc)
-            .and_then(|doc| doc.path().file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| tr("tab.unknown").to_owned()),
-        Some(Tab::Start) => tr("tab.start").to_owned(),
-        None => tr("tab.unknown").to_owned(),
-    }
-}
-
-/// The tab strip: click a title to switch, click × (or middle-click a title) to close.
-fn tab_strip(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
-    ScrollArea::horizontal().show(ui, |ui| {
-        ui.horizontal(|ui| {
-            let window = state.main_window();
-            for &tab in &window.tabs {
-                let selected = window.active == Some(tab);
-                let title = ui.selectable_label(selected, tab_title(state, tab));
-                if title.clicked() {
-                    queue.push(Action::FocusTab(tab));
-                }
-                if title.middle_clicked() {
-                    queue.push(Action::CloseTab(tab));
-                }
-                // The start page is not closable.
-                if matches!(state.tabs.get(tab), Some(Tab::Pdf(_)))
-                    && ui
-                        .small_button("×")
-                        .on_hover_text(tr("cmd.tab.close"))
-                        .clicked()
-                {
-                    queue.push(Action::CloseTab(tab));
-                }
-                ui.add_space(6.0);
-            }
-        });
-    });
-}
-
-/// The content of the active tab.
-fn tab_content(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
-    let Some(active) = state.main_window().active else {
-        return;
-    };
-    // Disjoint fields: the tab is borrowed mutably, the document handle immutably.
-    let AppState {
-        docs,
-        tabs,
-        textures,
-        focus,
-        ..
-    } = state;
-    match tabs.get_mut(active) {
-        Some(Tab::Pdf(tab)) => match docs.get(tab.doc) {
-            Some(doc) => {
-                let cx = ViewContext {
-                    tab_id: active,
-                    focused: *focus == Some(active),
-                    textures,
-                    queue,
-                };
-                draw_pdf_tab(ui, tab, doc, cx);
-            }
-            None => {
-                ui.label(tr("tab.unknown"));
-            }
-        },
-        Some(Tab::Start) => draw_start_page(ui, queue),
-        None => {}
-    }
-}
-
-/// Draws the content of a PDF tab: the PDF view (WP-15). It gets the tab (whose view state it
-/// may change), the document handle, the shared textures and the action queue.
-pub fn draw_pdf_tab(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, cx: ViewContext<'_>) {
-    pdf_view::show(ui, tab, doc, cx);
-}
-
-/// Draws the start page: the application name and a button to open files.
-fn draw_start_page(ui: &mut Ui, queue: &mut Vec<Action>) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.3);
-        ui.heading("refdesk");
-        ui.label(tr("start.hint"));
-        ui.add_space(8.0);
-        if ui.button(tr("start.open_button")).clicked() {
-            queue.push(Action::OpenFileDialog);
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,8 +190,7 @@ mod tests {
                 let mut queue = Vec::new();
                 ctx.run_ui(egui::RawInput::default(), |ui| {
                     Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &state, &mut queue));
-                    Panel::top("tab_strip").show(ui, |ui| tab_strip(ui, &state, &mut queue));
-                    CentralPanel::default().show(ui, |ui| tab_content(ui, &mut state, &mut queue));
+                    windows::show_window(ui, &mut state, 0, &mut queue);
                 })
                 .drop_without_applying_deltas();
                 assert!(queue.is_empty(), "nothing was clicked");

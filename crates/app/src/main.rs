@@ -9,6 +9,7 @@ mod panels;
 mod state;
 mod theme;
 mod views;
+mod windows;
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -48,7 +49,65 @@ fn start_listener(
     }
 }
 
+/// Writes log records to standard error. Records of refdesk itself pass at `level`; other
+/// crates (eframe, wgpu, …) are capped at `warn` so `debug` stays readable.
+struct StderrLogger {
+    level: log::LevelFilter,
+}
+
+impl StderrLogger {
+    fn allows(&self, metadata: &log::Metadata) -> bool {
+        let limit = if metadata.target().starts_with("refdesk") {
+            self.level
+        } else {
+            self.level.min(log::LevelFilter::Warn)
+        };
+        metadata.level() <= limit
+    }
+}
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.allows(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.allows(record.metadata()) {
+            eprintln!(
+                "refdesk [{} {}] {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// The log level named by `REFDESK_LOG`: error, warn, info or debug (any case). Anything else,
+/// or nothing, is `warn`.
+fn log_level(value: Option<&str>) -> log::LevelFilter {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("error") => log::LevelFilter::Error,
+        Some("info") => log::LevelFilter::Info,
+        Some("debug") => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Warn,
+    }
+}
+
+/// Installs the standard error logger at the level of `REFDESK_LOG`.
+fn init_logging() {
+    let level = log_level(std::env::var("REFDESK_LOG").ok().as_deref());
+    let logger = Box::leak(Box::new(StderrLogger { level }));
+    // Fails only when a logger is already installed, which leaves that one in charge.
+    if log::set_logger(logger).is_ok() {
+        log::set_max_level(level);
+    }
+}
+
 fn main() -> eframe::Result {
+    init_logging();
     let (request, single_instance) = match cli::parse(std::env::args_os().skip(1)) {
         Cli::Help => {
             println!("{}", cli::usage());
@@ -112,6 +171,39 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use log::{Level, LevelFilter, Log, Metadata};
+
+    #[test]
+    fn log_level_comes_from_the_variable_with_warn_as_default() {
+        assert_eq!(log_level(None), LevelFilter::Warn);
+        assert_eq!(log_level(Some("error")), LevelFilter::Error);
+        assert_eq!(log_level(Some("warn")), LevelFilter::Warn);
+        assert_eq!(log_level(Some("INFO")), LevelFilter::Info);
+        assert_eq!(log_level(Some(" debug ")), LevelFilter::Debug);
+        assert_eq!(log_level(Some("trace?")), LevelFilter::Warn);
+        assert_eq!(log_level(Some("")), LevelFilter::Warn);
+    }
+
+    #[test]
+    fn other_crates_are_capped_at_warn() {
+        let logger = StderrLogger {
+            level: LevelFilter::Debug,
+        };
+        let meta = |level, target| Metadata::builder().level(level).target(target).build();
+        assert!(logger.enabled(&meta(Level::Debug, "refdesk::action")));
+        assert!(logger.enabled(&meta(Level::Debug, "refdesk_core::engine")));
+        assert!(!logger.enabled(&meta(Level::Info, "wgpu_core")));
+        assert!(logger.enabled(&meta(Level::Warn, "eframe")));
+        let quiet = StderrLogger {
+            level: LevelFilter::Error,
+        };
+        assert!(!quiet.enabled(&meta(Level::Warn, "refdesk::app")));
+    }
 }
 
 #[cfg(test)]

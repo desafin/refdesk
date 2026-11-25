@@ -10,8 +10,11 @@ use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMod
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::panels::status_bar::GotoInput;
-use crate::state::{AppState, PdfTab, Tab, TabId, normalize_path};
+use crate::state::{
+    AppState, ClosedTab, DocId, MAX_CLOSED_TABS, PdfTab, Tab, TabId, normalize_path,
+};
 use crate::views::pdf_view::PdfViewUiState;
+use crate::windows::dock::SplitDir;
 pub use refdesk_core::OpenTarget;
 
 /// Something the user (or the outside world) asked for.
@@ -23,14 +26,27 @@ pub enum Action {
     OpenFileDialog,
     /// Close a tab.
     CloseTab(TabId),
+    /// Close every other tab of the pane that holds this tab.
+    CloseOtherTabs(TabId),
+    /// Open the most recently closed PDF tab again, at the place it showed.
+    ReopenClosedTab,
     /// Show a tab and make it the target of commands.
     FocusTab(TabId),
     /// Open another view of the same document, copying the view state.
     DuplicateTab(TabId),
-    /// Activate the tab after the active one, wrapping around.
+    /// Show another view of a PDF tab's document in a new pane beside it (TAB-3).
+    SplitTab {
+        /// The tab whose view is copied.
+        tab: TabId,
+        /// Where the new pane goes.
+        dir: SplitDir,
+    },
+    /// In the focused pane, activate the tab after the active one, wrapping around.
     NextTab,
-    /// Activate the tab before the active one, wrapping around.
+    /// In the focused pane, activate the tab before the active one, wrapping around.
     PrevTab,
+    /// Move the focus to the next pane of the focused window.
+    FocusNextPane,
     /// Change the zoom of a PDF tab.
     SetZoom {
         /// The tab to change.
@@ -78,10 +94,14 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             ctx.request_repaint();
         }
         Action::CloseTab(tab) => close_tab(state, tab),
+        Action::CloseOtherTabs(tab) => close_other_tabs(state, tab),
+        Action::ReopenClosedTab => reopen_closed_tab(state, ctx),
         Action::FocusTab(tab) => focus_tab(state, tab),
         Action::DuplicateTab(tab) => duplicate_tab(state, tab),
-        Action::NextTab => cycle_tab(state, 1),
-        Action::PrevTab => cycle_tab(state, -1),
+        Action::SplitTab { tab, dir } => split_tab(state, tab, dir),
+        Action::NextTab => cycle_tab(state, true),
+        Action::PrevTab => cycle_tab(state, false),
+        Action::FocusNextPane => focus_next_pane(state),
         Action::SetZoom { tab, zoom } => {
             if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
                 pdf.view.zoom = zoom;
@@ -112,15 +132,37 @@ pub fn dispatch_queued(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-/// Makes `tab` the active tab of the main window and the focus, if the window has it.
+/// Makes `tab` the active tab of its pane, gives the pane the focus and makes the tab the target
+/// of commands. Nothing happens for a tab that is in no window.
 fn focus_tab(state: &mut AppState, tab: TabId) {
-    if state.main_window_mut().activate(tab) {
+    if let Some(w) = state.window_of(tab) {
+        state.windows[w].dock.activate(tab);
         state.focus = Some(tab);
     }
 }
 
-/// Opens a document and shows it in a tab. An already open document is not opened again: its
-/// existing tab gets the focus instead (OPEN-5).
+/// Puts a new tab into the focused window (right after `near` when given, else into the focused
+/// pane) and focuses it. A window that only shows the start page makes room first.
+fn place_new_tab(state: &mut AppState, tab: TabId, near: Option<TabId>) {
+    let w = near
+        .and_then(|t| state.window_of(t))
+        .unwrap_or_else(|| state.focused_window_index());
+    let start_tabs: Vec<TabId> = state.windows[w].dock.tabs();
+    let only_start = start_tabs
+        .iter()
+        .all(|t| matches!(state.tabs.get(*t), Some(Tab::Start)));
+    if only_start {
+        for t in start_tabs {
+            state.windows[w].dock.remove_tab(t);
+            state.tabs.remove(t);
+        }
+    }
+    state.windows[w].dock.add_tab(tab, near);
+    focus_tab(state, tab);
+}
+
+/// Opens a document and shows it in a tab of the focused pane. An already open document is not
+/// opened again: its existing tab gets the focus instead (OPEN-5).
 fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
     let path = normalize_path(&target.path);
     if let Some(doc) = state.docs.find(&path) {
@@ -149,35 +191,23 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
         view,
         ui: PdfViewUiState::default(),
     }));
-
-    // The start page makes room for the first document.
-    let start_tabs: Vec<TabId> = state
-        .main_window()
-        .tabs
-        .iter()
-        .copied()
-        .filter(|t| matches!(state.tabs.get(*t), Some(Tab::Start)))
-        .collect();
-    let only_start = start_tabs.len() == state.main_window().tabs.len();
-    if only_start {
-        for t in start_tabs {
-            state.main_window_mut().remove_tab(t);
-            state.tabs.remove(t);
-        }
-    }
-
-    state.main_window_mut().push_tab(tab);
-    focus_tab(state, tab);
+    place_new_tab(state, tab, None);
 }
 
 /// The tab to show for a document that is already open: the focused one if it shows the
 /// document, else the first in window order.
-fn existing_tab_for(state: &AppState, doc: crate::state::DocId) -> Option<TabId> {
+fn existing_tab_for(state: &AppState, doc: DocId) -> Option<TabId> {
     let shows_doc = |t: &TabId| matches!(state.tabs.get(*t), Some(Tab::Pdf(p)) if p.doc == doc);
     state
         .focus
-        .filter(|t| shows_doc(t) && state.main_window().tabs.contains(t))
-        .or_else(|| state.main_window().tabs.iter().copied().find(shows_doc))
+        .filter(|t| shows_doc(t) && state.window_of(*t).is_some())
+        .or_else(|| {
+            state
+                .windows
+                .iter()
+                .flat_map(|w| w.dock.tabs())
+                .find(shows_doc)
+        })
 }
 
 /// Moves a view to the top of `page` as a recorded long jump.
@@ -219,46 +249,133 @@ fn go_to_page(state: &mut AppState, tab: TabId, page: u32) {
     }
 }
 
-/// Closes a tab, drops its document when no other tab shows it, and keeps the window non-empty by
-/// showing the start page after the last tab.
+/// Closes a tab, remembers it for reopening, drops its document when no other tab shows it, and
+/// keeps the window non-empty by showing the start page after the last tab. When the focus was in
+/// that window, it moves to what the window now shows focused (a neighbor in the same pane, or
+/// another pane).
 fn close_tab(state: &mut AppState, tab: TabId) {
-    if !state.main_window().tabs.contains(&tab) {
-        return;
-    }
-    // Closing the start page when it is the only tab would just bring it back.
-    if state.main_window().tabs.len() == 1 && matches!(state.tabs.get(tab), Some(Tab::Start)) {
-        return;
-    }
-    state.main_window_mut().remove_tab(tab);
-    if let Some(Tab::Pdf(pdf)) = state.tabs.remove(tab)
-        && !state.tabs.doc_in_use(pdf.doc)
-    {
-        state.docs.remove(pdf.doc);
-    }
-    if state.main_window().tabs.is_empty() {
-        let start = state.tabs.insert(Tab::Start);
-        state.main_window_mut().push_tab(start);
-        state.main_window_mut().activate(start);
-    }
-    state.focus = state.main_window().active;
-}
-
-/// Adds a new tab on the same document, with a copy of the view state.
-fn duplicate_tab(state: &mut AppState, tab: TabId) {
-    let Some(mut source) = state.tabs.pdf(tab).cloned() else {
+    let Some(w) = state.window_of(tab) else {
         return;
     };
-    // The copy starts with a fresh view; its scroll follows from the copied anchor.
-    source.ui = PdfViewUiState::default();
-    let new = state.tabs.insert(Tab::Pdf(source));
-    state.main_window_mut().insert_after(tab, new);
-    focus_tab(state, new);
+    // Closing the start page when it is the only tab would just bring it back.
+    if state.windows[w].dock.tab_count() == 1 && matches!(state.tabs.get(tab), Some(Tab::Start)) {
+        return;
+    }
+    let focus_here = state
+        .focus
+        .is_none_or(|f| f == tab || state.window_of(f) == Some(w));
+    state.windows[w].dock.remove_tab(tab);
+    if let Some(Tab::Pdf(pdf)) = state.tabs.remove(tab) {
+        if let Some(doc) = state.docs.get(pdf.doc) {
+            remember_closed(
+                state,
+                ClosedTab {
+                    path: doc.path().to_path_buf(),
+                    view: pdf.view,
+                },
+            );
+        }
+        if !state.tabs.doc_in_use(pdf.doc) {
+            state.docs.remove(pdf.doc);
+        }
+    }
+    if state.windows[w].dock.is_empty() {
+        let start = state.tabs.insert(Tab::Start);
+        state.windows[w].dock.add_tab(start, None);
+    }
+    if focus_here {
+        state.focus = state.windows[w].dock.focused_tab();
+    }
 }
 
-/// Activates the neighbor of the active tab, wrapping around.
-fn cycle_tab(state: &mut AppState, step: isize) {
-    if let Some(tab) = state.main_window().cycle(step) {
+/// Adds a closed tab to the reopen list, dropping the oldest beyond [`MAX_CLOSED_TABS`].
+fn remember_closed(state: &mut AppState, closed: ClosedTab) {
+    state.closed_tabs.push(closed);
+    if state.closed_tabs.len() > MAX_CLOSED_TABS {
+        let excess = state.closed_tabs.len() - MAX_CLOSED_TABS;
+        state.closed_tabs.drain(..excess);
+    }
+}
+
+/// Closes the other tabs of the pane that holds `tab`, then focuses `tab`.
+fn close_other_tabs(state: &mut AppState, tab: TabId) {
+    let Some(w) = state.window_of(tab) else {
+        return;
+    };
+    for other in state.windows[w].dock.pane_tabs(tab) {
+        if other != tab {
+            close_tab(state, other);
+        }
+    }
+    focus_tab(state, tab);
+}
+
+/// Opens the most recently closed PDF tab again with its view state, in the focused pane. The
+/// document is opened again when no tab shows it any more.
+fn reopen_closed_tab(state: &mut AppState, ctx: &egui::Context) {
+    let Some(closed) = state.closed_tabs.pop() else {
+        return;
+    };
+    let doc = match state.docs.find(&closed.path) {
+        Some(doc) => doc,
+        None => state
+            .docs
+            .insert(DocumentHandle::open(&closed.path, notifier(ctx))),
+    };
+    let tab = state.tabs.insert(Tab::Pdf(PdfTab {
+        doc,
+        view: closed.view,
+        ui: PdfViewUiState::default(),
+    }));
+    place_new_tab(state, tab, None);
+}
+
+/// A new PDF tab on the same document as `tab` with a copy of its view state; `None` when `tab`
+/// is not a PDF tab.
+fn copy_view(state: &mut AppState, tab: TabId) -> Option<TabId> {
+    let mut source = state.tabs.pdf(tab).cloned()?;
+    // The copy starts with a fresh view; its scroll follows from the copied anchor.
+    source.ui = PdfViewUiState::default();
+    Some(state.tabs.insert(Tab::Pdf(source)))
+}
+
+/// Adds a new tab on the same document right after `tab`, with a copy of the view state.
+fn duplicate_tab(state: &mut AppState, tab: TabId) {
+    if state.window_of(tab).is_none() {
+        return;
+    }
+    if let Some(new) = copy_view(state, tab) {
+        place_new_tab(state, new, Some(tab));
+    }
+}
+
+/// Splits the pane of `tab` and shows a copy of its view in the new pane, which gets the focus.
+fn split_tab(state: &mut AppState, tab: TabId, dir: SplitDir) {
+    let Some(w) = state.window_of(tab) else {
+        return;
+    };
+    let Some(new) = copy_view(state, tab) else {
+        return;
+    };
+    if state.windows[w].dock.split(tab, new, dir) {
+        state.focus = Some(new);
+    } else {
+        state.tabs.remove(new);
+    }
+}
+
+/// Activates the neighbor of the active tab in the focused pane, wrapping around.
+fn cycle_tab(state: &mut AppState, forward: bool) {
+    if let Some(tab) = state.focused_window().dock.cycle(forward) {
         focus_tab(state, tab);
+    }
+}
+
+/// Moves the focus to the next pane of the focused window.
+fn focus_next_pane(state: &mut AppState) {
+    let w = state.focused_window_index();
+    if let Some(tab) = state.windows[w].dock.focus_next_pane() {
+        state.focus = Some(tab);
     }
 }
 
@@ -279,7 +396,7 @@ mod tests {
     }
 
     fn active(state: &AppState) -> Option<TabId> {
-        state.main_window().active
+        state.main_window().dock.focused_tab()
     }
 
     #[test]
@@ -310,8 +427,8 @@ mod tests {
             ]),
             &ctx,
         );
-        assert_eq!(state.main_window().tabs.len(), 2);
-        let last = *state.main_window().tabs.last().expect("two tabs");
+        assert_eq!(state.main_window().dock.tabs().len(), 2);
+        let last = *state.main_window().dock.tabs().last().expect("two tabs");
         assert_eq!(state.focus, Some(last));
         let pdf = state.tabs.pdf(last).expect("a pdf tab");
         assert_eq!(pdf.view.anchor.page, 2);
@@ -333,12 +450,12 @@ mod tests {
         let mut state = AppState::new();
         open(&mut state, &ctx, "/refdesk-test/a.pdf");
         open(&mut state, &ctx, "/refdesk-test/b.pdf");
-        let first = state.main_window().tabs[0];
+        let first = state.main_window().dock.tabs()[0];
         assert_ne!(state.focus, Some(first));
 
         open(&mut state, &ctx, "/refdesk-test/a.pdf");
         assert_eq!(state.docs.len(), 2);
-        assert_eq!(state.main_window().tabs.len(), 2);
+        assert_eq!(state.main_window().dock.tabs().len(), 2);
         assert_eq!(state.focus, Some(first));
         assert_eq!(active(&state), Some(first));
     }
@@ -355,7 +472,7 @@ mod tests {
         open(&mut state, &ctx, "sub/../refdesk-test-missing.pdf");
 
         assert_eq!(state.docs.len(), 1);
-        assert_eq!(state.main_window().tabs.len(), 1);
+        assert_eq!(state.main_window().dock.tabs().len(), 1);
     }
 
     #[test]
@@ -368,7 +485,7 @@ mod tests {
             Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/a.pdf#page=5")]),
             &ctx,
         );
-        assert_eq!(state.main_window().tabs.len(), 1);
+        assert_eq!(state.main_window().dock.tabs().len(), 1);
         let (_, pdf) = state.focused_pdf().expect("pdf tab");
         assert_eq!(pdf.view.anchor.page, 4);
         assert!(pdf.view.history.can_back());
@@ -391,7 +508,7 @@ mod tests {
         dispatch(&mut state, Action::DuplicateTab(tab), &ctx);
 
         assert_eq!(state.docs.len(), 1);
-        assert_eq!(state.main_window().tabs.len(), 2);
+        assert_eq!(state.main_window().dock.tabs().len(), 2);
         let (copy, copy_tab) = state.focused_pdf().expect("the copy is focused");
         assert_ne!(copy, tab);
         let original = state.tabs.pdf(tab).expect("original");
@@ -399,16 +516,16 @@ mod tests {
         assert_eq!(copy_tab.view, original.view);
         assert_eq!(copy_tab.view.zoom, ZoomMode::Custom(2.0));
         // The copy sits next to its source.
-        assert_eq!(state.main_window().tabs, vec![tab, copy]);
+        assert_eq!(state.main_window().dock.tabs(), vec![tab, copy]);
     }
 
     #[test]
     fn duplicating_the_start_page_does_nothing() {
         let ctx = egui::Context::default();
         let mut state = AppState::new();
-        let start = state.main_window().tabs[0];
+        let start = state.main_window().dock.tabs()[0];
         dispatch(&mut state, Action::DuplicateTab(start), &ctx);
-        assert_eq!(state.main_window().tabs.len(), 1);
+        assert_eq!(state.main_window().dock.tabs().len(), 1);
     }
 
     #[test]
@@ -438,7 +555,7 @@ mod tests {
         for name in ["a", "b", "c"] {
             open(&mut state, &ctx, &format!("/refdesk-test/{name}.pdf"));
         }
-        let tabs = state.main_window().tabs.clone();
+        let tabs = state.main_window().dock.tabs();
         dispatch(&mut state, Action::FocusTab(tabs[1]), &ctx);
 
         dispatch(&mut state, Action::CloseTab(tabs[1]), &ctx);
@@ -456,7 +573,7 @@ mod tests {
         let mut state = AppState::new();
         open(&mut state, &ctx, "/refdesk-test/a.pdf");
         open(&mut state, &ctx, "/refdesk-test/b.pdf");
-        let tabs = state.main_window().tabs.clone();
+        let tabs = state.main_window().dock.tabs();
         dispatch(&mut state, Action::CloseTab(tabs[0]), &ctx);
         assert_eq!(active(&state), Some(tabs[1]));
         assert_eq!(state.docs.len(), 1);
@@ -470,7 +587,7 @@ mod tests {
         let (tab, _) = state.focused_pdf().expect("pdf tab");
         dispatch(&mut state, Action::CloseTab(tab), &ctx);
 
-        assert_eq!(state.main_window().tabs.len(), 1);
+        assert_eq!(state.main_window().dock.tabs().len(), 1);
         let shown = active(&state).expect("a tab is active");
         assert!(matches!(state.tabs.get(shown), Some(Tab::Start)));
         assert_eq!(state.focus, Some(shown));
@@ -490,7 +607,7 @@ mod tests {
         for name in ["a", "b", "c"] {
             open(&mut state, &ctx, &format!("/refdesk-test/{name}.pdf"));
         }
-        let tabs = state.main_window().tabs.clone();
+        let tabs = state.main_window().dock.tabs();
         assert_eq!(active(&state), Some(tabs[2]));
 
         dispatch(&mut state, Action::NextTab, &ctx);
@@ -506,7 +623,7 @@ mod tests {
     fn set_zoom_changes_only_pdf_tabs() {
         let ctx = egui::Context::default();
         let mut state = AppState::new();
-        let start = state.main_window().tabs[0];
+        let start = state.main_window().dock.tabs()[0];
         dispatch(
             &mut state,
             Action::SetZoom {
@@ -602,7 +719,7 @@ mod tests {
             &ctx,
         );
         assert_eq!(state.docs.len(), 2);
-        let tabs = state.main_window().tabs.clone();
+        let tabs = state.main_window().dock.tabs();
         assert_eq!(tabs.len(), 2);
         let path_of = |tab: TabId| {
             let pdf = state.tabs.pdf(tab).expect("a pdf tab");
@@ -630,5 +747,283 @@ mod tests {
         assert!(state.actions.is_empty());
         assert_eq!(state.docs.len(), 1);
         assert!(state.file_dialog_requested);
+    }
+
+    // --- panes (WP-20) -----------------------------------------------------------------------
+
+    fn split(state: &mut AppState, ctx: &egui::Context, tab: TabId, dir: SplitDir) -> TabId {
+        dispatch(state, Action::SplitTab { tab, dir }, ctx);
+        state.focus.expect("the new view is focused")
+    }
+
+    fn panes(state: &AppState) -> Vec<Vec<TabId>> {
+        state
+            .main_window()
+            .dock
+            .pane_rects()
+            .into_iter()
+            .map(|(_, tabs)| tabs)
+            .collect()
+    }
+
+    #[test]
+    fn opening_a_file_adds_its_tab_to_the_focused_pane() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let a2 = split(&mut state, &ctx, a, SplitDir::Right);
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let (b, _) = state.focused_pdf().expect("pdf tab");
+        assert_eq!(panes(&state), vec![vec![a], vec![a2, b]]);
+
+        dispatch(&mut state, Action::FocusTab(a), &ctx);
+        open(&mut state, &ctx, "/refdesk-test/c.pdf");
+        let (c, _) = state.focused_pdf().expect("pdf tab");
+        assert_eq!(panes(&state), vec![vec![a, c], vec![a2, b]]);
+        assert_eq!(state.main_window().dock.focused_tab(), Some(c));
+    }
+
+    #[test]
+    fn splitting_shows_two_independent_views_of_one_document() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let b = split(&mut state, &ctx, a, SplitDir::Down);
+
+        assert_ne!(a, b);
+        assert_eq!(state.docs.len(), 1);
+        assert_eq!(state.main_window().dock.pane_count(), 2);
+        assert_eq!(state.main_window().dock.focused_tab(), Some(b));
+        let doc_of = |t: TabId| state.tabs.pdf(t).expect("pdf").doc;
+        assert_eq!(doc_of(a), doc_of(b));
+
+        // Moving one view leaves the other where it was.
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(b) {
+            pdf.view.anchor = Location::new(7, 10.0, 300.0);
+        }
+        dispatch(
+            &mut state,
+            Action::SetZoom {
+                tab: b,
+                zoom: ZoomMode::Custom(2.0),
+            },
+            &ctx,
+        );
+        let va = &state.tabs.pdf(a).expect("a").view;
+        let vb = &state.tabs.pdf(b).expect("b").view;
+        assert_eq!(va.anchor, Location::new(0, 0.0, 0.0));
+        assert_eq!(va.zoom, ZoomMode::FitWidth);
+        assert_eq!(vb.anchor.page, 7);
+        assert_ne!(va, vb);
+    }
+
+    #[test]
+    fn the_start_page_cannot_be_split() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let start = state.main_window().dock.tabs()[0];
+        dispatch(
+            &mut state,
+            Action::SplitTab {
+                tab: start,
+                dir: SplitDir::Right,
+            },
+            &ctx,
+        );
+        assert_eq!(state.main_window().dock.pane_count(), 1);
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_tab_focuses_its_neighbor_in_the_same_pane() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        for name in ["a", "b", "c"] {
+            open(&mut state, &ctx, &format!("/refdesk-test/{name}.pdf"));
+        }
+        let tabs = state.main_window().dock.tabs();
+        let other = split(&mut state, &ctx, tabs[0], SplitDir::Right);
+        dispatch(&mut state, Action::FocusTab(tabs[1]), &ctx);
+
+        dispatch(&mut state, Action::CloseTab(tabs[1]), &ctx);
+        assert_eq!(state.focus, Some(tabs[2]));
+        assert_eq!(panes(&state), vec![vec![tabs[0], tabs[2]], vec![other]]);
+    }
+
+    #[test]
+    fn closing_the_last_tab_of_a_pane_removes_the_pane_and_focuses_another() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let (b, _) = state.focused_pdf().expect("pdf tab");
+        let b2 = split(&mut state, &ctx, b, SplitDir::Right);
+
+        dispatch(&mut state, Action::CloseTab(b2), &ctx);
+        assert_eq!(state.main_window().dock.pane_count(), 1);
+        assert_eq!(state.focus, Some(b));
+        assert_eq!(state.main_window().dock.focused_tab(), Some(b));
+    }
+
+    #[test]
+    fn closing_a_tab_in_another_pane_keeps_the_focus() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let a2 = split(&mut state, &ctx, a, SplitDir::Right);
+        dispatch(&mut state, Action::CloseTab(a), &ctx);
+        assert_eq!(state.focus, Some(a2));
+        assert_eq!(state.main_window().dock.pane_count(), 1);
+    }
+
+    #[test]
+    fn closing_every_tab_of_a_split_window_shows_the_start_page() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        let a2 = split(&mut state, &ctx, a, SplitDir::Down);
+        dispatch(&mut state, Action::CloseTab(a), &ctx);
+        dispatch(&mut state, Action::CloseTab(a2), &ctx);
+        let tabs = state.main_window().dock.tabs();
+        assert_eq!(tabs.len(), 1);
+        assert!(matches!(state.tabs.get(tabs[0]), Some(Tab::Start)));
+        assert_eq!(state.focus, Some(tabs[0]));
+        assert_eq!(state.docs.len(), 0);
+    }
+
+    #[test]
+    fn reopening_a_closed_tab_restores_its_place() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::GoToPage { tab: a, page: 12 }, &ctx);
+        dispatch(
+            &mut state,
+            Action::SetZoom {
+                tab: a,
+                zoom: ZoomMode::Custom(1.5),
+            },
+            &ctx,
+        );
+        let before = state.tabs.pdf(a).expect("a").view.clone();
+
+        dispatch(&mut state, Action::CloseTab(a), &ctx);
+        // The closed tab does not keep the document open.
+        assert_eq!(state.docs.len(), 0);
+        assert_eq!(state.closed_tabs.len(), 1);
+
+        dispatch(&mut state, Action::ReopenClosedTab, &ctx);
+        let (back, pdf) = state.focused_pdf().expect("reopened");
+        assert_ne!(back, a);
+        assert_eq!(pdf.view, before);
+        assert!(pdf.view.history.can_back(), "the history came back too");
+        assert_eq!(state.docs.len(), 1);
+        assert!(state.closed_tabs.is_empty());
+        // The reopened tab replaced the start page.
+        assert_eq!(state.main_window().dock.tabs(), vec![back]);
+
+        // Nothing left to reopen: nothing happens.
+        dispatch(&mut state, Action::ReopenClosedTab, &ctx);
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn reopening_a_view_of_a_still_open_document_adds_a_view() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        dispatch(&mut state, Action::DuplicateTab(a), &ctx);
+        let (copy, _) = state.focused_pdf().expect("copy");
+        dispatch(&mut state, Action::GoToPage { tab: copy, page: 3 }, &ctx);
+        dispatch(&mut state, Action::CloseTab(copy), &ctx);
+        assert_eq!(state.docs.len(), 1);
+
+        dispatch(&mut state, Action::ReopenClosedTab, &ctx);
+        let (back, pdf) = state.focused_pdf().expect("reopened");
+        assert_eq!(pdf.view.anchor.page, 3);
+        assert_eq!(pdf.doc, state.tabs.pdf(a).expect("a").doc);
+        assert_eq!(state.main_window().dock.tabs(), vec![a, back]);
+    }
+
+    #[test]
+    fn the_start_page_is_not_remembered_and_only_twenty_tabs_are() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        for i in 0..25 {
+            open(&mut state, &ctx, &format!("/refdesk-test/{i}.pdf"));
+            let (tab, _) = state.focused_pdf().expect("pdf tab");
+            dispatch(&mut state, Action::CloseTab(tab), &ctx);
+        }
+        assert_eq!(state.closed_tabs.len(), MAX_CLOSED_TABS);
+        assert_eq!(
+            state.closed_tabs.first().map(|c| c.path.clone()),
+            Some(PathBuf::from("/refdesk-test/5.pdf"))
+        );
+        assert_eq!(
+            state.closed_tabs.last().map(|c| c.path.clone()),
+            Some(PathBuf::from("/refdesk-test/24.pdf"))
+        );
+    }
+
+    #[test]
+    fn close_other_tabs_only_touches_the_pane() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        for name in ["a", "b", "c"] {
+            open(&mut state, &ctx, &format!("/refdesk-test/{name}.pdf"));
+        }
+        let tabs = state.main_window().dock.tabs();
+        let other = split(&mut state, &ctx, tabs[2], SplitDir::Right);
+        dispatch(&mut state, Action::CloseOtherTabs(tabs[1]), &ctx);
+        assert_eq!(panes(&state), vec![vec![tabs[1]], vec![other]]);
+        assert_eq!(state.focus, Some(tabs[1]));
+        assert_eq!(state.closed_tabs.len(), 2);
+        // `c` is still shown by the split view.
+        assert_eq!(state.docs.len(), 2);
+    }
+
+    #[test]
+    fn next_tab_and_focus_next_pane_stay_inside_their_scope() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let tabs = state.main_window().dock.tabs();
+        let right = split(&mut state, &ctx, tabs[1], SplitDir::Right);
+
+        // The new pane has one tab: next tab stays on it.
+        dispatch(&mut state, Action::NextTab, &ctx);
+        assert_eq!(state.focus, Some(right));
+
+        dispatch(&mut state, Action::FocusNextPane, &ctx);
+        assert_eq!(state.focus, Some(tabs[1]));
+        dispatch(&mut state, Action::NextTab, &ctx);
+        assert_eq!(state.focus, Some(tabs[0]));
+        dispatch(&mut state, Action::PrevTab, &ctx);
+        assert_eq!(state.focus, Some(tabs[1]));
+        dispatch(&mut state, Action::FocusNextPane, &ctx);
+        assert_eq!(state.focus, Some(right));
+        assert_eq!(state.main_window().dock.focused_tab(), Some(right));
+    }
+
+    #[test]
+    fn reopening_an_open_document_focuses_its_tab_in_another_pane() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let (b, _) = state.focused_pdf().expect("pdf tab");
+        split(&mut state, &ctx, b, SplitDir::Right);
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        assert_eq!(state.focus, Some(a));
+        assert_eq!(state.main_window().dock.focused_tab(), Some(a));
+        assert_eq!(state.tabs.len(), 3);
     }
 }
