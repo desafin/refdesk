@@ -454,11 +454,14 @@ impl DocStateDb {
 ```rust
 pub enum IpcRequest { Open { targets: Vec<OpenTarget> }, Diff { left: PathBuf, right: PathBuf } }
 pub struct OpenTarget { pub path: PathBuf, pub page: Option<u32> }       // path 는 절대 경로
-pub fn send(req: &IpcRequest) -> io::Result<bool>;                       // 받은 인스턴스가 있으면 true
-pub fn listen(on_request: impl Fn(IpcRequest) + Send + 'static) -> io::Result<IpcListener>;
+pub fn send(socket: &Path, req: &IpcRequest) -> io::Result<bool>;        // 받은 인스턴스가 있으면 true
+pub fn listen(socket: &Path, on_request: impl Fn(IpcRequest) + Send + 'static) -> io::Result<IpcListener>;
+// IpcRequest::with_absolute_paths(&cwd): 보내는 쪽이 자기 현재 디렉터리 기준으로 절대 경로로 바꾼다
 ```
 
 시작 시 `send` 가 `true` 면 그대로 종료. 연결이 안 되는 낡은 소켓 파일은 지우고 새로 연다.
+소켓 경로는 인자로 받는다(`Paths::from_env().socket_path`). `OpenTarget` 은 여기(`core::ipc`)에 있고 app 이 가져다 쓴다.
+명령줄 해석은 app 의 `cli.rs` 에 있다: `refdesk [파일[#page=N]]...`, `--diff A B`, `--no-single-instance`, `--help`, `--version`.
 
 ### 4.12 testutil — 테스트용 PDF
 
