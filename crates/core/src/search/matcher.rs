@@ -114,9 +114,21 @@ impl Matcher {
             return Vec::new();
         }
         let norm = normalize_page(page, self.fold, next);
-        self.scan(&norm)
+        let found = self.scan(&norm);
+        if found.is_empty() {
+            return Vec::new();
+        }
+        // The context is shown to the reader, so it keeps the letters as they are written
+        // (`SWS_EM_01004`, not `sws_em_01004`). Lowercasing lengthens a few letters (`ß`, `İ`);
+        // on a page that has one the two texts do not line up and the folded one is shown.
+        let written = self
+            .fold
+            .then(|| normalize_page(page, false, next))
+            .filter(|w| w.chars.len() == norm.chars.len() && w.own == norm.own);
+        let shown = written.as_ref().map_or(&norm.chars, |w| &w.chars);
+        found
             .into_iter()
-            .filter_map(|r| build_match(page_index, page, next, &norm, &r))
+            .filter_map(|r| build_match(page_index, page, next, &norm, shown, &r))
             .collect()
     }
 }
@@ -138,6 +150,7 @@ fn build_match(
     page: &PageText,
     next: Option<&PageText>,
     norm: &Normalized,
+    shown: &[char],
     bytes: &Range<usize>,
 ) -> Option<SearchMatch> {
     let a = norm.char_of_byte(bytes.start);
@@ -164,7 +177,7 @@ fn build_match(
         None
     };
 
-    let (before, matched, after) = context(&norm.chars, a, b);
+    let (before, matched, after) = context(shown, a, b);
     Some(SearchMatch {
         page: page_index,
         chars,
@@ -249,6 +262,29 @@ mod tests {
         assert!(m.cont.is_none());
         assert_eq!(m.before, "the ");
         assert_eq!(m.after, " says");
+    }
+
+    #[test]
+    fn the_context_keeps_the_letters_as_they_are_written() {
+        let ms = find(&q("sws_em"), &["See SWS_EM_01004 in the", "PDF Spec"]);
+        assert_eq!(ms.len(), 1);
+        assert_eq!(ms[0].before, "See ");
+        assert_eq!(ms[0].matched, "SWS_EM");
+        assert_eq!(ms[0].after, "_01004 in the PDF Spec");
+        // The match itself does not depend on it.
+        assert_eq!(ms[0].chars, 4..10);
+    }
+
+    #[test]
+    fn a_page_with_a_letter_that_grows_when_lowercased_shows_the_folded_text() {
+        // "ß" becomes "ss": the written text is one character shorter than the searched one,
+        // so the context comes from the searched (folded) text and still lines up.
+        let ms = find(&q("abc"), &["Straße ABC Def"]);
+        assert_eq!(ms.len(), 1);
+        assert_eq!(ms[0].before, "strasse ");
+        assert_eq!(ms[0].matched, "abc");
+        assert_eq!(ms[0].after, " def");
+        assert_eq!(ms[0].chars, 7..10);
     }
 
     #[test]

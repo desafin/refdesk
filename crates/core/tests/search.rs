@@ -135,7 +135,8 @@ fn matches_come_in_document_order_with_the_right_pages_and_rects() {
     assert!(first.chars.end <= s.matches[1].chars.start);
 
     let third = &s.matches[2];
-    assert_eq!(third.matched, "alpha"); // case ignored
+    // The case is ignored when matching; the context shows the text as it is written.
+    assert_eq!(third.matched, "Alpha");
     assert_eq!(third.before, "x ");
     let r = third.rects[0];
     assert!(r.x0 > 144.0 && r.x0 < 170.0, "{r:?}");

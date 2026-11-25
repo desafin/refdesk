@@ -31,7 +31,8 @@ X=$(mktemp -d); XDG_STATE_HOME=$X/state XDG_CONFIG_HOME=$X/config \
 ```
 
 - `target/debug/refdesk` 는 `cargo build -p refdesk` 를 한 직후에만 실행한다. worktree 는 빌드 폴더를 공유하지 않는다(`docs/PLAN.md` §2). 병합 뒤 빌드가 이상하면 `cargo clean -p refdesk -p refdesk-core`.
-- 이 머신(GNOME Wayland)에서 `orca computer` 는 화면 캡처, 키 입력, 스크롤을 지원하지 않는다. 되는 것은 접근성 트리 읽기(`get-app-state`)와 요소 클릭(`click --element-index`)이다. 메뉴 막대, 상태 표시줄, 탭, 탐색기의 파일 줄, 목차의 줄은 트리에 보이고 누를 수 있다. 쪽 그림과 팝업 메뉴는 보이지 않는다.
+- 이 머신(GNOME Wayland)에서 `orca computer` 는 화면 캡처, 키 입력, 스크롤을 지원하지 않는다. 되는 것은 접근성 트리 읽기(`get-app-state`)와 요소 클릭(`click --element-index`)이다. 메뉴 막대, 상태 표시줄, 탭, 탐색기의 파일 줄, 목차의 줄, 사이드바 검색 보기의 요약·문서 줄·결과 줄은 트리에 보이고 누를 수 있다. 쪽 그림과 팝업 메뉴(검색 기록 목록 포함)는 보이지 않는다. 글자를 칠 수 없으므로 검색은 `--find 글` 로 시작한다.
+- 사용자가 자기 인스턴스를 띄워 두고 있을 수 있다. `pgrep -x refdesk` 에 PID 가 여럿이면 `ps -o pid,lstart,args` 로 내가 띄운 것(인자에 `--no-single-instance`)만 골라 끝내고, `orca computer` 는 `--app pid:N` 으로 지정한다.
 - 프로세스를 끝낼 때 `pkill -f <패턴>` 을 쓰면 그 명령을 실행하는 셸까지 죽는다. `pgrep -x refdesk` 로 찾고 PID 로 끝낸다.
 
 ## 반드시 지킬 것
