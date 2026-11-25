@@ -28,6 +28,7 @@ testutil = []
 
 [dev-dependencies]
 refdesk-core = { path = ".", features = ["testutil"] }
+tempfile = "3"
 
 [lints]
 workspace = true
