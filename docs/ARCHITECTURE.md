@@ -488,6 +488,8 @@ impl DocStateDb {
 
 ### 4.11 ipc — 단일 인스턴스
 
+> `IpcRequest::Open` 에는 `find: Option<String>` 이 있다(FIND-12, 없으면 직렬화하지 않는다). 받은 쪽은 파일을 연 뒤 그 글로 모든 문서 찾기를 시작한다.
+
 `socket_path()` 의 유닉스 소켓에 한 줄짜리 JSON 을 보낸다.
 
 ```rust
@@ -720,6 +722,23 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 - 탐색기는 `WorkspaceIndex` 를 읽기만 한다. 보이는 줄 계산, 이름 거르기, 지금 문서까지 펼치기는 egui 없이 테스트되는 순수 함수다(R-10). 줄이 수만 개여도 보이는 줄만 그린다.
 - **미리보기 탭**: `PdfTab.preview` 가 참인 탭. 탐색기에서 한 번 눌러 열면 포커스된 패인의 미리보기 탭을 대체한다(없으면 새로 만든다). 두 번 누르기, 탭 제목 두 번 누르기, 복제·분할·창 분리·비교에 쓰이면 고정 탭이 된다. 미리보기 탭도 세션에 저장된다.
 - 빠른 열기는 열린 탭, 작업 폴더의 파일, 최근 문서 순으로 보여 준다.
+
+### 5.10 모든 문서에서 찾기 (WP-55, FIND-7 ~ 12)
+
+- 상태는 앱 전체에 하나다: `AppState.global_search: GlobalSearch`(`panels/global_search.rs`). 검색어와 옵션, 문서마다의 `SearchJob`·스냅숏·`PageIndex`, 지금 결과 `(DocId, MatchKey)`. 저장하지 않는다.
+- 대상은 "PDF 탭에 열린 문서"다(같은 문서는 한 번). 비교 탭의 문서는 대상이 아니다. 문서의 순서는 파일 이름의 자연 순서(`natural_cmp`), 같으면 경로.
+- 프레임마다 `logic()` 에서 `global_search::tick` 을 한 번 부른다: 대상 목록을 다시 구해 새 문서의 작업을 시작하고 닫힌 문서의 작업을 버리며, 세대가 바뀐 문서는 다시 찾고(R-7), 입력 지연이 끝난 검색어를 시작하고, 작업의 스냅숏을 받아 온다. core 의 `SearchJob` 을 문서마다 하나씩 그대로 쓴다(core 는 바꾸지 않는다). UI 스레드는 기다리지 않는다(R-1).
+- 사이드바에는 보기가 둘이다: `WindowState.sidebar_view` = `Files`(탐색기 + 목차, 기본) | `Search`. 보기는 창마다 따로지만 검색 상태는 하나라, 어느 창의 검색 보기도 같은 결과를 보인다. 탐색기·목차를 보이는 명령은 보기를 `Files` 로 돌린다.
+- 결과 목록은 줄 높이가 일정하고 보이는 줄만 그린다(문서당 일치 10만 개까지 올 수 있다). 줄에는 접근성 이름을 단다.
+- 강조: PDF 뷰는 자기 문서의 전체 검색 일치를 문서 내 검색 강조 **아래**에 다른 색으로 그린다. 보이는 쪽의 사각형만 계산한다(`search::match_rects` 재사용).
+- 결과로 가기(`GlobalSearchGoTo`, `GlobalSearchStep`)는 dispatch 가 한다(R-6): 탭을 고르고(포커스된 탭이 그 문서면 그것, 아니면 동작이 일어난 창의 탭, 아니면 다른 창의 탭) → `FocusTab` 과 같은 방식으로 포커스 → 뷰를 옮기고 히스토리에 긴 점프로 남긴다.
+- 무엇을 대상으로 삼는지, 묶음과 줄, 다음·이전(문서 넘기와 돌기), 탭 고르기, 요약 글은 egui 없이 테스트되는 순수 함수다(R-10).
+
+### 5.11 검색 기록 (WP-56, FIND-13 ~ 15)
+
+- core: `store/search_history.rs` 의 `SearchHistory` — 항목은 `SearchQuery` 의 네 값과 마지막으로 쓴 시각. `record`(같은 것은 맨 앞으로, 100개 상한), `remove`, `clear`, `entries`(최근 것 먼저). 파일은 `state_dir/search_history.json`(`Paths::search_history_file()`), 형식 버전·원자적 쓰기·깨지면 `.bad`(R-8).
+- app: `AppState.search_history`. 바꾸는 것은 dispatch 뿐이다(R-6): `RecordSearch(SearchQuery)`, `RemoveSearchHistory(usize)`, `ClearSearchHistory`. 바뀌면 바로 저장한다(`paths` 가 없으면 저장하지 않는다).
+- `panels/search_history.rs` 가 입력란 하나에 붙는 부품을 준다: ↑/↓ 불러오기의 상태(`Recall`: 기록의 몇 번째를 보고 있는지와 불러오기 전에 치던 글), 기록 단추와 목록, "2초 동안 그대로"와 앞부분 대체를 판단하는 `Settle`. 문서 내 검색 막대와 모든 문서 찾기의 입력란이 같은 부품을 쓴다. 판단은 순수 함수다(R-10).
 
 ### 5.8 세션
 
