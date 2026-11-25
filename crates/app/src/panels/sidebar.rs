@@ -5,6 +5,9 @@
 //! header folds the section. While both are open the boundary between them can be dragged
 //! (`WindowState::sidebar_split`); a folded section leaves its height to the other. How the
 //! height is shared is the pure function [`layout`]. The sidebar's state is per window.
+//!
+//! A thin row at the top switches between two views (WP-55): "Files" (the two sections) and
+//! "Search" (the search in all open documents, `panels/global_search.rs`).
 
 use std::path::PathBuf;
 
@@ -13,6 +16,7 @@ use egui::{Align, CursorIcon, Layout, Pos2, Rect, RichText, Sense, TextStyle, Ui
 use crate::action::Action;
 use crate::i18n::tr;
 use crate::panels::explorer::{self, WorkspaceView};
+use crate::panels::global_search;
 use crate::panels::toc::{self, title_job, triangle};
 use crate::state::{AppState, DocStore, Tab, TabId, TabStore};
 
@@ -24,6 +28,23 @@ pub const SPLIT_RANGE: (f32, f32) = (0.1, 0.9);
 pub const HEADER_H: f32 = 22.0;
 /// Height of the draggable boundary between the two open sections.
 pub const SPLITTER_H: f32 = 6.0;
+/// Height of the row that switches between the views (WP-55).
+pub const SWITCH_H: f32 = 24.0;
+
+/// What the sidebar of a window shows (WP-55).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarView {
+    /// The explorer and the table of contents.
+    #[default]
+    Files,
+    /// The search in all open documents.
+    Search,
+}
+
+/// The height left for the view below the switch row in a sidebar of height `total`.
+pub fn below_switch(total: f32) -> f32 {
+    (total - SWITCH_H).max(0.0)
+}
 
 /// One section of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,15 +160,35 @@ pub fn show(
         tabs,
         docs,
         workspace,
+        global_search,
         ..
     } = state;
     let Some(window) = windows.get_mut(window_index) else {
         return;
     };
     let window_id = window.id;
+
+    // The view switch, and below it the search view or the two sections.
+    let whole = ui.available_rect_before_wrap();
+    let found = (global_search.searched() && global_search.has_query())
+        .then(|| global_search.totals().matches)
+        .filter(|n| *n > 0);
+    let switch = Rect::from_min_size(whole.min, egui::vec2(whole.width(), SWITCH_H));
+    view_switch(ui, switch, &mut window.sidebar_view, found);
+    let full = Rect::from_min_max(
+        Pos2::new(whole.left(), whole.bottom() - below_switch(whole.height())),
+        whole.max,
+    );
+    if window.sidebar_view == SidebarView::Search {
+        let any_docs = tabs.iter().any(|(_, t)| matches!(t, Tab::Pdf(_)));
+        let mut body = body_ui(ui, full, "search_body");
+        global_search::show_view(&mut body, global_search, docs, any_docs, window_id, queue);
+        ui.allocate_rect(whole, Sense::hover());
+        return;
+    }
+
     let view = workspace.as_ref().map(WorkspaceView::of);
     let current = current_document(tabs, docs, focus_tab);
-    let full = ui.available_rect_before_wrap();
     let shares = layout(
         full.height(),
         window.explorer_open,
@@ -236,7 +277,44 @@ pub fn show(
         let mut body = body_ui(ui, band(y, shares.outline_body), "outline_body");
         toc::show(&mut body, tabs, docs, focus_tab, queue);
     }
-    ui.allocate_rect(full, Sense::hover());
+    ui.allocate_rect(whole, Sense::hover());
+}
+
+/// Draws the row that switches the sidebar between its views into `rect`. `found` is the number
+/// of results of the search in all documents, shown beside "Search".
+fn view_switch(ui: &mut Ui, rect: Rect, view: &mut SidebarView, found: Option<usize>) {
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .id_salt("sidebar_view_switch")
+            .max_rect(rect.shrink2(egui::vec2(4.0, 1.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let search = match found {
+        Some(n) => tr("sidebar.search_count").replace("{n}", &n.to_string()),
+        None => tr("sidebar.search").to_owned(),
+    };
+    let entries = [
+        (
+            SidebarView::Files,
+            tr("sidebar.files").to_owned(),
+            "sidebar.files_hint",
+        ),
+        (SidebarView::Search, search, "sidebar.search_hint"),
+    ];
+    for (which, label, hint) in entries {
+        if row
+            .selectable_label(*view == which, label)
+            .on_hover_text(tr(hint))
+            .clicked()
+        {
+            *view = which;
+        }
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
 }
 
 /// A child `Ui` that draws exactly into `rect`, clipped to it.
@@ -339,6 +417,18 @@ mod tests {
         assert!(l.splitter);
         assert!((l.explorer_body - shared * 0.25).abs() < 1e-3);
         assert!((l.explorer_body + l.outline_body - shared).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_view_switch_takes_its_row_and_the_sections_share_the_rest() {
+        assert_eq!(below_switch(600.0), 600.0 - SWITCH_H);
+        assert_eq!(below_switch(10.0), 0.0, "never negative");
+        let rest = below_switch(600.0);
+        let l = layout(rest, true, true, 0.25, None);
+        let shared = 600.0 - SWITCH_H - 2.0 * HEADER_H - SPLITTER_H;
+        assert!((l.explorer_body - shared * 0.25).abs() < 1e-3);
+        assert!((l.explorer_body + l.outline_body - shared).abs() < 1e-3);
+        assert_eq!(SidebarView::default(), SidebarView::Files);
     }
 
     #[test]
@@ -517,8 +607,12 @@ mod tests {
         for _ in 0..2 {
             assert!(frame(&ctx, &mut state, Vec::new()).is_empty());
         }
-        // The explorer header is the first line of the panel.
-        let queue = click(&ctx, &mut state, Pos2::new(60.0, 2.0 + HEADER_H / 2.0));
+        // The explorer header is the first line of the panel below the view switch.
+        let queue = click(
+            &ctx,
+            &mut state,
+            Pos2::new(60.0, 2.0 + SWITCH_H + HEADER_H / 2.0),
+        );
         assert_eq!(
             queue,
             vec![Action::ToggleSidebarSection {
@@ -532,7 +626,11 @@ mod tests {
         assert!(!state.main_window().explorer_open);
         // Folded, the outline header comes right below it.
         frame(&ctx, &mut state, Vec::new());
-        let queue = click(&ctx, &mut state, Pos2::new(60.0, 2.0 + HEADER_H * 1.5));
+        let queue = click(
+            &ctx,
+            &mut state,
+            Pos2::new(60.0, 2.0 + SWITCH_H + HEADER_H * 1.5),
+        );
         assert_eq!(
             queue,
             vec![Action::ToggleSidebarSection {
@@ -558,7 +656,7 @@ mod tests {
         frame(&ctx, &mut state, Vec::new());
         let mut found = false;
         for y in (26..60).step_by(3) {
-            let queue = click(&ctx, &mut state, Pos2::new(30.0, y as f32));
+            let queue = click(&ctx, &mut state, Pos2::new(30.0, SWITCH_H + y as f32));
             if queue.contains(&Action::OpenFolderDialog) {
                 found = true;
                 break;

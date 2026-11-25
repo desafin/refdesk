@@ -17,6 +17,7 @@ use refdesk_core::{IpcListener, IpcRequest, Prefs, Theme};
 use crate::action::{Action, OpenTarget, apply_scroll_speed, dispatch_queued};
 use crate::i18n::tr;
 use crate::panels::explorer;
+use crate::panels::global_search;
 use crate::session::{self, Saver, Startup};
 use crate::state::AppState;
 use crate::theme;
@@ -123,6 +124,8 @@ impl eframe::App for RefdeskApp {
         textures::collect_rendered(ctx, &self.state.docs, &mut self.state.textures);
         // WP-17: render every page's preview in the background.
         preload::step(ctx, &mut self.state);
+        // WP-55: the search in all open documents follows the open documents and its jobs.
+        global_search::tick(&mut self.state, ctx);
         // WP-41: save the session two seconds after it last changed.
         self.tick_saver(ctx);
     }
@@ -150,10 +153,11 @@ impl eframe::App for RefdeskApp {
 
 /// What a request asks the application to do. A target that is a folder opens as the workspace
 /// (WS-1), before the files, so the files get the focus. Telling a folder from a file is one
-/// look at the disk per target, done here, by the instance that handles the request.
+/// look at the disk per target, done here, by the instance that handles the request. A text to
+/// find (`--find`) is searched for once the files are open.
 fn actions_for_request(request: IpcRequest) -> Vec<Action> {
     match request {
-        IpcRequest::Open { targets } => {
+        IpcRequest::Open { targets, find } => {
             let (folders, files): (Vec<OpenTarget>, Vec<OpenTarget>) = targets
                 .into_iter()
                 .partition(|t| t.page.is_none() && t.path.is_dir());
@@ -163,6 +167,9 @@ fn actions_for_request(request: IpcRequest) -> Vec<Action> {
                 .collect();
             if !files.is_empty() {
                 actions.push(Action::OpenFiles(files));
+            }
+            if let Some(text) = find.filter(|t| !t.trim().is_empty()) {
+                actions.push(Action::GlobalSearchFor(text));
             }
             actions
         }
@@ -340,6 +347,7 @@ mod tests {
     fn open_request(paths: &[&str]) -> IpcRequest {
         IpcRequest::Open {
             targets: paths.iter().map(|p| target(p, None)).collect(),
+            find: None,
         }
     }
 
@@ -533,7 +541,8 @@ mod tests {
         ];
         assert_eq!(
             actions_for_request(IpcRequest::Open {
-                targets: targets.clone()
+                targets: targets.clone(),
+                find: None,
             }),
             vec![Action::OpenFiles(targets)]
         );
@@ -564,6 +573,7 @@ mod tests {
                     page: None,
                 },
             ],
+            find: None,
         };
         assert_eq!(
             actions_for_request(request),
@@ -581,7 +591,8 @@ mod tests {
                 targets: vec![OpenTarget {
                     path: dir.clone(),
                     page: None
-                }]
+                }],
+                find: None,
             }),
             vec![Action::OpenFolder(dir.clone())]
         );
@@ -598,6 +609,7 @@ mod tests {
                 path: dir.clone(),
                 page: None,
             }],
+            find: None,
         })
         .expect("receiver alive");
         assert!(poll_remote_requests(&rx, &mut actions));
@@ -616,6 +628,7 @@ mod tests {
                     path: dir.clone(),
                     page: None,
                 }],
+                find: None,
             },
             &ctx,
         );
@@ -660,7 +673,81 @@ mod tests {
 
     #[test]
     fn an_empty_open_request_queues_nothing() {
-        assert!(actions_for_request(IpcRequest::Open { targets: vec![] }).is_empty());
+        assert!(
+            actions_for_request(IpcRequest::Open {
+                targets: vec![],
+                find: None
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_find_text_is_searched_after_the_files_and_folders_open() {
+        let dir = temp_folder("find");
+        let file = OpenTarget {
+            path: dir.join("inside.pdf"),
+            page: None,
+        };
+        let folder = OpenTarget {
+            path: dir.clone(),
+            page: None,
+        };
+        let request = IpcRequest::Open {
+            targets: vec![file.clone(), folder],
+            find: Some("hello".into()),
+        };
+        assert_eq!(
+            actions_for_request(request),
+            vec![
+                Action::OpenFolder(dir.clone()),
+                Action::OpenFiles(vec![file]),
+                Action::GlobalSearchFor("hello".into()),
+            ]
+        );
+        // Alone it searches what is open; an empty text searches nothing.
+        assert_eq!(
+            actions_for_request(IpcRequest::Open {
+                targets: vec![],
+                find: Some("hello".into()),
+            }),
+            vec![Action::GlobalSearchFor("hello".into())]
+        );
+        assert!(
+            actions_for_request(IpcRequest::Open {
+                targets: vec![],
+                find: Some(" ".into()),
+            })
+            .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_find_text_from_another_instance_shows_the_search_view_and_searches() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel();
+        let (mut state, _saver) = initial_state(
+            Startup::empty(),
+            IpcRequest::Open {
+                targets: vec![],
+                find: None,
+            },
+            &ctx,
+        );
+        tx.send(IpcRequest::Open {
+            targets: vec![],
+            find: Some("needle".into()),
+        })
+        .expect("receiver alive");
+        assert!(poll_remote_requests(&rx, &mut state.actions));
+        dispatch_queued(&mut state, &ctx);
+        assert_eq!(state.global_search.query.text, "needle");
+        assert!(state.main_window().toc_open);
+        assert_eq!(
+            state.main_window().sidebar_view,
+            crate::panels::sidebar::SidebarView::Search
+        );
     }
 
     #[test]
@@ -688,6 +775,7 @@ mod tests {
 
         tx.send(IpcRequest::Open {
             targets: vec![target("/a.pdf", None)],
+            find: None,
         })
         .expect("receiver alive");
         tx.send(IpcRequest::Diff {
@@ -713,8 +801,11 @@ mod tests {
 
         // An empty open request queues nothing but still asks for the window.
         let mut actions = Vec::new();
-        tx.send(IpcRequest::Open { targets: vec![] })
-            .expect("receiver alive");
+        tx.send(IpcRequest::Open {
+            targets: vec![],
+            find: None,
+        })
+        .expect("receiver alive");
         assert!(poll_remote_requests(&rx, &mut actions));
         assert!(actions.is_empty());
     }

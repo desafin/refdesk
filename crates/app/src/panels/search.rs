@@ -929,21 +929,27 @@ pub fn reveal_current(pdf: &mut PdfTab, record: Record) -> bool {
     let Some(rect) = m.rects.first().copied() else {
         return false;
     };
-    let page = m.page;
-    let to = match pdf.ui.layout() {
-        Some(layout) if page < layout.page_count() => {
-            let scroll = pdf.ui.scroll();
-            let viewport = pdf.ui.viewport();
-            let Some(to) = reveal_scroll(layout, scroll, viewport, page, rect) else {
-                return false;
-            };
-            anchor_at(layout, to)
-        }
-        // Not laid out yet: the top of the match's line is all that is known.
-        _ => Location::new(page, 0.0, (rect.y0 - 24.0).max(0.0)),
+    let Some(to) = reveal_target(pdf, m.page, rect) else {
+        return false;
     };
     move_view(pdf, to, record);
     true
+}
+
+/// Where the view of `pdf` has to go to show a match whose first line is `rect` on `page` (see
+/// [`reveal_scroll`]), or `None` when it is comfortably in view already. A view that was never
+/// laid out goes to the top of the match's line, which is all that is known then.
+pub(crate) fn reveal_target(pdf: &PdfTab, page: u32, rect: PageRect) -> Option<Location> {
+    match pdf.ui.layout() {
+        Some(layout) if page < layout.page_count() => {
+            let scroll = pdf.ui.scroll();
+            let viewport = pdf.ui.viewport();
+            let to = reveal_scroll(layout, scroll, viewport, page, rect)?;
+            Some(anchor_at(layout, to))
+        }
+        // Not laid out yet: the top of the match's line is all that is known.
+        _ => Some(Location::new(page, 0.0, (rect.y0 - 24.0).max(0.0))),
+    }
 }
 
 /// Makes match `index` the current one and shows it. A click in the result list: a move that
@@ -983,21 +989,7 @@ pub fn find_in(
     strict: bool,
     history: &SearchHistory,
 ) {
-    let selected = pdf.ui.selection.active().and_then(|sel| {
-        let raw = if strict {
-            selection_text(
-                &sel,
-                |p| doc.page_text(p),
-                refdesk_core::CopyOptions {
-                    join_lines: false,
-                    dehyphenate: false,
-                },
-            )
-        } else {
-            selection_text(&sel, |p| doc.page_text(p), COPY_OPTIONS)
-        };
-        selection_query(&raw, strict)
-    });
+    let selected = selected_query(pdf, doc, strict);
     let anchor = pdf.view.anchor;
     let generation = doc.info().map(|i| i.generation);
     let search = &mut pdf.ui.search;
@@ -1015,6 +1007,26 @@ pub fn find_in(
     if search.open(selected) {
         search.start(doc, notifier, anchor, generation);
     }
+}
+
+/// The query the selected text of `pdf` makes, if it makes one (see [`selection_query`] for
+/// `strict`). Reads only page text that is there already.
+pub(crate) fn selected_query(pdf: &PdfTab, doc: &DocumentHandle, strict: bool) -> Option<String> {
+    pdf.ui.selection.active().and_then(|sel| {
+        let raw = if strict {
+            selection_text(
+                &sel,
+                |p| doc.page_text(p),
+                refdesk_core::CopyOptions {
+                    join_lines: false,
+                    dehyphenate: false,
+                },
+            )
+        } else {
+            selection_text(&sel, |p| doc.page_text(p), COPY_OPTIONS)
+        };
+        selection_query(&raw, strict)
+    })
 }
 
 /// F3 and Shift+F3 for the tab `tab`: steps through the matches. Without a search it opens the
@@ -1590,7 +1602,7 @@ fn show_row(
     }
 }
 
-fn wrapping(width: f32) -> TextWrapping {
+pub(crate) fn wrapping(width: f32) -> TextWrapping {
     TextWrapping {
         max_width: width,
         max_rows: 1,
@@ -1600,7 +1612,7 @@ fn wrapping(width: f32) -> TextWrapping {
 }
 
 /// A one-line text, shortened with "…" past `width`.
-fn line_job(text: &str, font: egui::FontId, color: Color32, width: f32) -> LayoutJob {
+pub(crate) fn line_job(text: &str, font: egui::FontId, color: Color32, width: f32) -> LayoutJob {
     let mut job = LayoutJob {
         wrap: wrapping(width),
         ..Default::default()
@@ -1610,7 +1622,7 @@ fn line_job(text: &str, font: egui::FontId, color: Color32, width: f32) -> Layou
 }
 
 /// The line of a match: the text before, the match marked, the text after.
-fn match_job(
+pub(crate) fn match_job(
     text: &RowText,
     font: egui::FontId,
     color: Color32,
@@ -1641,6 +1653,17 @@ pub fn highlight_colors() -> (Color32, Color32, Stroke) {
         Color32::from_rgba_unmultiplied(255, 214, 0, 96),
         Color32::from_rgba_unmultiplied(255, 120, 0, 150),
         Stroke::new(1.5, Color32::from_rgb(200, 80, 0)),
+    )
+}
+
+/// The colors of the highlights of the search of all open documents (FIND-9): teal, so that they
+/// differ from the yellow and orange of [`highlight_colors`] and from the blue of a selection,
+/// light enough for the text under them to stay readable. They are painted below the others.
+pub fn global_highlight_colors() -> (Color32, Color32, Stroke) {
+    (
+        Color32::from_rgba_unmultiplied(0, 200, 190, 72),
+        Color32::from_rgba_unmultiplied(0, 160, 150, 140),
+        Stroke::new(1.5, Color32::from_rgb(0, 105, 100)),
     )
 }
 

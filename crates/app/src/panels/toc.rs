@@ -1672,9 +1672,11 @@ mod tests {
         for _ in 0..3 {
             frame(&ctx, &mut state, Vec::new());
         }
-        // Find the filter box by clicking down the top of the panel until typing reaches it.
+        // Find the filter box by clicking down the top of the panel (below the row that switches
+        // the sidebar's view) until typing reaches it.
         let mut typed = false;
-        for y in (4..90).step_by(3) {
+        let below_switch = crate::panels::sidebar::SWITCH_H as i32;
+        for y in (below_switch + 4..below_switch + 90).step_by(3) {
             let pos = Pos2::new(100.0, y as f32);
             let click = |pressed| egui::Event::PointerButton {
                 pos,

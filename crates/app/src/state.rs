@@ -16,7 +16,8 @@ use crate::action::Action;
 use crate::overlays::capture::Clipboard;
 use crate::overlays::palette::PaletteState;
 use crate::panels::explorer::ExplorerState;
-use crate::panels::sidebar::DEFAULT_SPLIT;
+use crate::panels::global_search::GlobalSearch;
+use crate::panels::sidebar::{DEFAULT_SPLIT, SidebarView};
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
 use crate::session::Memory;
 use crate::views::diff_view::{DiffDialog, DiffTab};
@@ -248,6 +249,9 @@ pub struct WindowState {
     pub toc_open: bool,
     /// Width of the sidebar in logical pixels.
     pub toc_width: f32,
+    /// What the sidebar shows: the explorer and the table of contents, or the search in all
+    /// open documents (WP-55). Not saved.
+    pub sidebar_view: SidebarView,
     /// The explorer section of the sidebar is expanded (WS-7).
     pub explorer_open: bool,
     /// The table of contents section of the sidebar is expanded (WS-7).
@@ -266,6 +270,7 @@ impl WindowState {
             dock: DockLayout::new(),
             toc_open: false,
             toc_width: DEFAULT_TOC_WIDTH,
+            sidebar_view: SidebarView::Files,
             explorer_open: true,
             outline_open: true,
             sidebar_split: DEFAULT_SPLIT,
@@ -369,6 +374,8 @@ pub struct AppState {
     pub closed_tabs: Vec<ClosedTab>,
     /// The command palette and quick open (WP-43).
     pub palette: PaletteState,
+    /// The search in all open documents (WP-55). Not saved.
+    pub global_search: GlobalSearch,
     /// Where the session and the document records are saved; `None` saves nothing (tests).
     pub paths: Option<Paths>,
     /// The settings from `config.toml`, read once at start. The app never writes that file.
@@ -418,6 +425,7 @@ impl AppState {
             diff_dialog: None,
             closed_tabs: Vec::new(),
             palette: PaletteState::default(),
+            global_search: GlobalSearch::default(),
             paths: None,
             config: Config::default(),
             prefs: Prefs::default(),

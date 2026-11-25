@@ -30,6 +30,7 @@ use crate::commands;
 use crate::i18n::tr;
 use crate::overlays::capture::CaptureState;
 use crate::overlays::link_preview::{self, ShowEnv, UpdateEnv};
+use crate::panels::global_search::DocMarks;
 use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
 use crate::state::{DocId, PdfTab, TabId};
@@ -608,9 +609,21 @@ pub struct ViewContext<'a> {
 
 /// Draws a PDF tab: the document, or its loading, error or password state.
 pub fn show(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, cx: ViewContext<'_>) {
+    show_marked(ui, tab, doc, cx, None);
+}
+
+/// [`show`], tinting `marks`, the matches of the search in all documents, below the view's own
+/// search (FIND-9).
+pub fn show_marked(
+    ui: &mut Ui,
+    tab: &mut PdfTab,
+    doc: &DocumentHandle,
+    cx: ViewContext<'_>,
+    marks: Option<DocMarks<'_>>,
+) {
     match doc.status() {
         DocStatus::Ready => match doc.info() {
-            Some(info) => show_document(ui, tab, doc, &info, cx),
+            Some(info) => show_document(ui, tab, doc, &info, cx, marks),
             None => show_loading(ui, doc),
         },
         DocStatus::Loading => show_loading(ui, doc),
@@ -689,6 +702,7 @@ fn show_document(
     doc: &DocumentHandle,
     info: &DocumentInfo,
     cx: ViewContext<'_>,
+    marks: Option<DocMarks<'_>>,
 ) {
     let outer = ui.available_rect_before_wrap();
     ui.allocate_rect(outer, Sense::hover());
@@ -854,6 +868,7 @@ fn show_document(
         pixels,
         cx.textures,
     );
+    paint_global_search(ui, view_rect, state, marks.as_ref());
     paint_search(ui, view_rect, state);
     paint_selection(ui, view_rect, state, &texts);
     paint_link_hover(ui, view_rect, state, hover.as_ref());
@@ -1221,6 +1236,33 @@ fn paint_selection(ui: &Ui, view_rect: Rect, state: &PdfViewUiState, texts: sele
             view_rect.min + vec2(h.rect.x1, h.rect.y1),
         );
         painter.rect_filled(rect, 0.0, color);
+    }
+}
+
+/// Tints the matches of the search in all documents on the visible pages, in its own colors; its
+/// current result gets a border (FIND-9). Painted before (below) the view's own search.
+fn paint_global_search(
+    ui: &Ui,
+    view_rect: Rect,
+    state: &PdfViewUiState,
+    marks: Option<&DocMarks<'_>>,
+) {
+    let (Some(marks), Some(layout)) = (marks, state.layout()) else {
+        return;
+    };
+    let (all, current, border) = search::global_highlight_colors();
+    let painter = ui.painter_at(view_rect);
+    for h in marks.rects(layout, state.scroll(), state.viewport()) {
+        let rect = Rect::from_min_max(
+            view_rect.min + vec2(h.rect.x0, h.rect.y0),
+            view_rect.min + vec2(h.rect.x1, h.rect.y1),
+        );
+        if h.current {
+            painter.rect_filled(rect, 2.0, current);
+            painter.rect_stroke(rect, 2.0, border, StrokeKind::Outside);
+        } else {
+            painter.rect_filled(rect, 2.0, all);
+        }
     }
 }
 

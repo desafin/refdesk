@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! refdesk [--no-restore] [--no-single-instance] [folder] [file[#page=N]]...
+//! refdesk --find text [folder] [file...]
 //! refdesk --diff old.pdf new.pdf
 //! ```
 //!
@@ -52,6 +53,8 @@ pub fn version_text() -> String {
 /// * `--help`/`-h` and `--version`/`-V` win at the point they are met.
 /// * `--diff A B` takes the next two arguments as they are (no `#page=` handling). It cannot be
 ///   combined with files or repeated.
+/// * `--find TEXT` takes the next argument as the text to search all open documents for
+///   (FIND-12). It must not be empty, cannot be repeated and cannot be combined with `--diff`.
 /// * `--` ends the options: everything after it is a file, even if it starts with `-`.
 /// * An argument that starts with `-` and is not a known option is an error (a lone `-` is a file
 ///   name). An argument that is not valid UTF-8 is a file without a page request.
@@ -59,6 +62,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
     let mut args = args.into_iter();
     let mut targets: Vec<OpenTarget> = Vec::new();
     let mut diff: Option<(PathBuf, PathBuf)> = None;
+    let mut find: Option<String> = None;
     let mut single_instance = true;
     let mut restore = true;
     let mut options_ended = false;
@@ -90,6 +94,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
                     diff = Some((left.into(), right.into()));
                     continue;
                 }
+                "--find" => {
+                    if find.is_some() {
+                        return Cli::Error(tr("cli.find_twice").to_owned());
+                    }
+                    let text = args.next().map(|a| a.to_string_lossy().into_owned());
+                    match text.filter(|t| !t.trim().is_empty()) {
+                        Some(text) => find = Some(text),
+                        None => return Cli::Error(tr("cli.find_needs_text").to_owned()),
+                    }
+                    continue;
+                }
                 _ if text.starts_with('-') && text != "-" => {
                     return Cli::Error(tr("cli.unknown_option").replace("{}", text));
                 }
@@ -103,8 +118,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
         Some(_) if !targets.is_empty() => {
             return Cli::Error(tr("cli.diff_with_files").to_owned());
         }
+        Some(_) if find.is_some() => {
+            return Cli::Error(tr("cli.find_with_diff").to_owned());
+        }
         Some((left, right)) => IpcRequest::Diff { left, right },
-        None => IpcRequest::Open { targets },
+        None => IpcRequest::Open { targets, find },
     };
     Cli::Run {
         request,
@@ -142,7 +160,10 @@ mod tests {
 
     fn open(targets: Vec<OpenTarget>, single_instance: bool) -> Cli {
         Cli::Run {
-            request: IpcRequest::Open { targets },
+            request: IpcRequest::Open {
+                targets,
+                find: None,
+            },
             single_instance,
             restore: true,
         }
@@ -264,7 +285,7 @@ mod tests {
     #[test]
     fn no_restore_is_a_flag_anywhere() {
         let Cli::Run {
-            request: IpcRequest::Open { targets },
+            request: IpcRequest::Open { targets, .. },
             single_instance,
             restore,
         } = parse_strs(&["a.pdf", "--no-restore", "b.pdf"])
@@ -327,7 +348,7 @@ mod tests {
     fn an_argument_that_is_not_utf8_is_a_plain_path() {
         let raw = OsString::from_vec(vec![b'a', 0xff, b'.', b'p', b'd', b'f']);
         let Cli::Run {
-            request: IpcRequest::Open { targets },
+            request: IpcRequest::Open { targets, .. },
             ..
         } = parse([raw.clone()])
         else {
@@ -346,7 +367,8 @@ mod tests {
             parse_strs(&["specs/", "specs/a.pdf#page=3"]),
             Cli::Run {
                 request: IpcRequest::Open {
-                    targets: vec![target("specs/", None), target("specs/a.pdf", Some(2))]
+                    targets: vec![target("specs/", None), target("specs/a.pdf", Some(2))],
+                    find: None,
                 },
                 single_instance: true,
                 restore: true,
@@ -358,6 +380,7 @@ mod tests {
     fn usage_names_every_option() {
         let text = usage();
         for needle in [
+            "--find",
             "--diff",
             "--no-single-instance",
             "--no-restore",
@@ -368,5 +391,56 @@ mod tests {
             assert!(text.contains(needle), "usage lacks {needle}");
         }
         assert!(version_text().starts_with("refdesk "));
+    }
+
+    fn find_request(targets: Vec<OpenTarget>, find: &str) -> Cli {
+        Cli::Run {
+            request: IpcRequest::Open {
+                targets,
+                find: Some(find.to_owned()),
+            },
+            single_instance: true,
+            restore: true,
+        }
+    }
+
+    #[test]
+    fn find_takes_the_next_argument_as_the_text_and_the_rest_are_files() {
+        assert_eq!(
+            parse_strs(&["--find", "hello", "a.pdf", "b.pdf"]),
+            find_request(vec![target("a.pdf", None), target("b.pdf", None)], "hello")
+        );
+        // Anywhere among the files, and the text may look like an option or hold blanks.
+        assert_eq!(
+            parse_strs(&["a.pdf", "--find", "-x two words"]),
+            find_request(vec![target("a.pdf", None)], "-x two words")
+        );
+        // Alone it searches the documents that are open already.
+        assert_eq!(
+            parse_strs(&["--find", "hello"]),
+            find_request(vec![], "hello")
+        );
+    }
+
+    #[test]
+    fn find_with_a_folder_keeps_the_folder_as_a_target() {
+        assert_eq!(
+            parse_strs(&["--find", "SWS_EM", "specs/"]),
+            find_request(vec![target("specs/", None)], "SWS_EM")
+        );
+    }
+
+    #[test]
+    fn find_without_a_text_twice_or_with_diff_is_an_error() {
+        for args in [
+            &["--find"][..],
+            &["--find", ""][..],
+            &["--find", "  "][..],
+            &["--find", "a", "--find", "b"][..],
+            &["--find", "hello", "--diff", "a.pdf", "b.pdf"][..],
+            &["--diff", "a.pdf", "b.pdf", "--find", "hello"][..],
+        ] {
+            assert!(matches!(parse_strs(args), Cli::Error(_)), "{args:?}");
+        }
     }
 }

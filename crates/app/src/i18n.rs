@@ -98,6 +98,26 @@ pub const TABLE: &[Row] = &[
     ("cmd.edit.find_next", "다음 찾기", "Find Next"),
     ("cmd.edit.find_prev", "이전 찾기", "Find Previous"),
     (
+        "cmd.edit.find_all",
+        "모든 문서에서 찾기",
+        "Find in All Documents",
+    ),
+    (
+        "cmd.edit.find_all_next",
+        "다음 검색 결과",
+        "Next Search Result",
+    ),
+    (
+        "cmd.edit.find_all_prev",
+        "이전 검색 결과",
+        "Previous Search Result",
+    ),
+    (
+        "cmd.edit.find_all_clear",
+        "모든 문서 찾기 지우기",
+        "Clear Search in All Documents",
+    ),
+    (
         "cmd.edit.search_selection",
         "이 텍스트로 검색",
         "Search for This Text",
@@ -203,6 +223,52 @@ pub const TABLE: &[Row] = &[
         "Type the text to find",
     ),
     ("find.match_count", "{n}건", "{n}"),
+    (
+        "gsearch.hint",
+        "열린 모든 문서에서 찾기",
+        "Find in all open documents",
+    ),
+    ("gsearch.clear", "지우기", "Clear"),
+    (
+        "gsearch.summary",
+        "문서 {docs}개에서 {n}건",
+        "{n} results in {docs} documents",
+    ),
+    (
+        "gsearch.searching",
+        "(찾는 중 {percent}%)",
+        "(searching {percent}%)",
+    ),
+    (
+        "gsearch.searching_alone",
+        "찾는 중 {percent}%",
+        "Searching {percent}%",
+    ),
+    ("gsearch.none", "결과 없음", "No results"),
+    (
+        "gsearch.no_docs",
+        "열린 문서가 없습니다",
+        "No open documents",
+    ),
+    (
+        "gsearch.truncated",
+        "일부 문서는 결과가 너무 많아 잘렸습니다",
+        "Some documents have too many results; their lists are cut short",
+    ),
+    ("gsearch.head", "{name}, {n}건", "{name}, {n} results"),
+    ("sidebar.files", "파일", "Files"),
+    ("sidebar.search", "검색", "Search"),
+    ("sidebar.search_count", "검색 ({n})", "Search ({n})"),
+    (
+        "sidebar.files_hint",
+        "탐색기와 목차 (Ctrl+Shift+E)",
+        "Explorer and contents (Ctrl+Shift+E)",
+    ),
+    (
+        "sidebar.search_hint",
+        "열린 모든 문서에서 찾기 (Ctrl+Shift+F)",
+        "Find in all open documents (Ctrl+Shift+F)",
+    ),
     ("sel.copied", "복사됨 ({} 글자)", "Copied ({} characters)"),
     ("cmd.view.zoom_in", "확대", "Zoom In"),
     ("cmd.view.zoom_out", "축소", "Zoom Out"),
@@ -425,9 +491,11 @@ pub const TABLE: &[Row] = &[
         "cli.help",
         "사용법:
   refdesk [옵션] [폴더] [파일[#page=N]]...
+  refdesk --find 글 [폴더] [파일...]
   refdesk --diff 이전.pdf 이후.pdf
 
 옵션:
+  --find 글              연 뒤 열린 모든 문서에서 그 글을 찾는다
   --diff A B             두 PDF 를 비교한다
   --no-single-instance   실행 중인 인스턴스를 찾지 않고 새로 띄운다 (개발용)
   --no-restore           마지막 세션을 복원하지 않는다
@@ -439,9 +507,11 @@ pub const TABLE: &[Row] = &[
 이미 실행 중이면 새 창을 띄우지 않고 그 창에 탭으로 연다.",
         "Usage:
   refdesk [options] [folder] [file[#page=N]]...
+  refdesk --find text [folder] [file...]
   refdesk --diff old.pdf new.pdf
 
 Options:
+  --find text            search all open documents for the text once they are open
   --diff A B             compare two PDF files
   --no-single-instance   start a new instance without looking for a running one (for development)
   --no-restore           do not restore the last session
@@ -471,6 +541,21 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "cli.diff_with_files",
         "--diff 는 다른 파일과 함께 쓸 수 없습니다",
         "--diff cannot be combined with other files",
+    ),
+    (
+        "cli.find_needs_text",
+        "--find 에는 찾을 글이 필요합니다",
+        "--find needs the text to find",
+    ),
+    (
+        "cli.find_twice",
+        "--find 는 한 번만 쓸 수 있습니다",
+        "--find can be used only once",
+    ),
+    (
+        "cli.find_with_diff",
+        "--find 는 --diff 와 함께 쓸 수 없습니다",
+        "--find cannot be combined with --diff",
     ),
     (
         "diff.tab_title",

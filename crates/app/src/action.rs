@@ -12,8 +12,9 @@ use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, Rect,
 use crate::overlays::capture;
 use crate::overlays::palette::{self, PaletteMode};
 use crate::panels::explorer;
+use crate::panels::global_search;
 use crate::panels::search;
-use crate::panels::sidebar::SidebarSection;
+use crate::panels::sidebar::{SidebarSection, SidebarView};
 use crate::panels::status_bar::GotoInput;
 use crate::panels::toc::TocState;
 use crate::session;
@@ -133,6 +134,29 @@ pub enum Action {
     FindNext(TabId),
     /// Move a PDF tab to the previous match of its search (FIND-1).
     FindPrev(TabId),
+    /// Show the search in all open documents in the sidebar of the focused window and put the
+    /// keyboard into its input field; a selected text of one line becomes the query (FIND-7).
+    ShowGlobalSearch,
+    /// Search all open documents for this text and show the search view (`--find`, FIND-12).
+    GlobalSearchFor(String),
+    /// Go to a result of the search in all documents: match `index` of `doc`, shown in a tab
+    /// picked by `global_search::pick_tab` (FIND-8). Sent by a click on a result row.
+    GlobalSearchGoTo {
+        /// The document.
+        doc: DocId,
+        /// The match, an index into the matches of the document.
+        index: usize,
+        /// The window whose result list was clicked.
+        window: WindowId,
+    },
+    /// Go to the next (or previous) result of the search in all documents, across documents
+    /// (F4, Shift+F4, FIND-10). Without a query it shows the search view.
+    GlobalSearchStep {
+        /// Next rather than previous.
+        forward: bool,
+    },
+    /// Clear the search in all documents: query, results and highlights (FIND-9).
+    ClearGlobalSearch,
     /// Compare two documents in a new comparison tab of the focused pane (DIFF-1).
     StartDiff {
         /// The older document.
@@ -326,7 +350,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             state.file_dialog_requested = true;
             ctx.request_repaint();
         }
-        Action::OpenFolder(path) => explorer::open_folder(state, &path, ctx),
+        Action::OpenFolder(path) => {
+            explorer::open_folder(state, &path, ctx);
+            show_files_view(state);
+        }
         Action::OpenFolderDialog => {
             state.folder_dialog_requested = true;
             ctx.request_repaint();
@@ -406,6 +433,13 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::SaveCapture(tab) => capture::save(state, tab, ctx),
         Action::FindNext(tab) => search::step(state, tab, true, ctx),
         Action::FindPrev(tab) => search::step(state, tab, false, ctx),
+        Action::ShowGlobalSearch => global_search::show(state, ctx),
+        Action::GlobalSearchFor(text) => global_search::search_for(state, text, ctx),
+        Action::GlobalSearchGoTo { doc, index, window } => {
+            global_search::go_to_clicked(state, doc, index, window, ctx);
+        }
+        Action::GlobalSearchStep { forward } => global_search::step(state, forward, ctx),
+        Action::ClearGlobalSearch => global_search::clear(state),
         Action::StartDiff { left, right } => {
             // The tabs whose documents are compared are kept open; a pick in an explorer is
             // used up.
@@ -523,6 +557,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 window.toc_open = true;
                 window.explorer_open = true;
                 window.explorer.focus_filter = true;
+                window.sidebar_view = SidebarView::Files;
             }
             ctx.request_repaint();
         }
@@ -531,6 +566,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 .window_index(window)
                 .and_then(|w| state.windows.get_mut(w))
             {
+                window.sidebar_view = SidebarView::Files;
                 let open = match section {
                     SidebarSection::Explorer => &mut window.explorer_open,
                     SidebarSection::Outline => &mut window.outline_open,
@@ -550,6 +586,14 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::Quit => quit(ctx),
     }
     palette::after_dispatch(state);
+}
+
+/// Turns the sidebar of the focused window back to its explorer and table of contents.
+fn show_files_view(state: &mut AppState) {
+    let w = state.focused_window_index();
+    if let Some(window) = state.windows.get_mut(w) {
+        window.sidebar_view = SidebarView::Files;
+    }
 }
 
 /// Closes the main window, which ends the application (the state is saved on the way out).

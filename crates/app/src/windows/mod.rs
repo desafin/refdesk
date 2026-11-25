@@ -23,6 +23,7 @@ use crate::action::Action;
 use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
 use crate::panels::breadcrumb;
+use crate::panels::global_search::{self, DocMarks, GlobalSearch};
 use crate::panels::search;
 use crate::panels::sidebar;
 use crate::panels::status_bar;
@@ -342,6 +343,7 @@ pub fn show_window(
         textures,
         focus,
         search_history,
+        global_search,
         ..
     } = state;
     let Some(window) = windows.get_mut(window_index) else {
@@ -350,6 +352,7 @@ pub fn show_window(
     let mut host = WindowHost {
         tabs,
         docs,
+        global: global_search,
         textures,
         focus: *focus,
         titles,
@@ -551,6 +554,8 @@ fn tab_tooltip(state: &AppState, tab: TabId) -> Option<String> {
 struct WindowHost<'a> {
     tabs: &'a mut TabStore,
     docs: &'a DocStore,
+    /// The search in all documents, whose matches the PDF views tint (WP-55).
+    global: &'a GlobalSearch,
     textures: &'a mut TextureCache,
     focus: Option<TabId>,
     titles: HashMap<TabId, (TabLabel, Option<String>)>,
@@ -579,6 +584,11 @@ impl DockHost for WindowHost<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: TabId) {
+        // The matches of the search in all documents, for a PDF tab (FIND-9).
+        let marks = self
+            .tabs
+            .get(tab)
+            .and_then(|t| global_search::marks_for_tab(self.global, t));
         match self.tabs.get_mut(tab) {
             Some(Tab::Pdf(pdf)) => match self.docs.get(pdf.doc) {
                 Some(doc) => {
@@ -597,15 +607,9 @@ impl DockHost for WindowHost<'_> {
                         textures: self.textures,
                         queue: self.queue,
                     };
-                    draw_pdf_tab(
-                        ui,
-                        pdf,
-                        doc,
-                        cx,
-                        self.show_breadcrumb,
-                        self.overlay_open,
-                        self.search_history,
-                    );
+                    let (breadcrumb, overlay) = (self.show_breadcrumb, self.overlay_open);
+                    let history = self.search_history;
+                    draw_pdf_tab_marked(ui, pdf, doc, cx, breadcrumb, overlay, history, marks);
                 }
                 None => {
                     ui.label(tr("tab.unknown"));
@@ -668,6 +672,8 @@ impl DockHost for WindowHost<'_> {
 
 /// Draws the content of a PDF tab: the PDF view (WP-15). It gets the tab (whose view state it
 /// may change), the document handle, the shared textures and the action queue.
+// Drawing without the search in all documents is left to the link preview's tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn draw_pdf_tab(
     ui: &mut Ui,
     tab: &mut PdfTab,
@@ -676,6 +682,31 @@ pub fn draw_pdf_tab(
     show_breadcrumb: bool,
     overlay_open: bool,
     search_history: &refdesk_core::SearchHistory,
+) {
+    let history = search_history;
+    draw_pdf_tab_marked(
+        ui,
+        tab,
+        doc,
+        cx,
+        show_breadcrumb,
+        overlay_open,
+        history,
+        None,
+    );
+}
+
+/// [`draw_pdf_tab`] with the matches of the search in all documents to tint (FIND-9).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_pdf_tab_marked(
+    ui: &mut Ui,
+    tab: &mut PdfTab,
+    doc: &DocumentHandle,
+    cx: ViewContext<'_>,
+    show_breadcrumb: bool,
+    overlay_open: bool,
+    search_history: &refdesk_core::SearchHistory,
+    marks: Option<DocMarks<'_>>,
 ) {
     search::show_bar(
         ui,
@@ -695,7 +726,7 @@ pub fn draw_pdf_tab(
     let drawn = line
         .as_ref()
         .and_then(|info| breadcrumb::show(ui, tab, info, cx.tab_id, viewport_h, cx.queue));
-    pdf_view::show(ui, tab, doc, cx);
+    pdf_view::show_marked(ui, tab, doc, cx, marks);
     if let Some(info) = &line
         && breadcrumb::section_of(tab, info, viewport_h) != drawn
     {

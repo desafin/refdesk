@@ -80,6 +80,11 @@ pub enum IpcRequest {
     Open {
         /// The files, in the order they were given.
         targets: Vec<OpenTarget>,
+        /// Search every open document for this text once the files are open (`--find`,
+        /// FIND-12). Left out of the JSON when there is none, so older senders and receivers
+        /// still understand each other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        find: Option<String>,
     },
     /// Compare two documents.
     Diff {
@@ -105,7 +110,7 @@ impl IpcRequest {
     /// directory). Pages and the order of files are kept.
     pub fn with_absolute_paths(self, base: &Path) -> IpcRequest {
         match self {
-            IpcRequest::Open { targets } => IpcRequest::Open {
+            IpcRequest::Open { targets, find } => IpcRequest::Open {
                 targets: targets
                     .into_iter()
                     .map(|t| OpenTarget {
@@ -113,6 +118,7 @@ impl IpcRequest {
                         page: t.page,
                     })
                     .collect(),
+                find,
             },
             IpcRequest::Diff { left, right } => IpcRequest::Diff {
                 left: absolute_path(&left, base),
@@ -343,6 +349,7 @@ mod tests {
                 path: PathBuf::from(path),
                 page,
             }],
+            find: None,
         }
     }
 
@@ -394,7 +401,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("r.sock");
         let (_listener, rx) = collecting(&socket);
-        let request = IpcRequest::Open { targets: vec![] };
+        let request = IpcRequest::Open {
+            targets: vec![],
+            find: None,
+        };
         assert!(send(&socket, &request).expect("send"));
         assert_eq!(rx.recv_timeout(WAIT).expect("received"), request);
     }
@@ -666,6 +676,7 @@ mod tests {
                     page: Some(2),
                 },
             ],
+            find: None,
         }
         .with_absolute_paths(base);
         assert_eq!(
@@ -680,7 +691,8 @@ mod tests {
                         path: PathBuf::from("/work/dir/sub/../b.pdf"),
                         page: Some(2)
                     },
-                ]
+                ],
+                find: None,
             }
         );
     }
@@ -711,6 +723,7 @@ mod tests {
         let target = OpenTarget::parse("manual.pdf#page=12");
         let request = IpcRequest::Open {
             targets: vec![target],
+            find: Some("needle".to_owned()),
         }
         .with_absolute_paths(Path::new("/work"));
         assert_eq!(
@@ -719,9 +732,35 @@ mod tests {
                 targets: vec![OpenTarget {
                     path: PathBuf::from("/work/manual.pdf"),
                     page: Some(11)
-                }]
+                }],
+                find: Some("needle".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn a_find_text_travels_with_an_open_request_and_is_left_out_when_absent() {
+        let request = IpcRequest::Open {
+            targets: vec![OpenTarget {
+                path: PathBuf::from("/a.pdf"),
+                page: None,
+            }],
+            find: Some("hello world".to_owned()),
+        };
+        let json = serde_json::to_string(&request).expect("encode");
+        assert!(json.contains("\"find\":\"hello world\""), "{json}");
+        let back: IpcRequest = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, request);
+        // Without a text the field is not written at all.
+        let json = serde_json::to_string(&open("/a.pdf", None)).expect("encode");
+        assert!(!json.contains("find"), "{json}");
+    }
+
+    #[test]
+    fn an_open_request_of_the_old_format_without_find_is_read() {
+        let old = r#"{"type":"open","targets":[{"path":"/a.pdf","page":3}]}"#;
+        let request: IpcRequest = serde_json::from_str(old).expect("decode");
+        assert_eq!(request, open("/a.pdf", Some(3)));
     }
 
     #[test]
