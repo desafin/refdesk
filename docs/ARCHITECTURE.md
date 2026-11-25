@@ -374,7 +374,7 @@ impl SearchJob {
 파이프라인은 SPEC §8.5. 공개 계약:
 
 ```rust
-pub struct DiffOptions { pub skip_repeated_lines: bool, pub ignore_case: bool, pub ignore_whitespace: bool }
+pub struct DiffOptions { pub skip_repeated_lines: bool, pub ignore_case: bool }   // 단어 단위 비교라 공백은 원래 무시된다
 pub enum ChangeKind { Added, Removed, Modified }
 pub struct Span { pub start: TextPos, pub end: TextPos }
 pub struct Change { pub kind: ChangeKind, pub left: Option<Span>, pub right: Option<Span>,
@@ -399,7 +399,12 @@ impl DiffJob {
 ```
 
 - `sync` 는 동기 스크롤의 근거다. 한쪽 위치를 `sync` 의 이웃한 두 점 사이에서 보간해 다른 쪽 위치를 구하는 함수도 여기 둔다.
-- 1차 정렬은 `similar` 의 임의 토큰 비교(문단 해시), 2차는 바뀐 문단 쌍 안의 단어 비교. 모두 시간 제한을 건다.
+- 입력은 `diff::extract` 가 만든 `DocTokens`(문단과 단어의 흐름, 반복되는 머리글·바닥글 제거됨)다. 정의는 `crates/core/src/diff/extract.rs`.
+- 반복 줄 판정(`diff/noise.rs`): 쪽 위·아래 15% 띠의 줄 가운데, 숫자를 가린 모양과 글자 크기가 같은 것이 전체 쪽의 절반 이상,
+  또는 짝수 쪽(홀수 쪽)의 절반 이상, 또는 3쪽 이상 이어져 나타나면 잡음으로 본다.
+  알려진 한계: 쪽마다 글이 다른 머리글(현재 절 제목)은 못 거른다. 띠 안에서 여러 쪽 이어지는 표의 열 제목은 지워진다.
+- 1차 정렬은 `similar` 의 임의 토큰 비교(문단 해시). 2차는 어긋난 구간 전체를 단어 단위로 다시 맞춘다 —
+  같은 글이 버전마다 다른 문단 경계로 쪼개질 수 있어서, 단어가 같으면 문단 경계가 달라도 변경이 아니어야 한다. 모두 시간 제한을 건다.
 - 참고: `references/diff/pdf-diff-joshdata/pdf_diff/command_line.py`(전체를 한 흐름으로 비교, 결과를 상자로 되돌리기).
 
 ### 4.10 store — 저장
