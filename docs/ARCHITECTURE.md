@@ -66,6 +66,10 @@ egui·eframe·egui_dock·mupdf 의 현재 API 는 모델이 기억하는 것과 
 - 메뉴를 닫는 것은 `ui.close()` 다(`close_menu` 는 없다). `egui::Id::new` 는 폐기 예정이고 `Id::unique(..)` 를 쓴다.
 - 메뉴 막대는 `egui::MenuBar::new().ui(ui, |ui| ui.menu_button(..))`.
 - 창 없는 테스트는 `Context::run_ui(RawInput, |ui| ..)` 로 돌린다. 돌려받은 `FullOutput` 은 `.drop_without_applying_deltas()` 로 버려야 한다(안 그러면 drop 에서 panic).
+- `Ui::id()` 는 폐기 예정이고 `Ui::scope_id()` 를 쓴다. `Painter::rect_stroke` 는 넷째 인자 `StrokeKind` 가 필요하다.
+- Ctrl+휠은 스크롤 값이 아니라 `zoom_delta()` 로 온다. `consume_key` 도 여분의 Shift 를 무시한다(Shift+Space 를 Space 보다 먼저 검사).
+- 창 없는 테스트에서 문서 notifier 의 다시 그리기 요청을 기다리려면 `Context::set_request_repaint_callback` 을 쓴다(sleep 없이 조건 대기).
+  `RawInput` 에 `max_texture_side` 를 주지 않으면 2048 이다.
 - 단축키 비교(`consume_shortcut`)는 여분의 Shift 를 무시한다. Ctrl+Shift+Tab 을 Ctrl+Tab 보다 먼저 검사해야 한다. Ctrl+Shift+= 는 `Key::Plus` 로 온다.
 - 글꼴 추가는 `ctx.add_font(FontInsert::new(..))`. eframe 은 `NativeOptions::system_font_fallback`(기본 켜짐)으로 없는 글리프를 시스템 글꼴에서 찾는다.
 - egui_dock 0.22: `TabViewer::context_menu(ui, tab, path: NodePath)`, `is_closeable(&self, &Tab)`, `allowed_in_windows(&self, &mut Tab)`.
@@ -589,10 +593,18 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 
 줌 동작이 이어지는 동안은 새 배율로 렌더를 요청하지 않고 기존 텍스처를 늘려 그리다가, 80ms 멈추면 요청한다.
 
+구현 메모(WP-15)
+- 스크롤은 egui 의 `ScrollArea` 를 쓰지 않고 직접 관리한다. 현재 스크롤 값(내용 공간)은 `PdfViewUiState` 에 있고,
+  `anchor` 에서 다시 구하는 것은 배치가 바뀌었을 때와 밖에서 `anchor` 를 바꿨을 때뿐이다. 스크롤 막대도 직접 그린다.
+- `anchor` 는 쪽 안으로 줄이지 않은 위치로 둔다(쪽 위 여백에서는 y 가 음수일 수 있다). 스크롤 → anchor → 스크롤이 정확히 왕복하게 하려는 것이다.
+- 쪽 맞춤의 기준 쪽은 그 방식을 고른 순간의 현재 쪽으로 고정한다.
+- 어느 쪽을 어떤 우선순위로 요청할지, 어느 텍스처를 쓸지, 줌 뒤의 스크롤 값은 egui 없이 테스트되는 순수 함수다.
+
 ### 5.6 텍스처 캐시
 
 키 `(DocId, RenderKey)`, 값은 텍스처 핸들과 바이트 수. 예산(기본 2GB)을 넘으면 가장 오래 안 쓴 것부터 버린다.
-"같은 쪽의 가장 가까운 배율" 조회를 제공한다. 세대가 지난 항목은 문서 reload 시 한꺼번에 버린다.
+"같은 쪽의 가장 가까운 배율" 조회(`nearest(doc, page, generation, scale_milli)`: 배율의 비가 가장 가까운 것, 같으면 더 선명한 쪽)를 제공한다.
+세대가 지난 항목은 문서 reload 시 한꺼번에 버린다. 구현은 `views/textures.rs`.
 
 ### 5.7 화면 캡처
 
