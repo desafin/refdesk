@@ -160,6 +160,11 @@ fn has_several_panes(state: &AppState) -> bool {
     state.focused_window().dock.pane_count() > 1
 }
 
+/// Some search is remembered.
+fn has_search_history(state: &AppState) -> bool {
+    !state.search_history.is_empty()
+}
+
 /// The focused PDF view (the side in use of a comparison tab) has selected text.
 fn has_selection(state: &AppState) -> bool {
     match state.focus.and_then(|id| state.tabs.get(id)) {
@@ -287,6 +292,15 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_selection,
         action: |s| s.focus.map(Action::CopySelection),
+    },
+    Command {
+        id: "edit.clear_search_history",
+        name_key: "cmd.edit.clear_search_history",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_search_history,
+        action: |_| Some(Action::ClearSearchHistory),
     },
     Command {
         id: "edit.find",

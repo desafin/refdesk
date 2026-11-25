@@ -341,6 +341,7 @@ pub fn show_window(
         docs,
         textures,
         focus,
+        search_history,
         ..
     } = state;
     let Some(window) = windows.get_mut(window_index) else {
@@ -356,6 +357,7 @@ pub fn show_window(
         start,
         show_breadcrumb,
         overlay_open,
+        search_history,
         queue,
     };
     CentralPanel::default().show(ui, |ui| {
@@ -559,6 +561,8 @@ struct WindowHost<'a> {
     show_breadcrumb: bool,
     /// The command palette is open: link previews stay closed (LINK-8).
     overlay_open: bool,
+    /// The searches made, for the search bars (FIND-13).
+    search_history: &'a refdesk_core::SearchHistory,
     queue: &'a mut Vec<Action>,
 }
 
@@ -593,7 +597,15 @@ impl DockHost for WindowHost<'_> {
                         textures: self.textures,
                         queue: self.queue,
                     };
-                    draw_pdf_tab(ui, pdf, doc, cx, self.show_breadcrumb, self.overlay_open);
+                    draw_pdf_tab(
+                        ui,
+                        pdf,
+                        doc,
+                        cx,
+                        self.show_breadcrumb,
+                        self.overlay_open,
+                        self.search_history,
+                    );
                 }
                 None => {
                     ui.label(tr("tab.unknown"));
@@ -663,8 +675,17 @@ pub fn draw_pdf_tab(
     cx: ViewContext<'_>,
     show_breadcrumb: bool,
     overlay_open: bool,
+    search_history: &refdesk_core::SearchHistory,
 ) {
-    search::show_bar(ui, tab, doc, cx.tab_id, cx.focused);
+    search::show_bar(
+        ui,
+        tab,
+        doc,
+        cx.tab_id,
+        cx.focused,
+        search_history,
+        &mut *cx.queue,
+    );
     tab.ui.links.preview.overlay_open = overlay_open;
     // The section path line (TOC-6) is drawn above the view, from where the view was in the
     // previous frame; when the view moved to another section in this one, one more frame

@@ -93,6 +93,18 @@ pub enum Action {
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
     /// clipboard (SEL-2).
     CopySelection(TabId),
+    /// Remember a search in the search history (FIND-14). `replaces` is the query a search box
+    /// recorded by settling just before; it is dropped when it is only the beginning of `query`.
+    RecordSearch {
+        /// The search to remember.
+        query: refdesk_core::SearchQuery,
+        /// A beginning of `query` that may be dropped from the history.
+        replaces: Option<refdesk_core::SearchQuery>,
+    },
+    /// Remove the entry at this index (newest is 0) from the search history.
+    RemoveSearchHistory(usize),
+    /// Forget every search in the history.
+    ClearSearchHistory,
     /// Open the search bar of a PDF tab; a selected text of one line is searched for (FIND-1,
     /// FIND-6).
     Find(TabId),
@@ -376,6 +388,11 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             ctx.request_repaint();
         }
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
+        Action::RecordSearch { query, replaces } => {
+            crate::panels::search_history::record(state, &query, replaces.as_ref())
+        }
+        Action::RemoveSearchHistory(index) => crate::panels::search_history::remove(state, index),
+        Action::ClearSearchHistory => crate::panels::search_history::clear(state, ctx),
         Action::Find(tab) => search::find(state, tab, false, ctx),
         Action::FindSelection(tab) => search::find(state, tab, true, ctx),
         Action::StartCapture(tab) => capture::start(state, tab),

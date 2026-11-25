@@ -1391,7 +1391,8 @@ pub(crate) mod tests {
                 textures,
                 queue,
             };
-            crate::windows::draw_pdf_tab(ui, tab, doc, cx, show_breadcrumb, overlay_open);
+            let history = refdesk_core::SearchHistory::default();
+            crate::windows::draw_pdf_tab(ui, tab, doc, cx, show_breadcrumb, overlay_open, &history);
         }
     }
 

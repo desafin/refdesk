@@ -24,10 +24,13 @@ use egui::{
 };
 use refdesk_core::{
     DocumentHandle, Location, Notifier, Outline, PageLayout, Place, Point, Rect as PageRect,
-    SearchError, SearchJob, SearchMatch, SearchQuery, SearchSnapshot, Size, selection_text,
+    SearchError, SearchHistory, SearchJob, SearchMatch, SearchQuery, SearchSnapshot, Size,
+    selection_text,
 };
 
+use crate::action::Action;
 use crate::i18n::tr;
+use crate::panels::search_history::{self, HistoryEvent, Recall, Settle, SettleStep};
 use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore, WindowId};
 use crate::views::links::page_label;
 use crate::views::pdf_view::anchor_at;
@@ -536,6 +539,12 @@ pub struct SearchState {
     pub departed: bool,
     /// How many searches were started (tests).
     pub starts: u32,
+    /// ↑ / ↓ in the input field walk through the search history (FIND-13).
+    pub recall: Recall,
+    /// Records the query when it has stayed for a while (FIND-14).
+    pub settle: Settle,
+    /// A click in the result list used the query: the bar records it in the next frame.
+    record_pending: bool,
     job: Option<Arc<SearchJob>>,
     /// The query the job runs.
     running: Option<SearchQuery>,
@@ -671,8 +680,30 @@ impl SearchState {
         }
     }
 
+    /// The query to remember when the bar is closed now: not empty, and a search was started for
+    /// it (FIND-14). Ask before [`SearchState::close`], which drops the job.
+    pub fn query_to_record_on_close(&self) -> Option<SearchQuery> {
+        (self.open && self.has_query() && self.running.is_some()).then(|| self.query.clone())
+    }
+
+    /// The search for the query shown has results: what [`Settle`] waits for.
+    fn has_current_matches(&self) -> bool {
+        self.live && self.running.as_ref() == Some(&self.query) && !self.snapshot.matches.is_empty()
+    }
+
+    /// Puts a query from the history into the field and searches for it at once. The field gets
+    /// the keyboard with all its text selected.
+    fn use_query(&mut self, query: SearchQuery) {
+        self.query = query;
+        self.focus_input = true;
+        self.options_changed();
+    }
+
     /// Hides the bar and the highlights and cancels the search. The query stays for the next time.
     pub fn close(&mut self) {
+        self.recall.reset();
+        self.settle.reset();
+        self.record_pending = false;
         self.open = false;
         self.focus_input = false;
         self.error = None;
@@ -924,6 +955,8 @@ pub fn go_to_result(pdf: &mut PdfTab, index: usize) -> bool {
     pdf.ui.search.set_current(index);
     // Keeps the list from scrolling under the pointer that clicked it.
     pdf.ui.search.list_follow = false;
+    // A click on a result is a use of the query (FIND-14); the bar writes it to the history.
+    pdf.ui.search.record_pending = true;
     reveal_current(pdf, Record::Always);
     true
 }
@@ -940,8 +973,16 @@ pub fn step_tab(pdf: &mut PdfTab, forward: bool, now: f64) -> bool {
 }
 
 /// Opens the search bar of `pdf` (Ctrl+F): focus goes to the input field. A selected text takes
-/// the place of the query and is searched at once (see [`selection_query`] for `strict`).
-pub fn find_in(pdf: &mut PdfTab, doc: &DocumentHandle, notifier: &Notifier, strict: bool) {
+/// the place of the query and is searched at once (see [`selection_query`] for `strict`). With
+/// no selected text, a tab that has not searched yet (its query is empty) takes the newest
+/// query of `history`, options included, and searches for it at once (FIND-15).
+pub fn find_in(
+    pdf: &mut PdfTab,
+    doc: &DocumentHandle,
+    notifier: &Notifier,
+    strict: bool,
+    history: &SearchHistory,
+) {
     let selected = pdf.ui.selection.active().and_then(|sel| {
         let raw = if strict {
             selection_text(
@@ -960,6 +1001,17 @@ pub fn find_in(pdf: &mut PdfTab, doc: &DocumentHandle, notifier: &Notifier, stri
     let anchor = pdf.view.anchor;
     let generation = doc.info().map(|i| i.generation);
     let search = &mut pdf.ui.search;
+    let selected = match selected {
+        Some(text) => Some(text),
+        None if !search.open && !search.has_query() => history.latest().map(|entry| {
+            // The options come with the text; `open` sets the text.
+            let query = entry.to_query();
+            let text = query.text.clone();
+            search.query = query;
+            text
+        }),
+        None => None,
+    };
     if search.open(selected) {
         search.start(doc, notifier, anchor, generation);
     }
@@ -968,7 +1020,12 @@ pub fn find_in(pdf: &mut PdfTab, doc: &DocumentHandle, notifier: &Notifier, stri
 /// F3 and Shift+F3 for the tab `tab`: steps through the matches. Without a search it opens the
 /// bar like Ctrl+F does.
 pub fn step(state: &mut AppState, tab: TabId, forward: bool, ctx: &egui::Context) {
-    let AppState { docs, tabs, .. } = state;
+    let AppState {
+        docs,
+        tabs,
+        search_history,
+        ..
+    } = state;
     let Some(Tab::Pdf(pdf)) = tabs.get_mut(tab) else {
         return;
     };
@@ -977,19 +1034,41 @@ pub fn step(state: &mut AppState, tab: TabId, forward: bool, ctx: &egui::Context
     };
     if pdf.ui.search.open && pdf.ui.search.has_query() {
         let now = ctx.input(|i| i.time);
-        step_tab(pdf, forward, now);
+        // F3 moves through the results: the query is in use (FIND-14).
+        if step_tab(pdf, forward, now) {
+            let query = pdf.ui.search.query.clone();
+            pdf.ui.search.settle.used(&query);
+            super::search_history::record(state, &query, None);
+        }
     } else {
-        find_in(pdf, doc, &crate::action::notifier(ctx), true);
+        find_in(
+            pdf,
+            doc,
+            &crate::action::notifier(ctx),
+            true,
+            search_history,
+        );
     }
 }
 
 /// Ctrl+F (`from_menu` false) and "Search for This Text" (`from_menu` true) for the tab `tab`.
 pub fn find(state: &mut AppState, tab: TabId, from_menu: bool, ctx: &egui::Context) {
-    let AppState { docs, tabs, .. } = state;
+    let AppState {
+        docs,
+        tabs,
+        search_history,
+        ..
+    } = state;
     if let Some(Tab::Pdf(pdf)) = tabs.get_mut(tab)
         && let Some(doc) = docs.get(pdf.doc)
     {
-        find_in(pdf, doc, &crate::action::notifier(ctx), !from_menu);
+        find_in(
+            pdf,
+            doc,
+            &crate::action::notifier(ctx),
+            !from_menu,
+            search_history,
+        );
     }
 }
 
@@ -1001,10 +1080,69 @@ fn input_id(tab: TabId) -> Id {
     Id::unique(("find_input", tab))
 }
 
+/// The query is in use (Enter, F3, a click on a result, closing the bar): settling does not
+/// record it again, and it goes to the search history (FIND-14) unless it is the newest entry
+/// already. Nothing for an empty query.
+fn record_used(
+    search: &mut SearchState,
+    history: &SearchHistory,
+    queue: &mut Vec<Action>,
+    query: SearchQuery,
+) {
+    if query.text.trim().is_empty() {
+        return;
+    }
+    search.settle.used(&query);
+    if !history.is_latest(&query) {
+        queue.push(Action::RecordSearch {
+            query,
+            replaces: None,
+        });
+    }
+}
+
+/// Moves to the next or the previous match and, when that worked, records the query.
+fn step_and_record(
+    pdf: &mut PdfTab,
+    forward: bool,
+    now: f64,
+    history: &SearchHistory,
+    queue: &mut Vec<Action>,
+) {
+    if step_tab(pdf, forward, now) {
+        let query = pdf.ui.search.query.clone();
+        record_used(&mut pdf.ui.search, history, queue, query);
+    }
+}
+
+/// Closes the bar and records the query that was searched (FIND-14).
+fn close_and_record(pdf: &mut PdfTab, history: &SearchHistory, queue: &mut Vec<Action>) {
+    let query = pdf.ui.search.query_to_record_on_close();
+    pdf.ui.search.close();
+    if let Some(query) = query {
+        record_used(&mut pdf.ui.search, history, queue, query);
+    }
+}
+
 /// Draws the search bar above the view of a PDF tab, when it is open, and handles its keys.
 /// Typing, the options and Enter start and move the search; the view is moved from here (the
 /// bar is drawn before the view, which picks the new position up in the same frame).
-pub fn show_bar(ui: &mut Ui, pdf: &mut PdfTab, doc: &DocumentHandle, tab: TabId, focused: bool) {
+///
+/// `history` is the search history, for ↑ / ↓ and the history button; what the bar wants
+/// recorded, removed or cleared goes into `queue` as actions (FIND-13, FIND-14).
+///
+/// The three parts of [`search_history`] attach to the input field like this: `search.recall`
+/// answers ↑ / ↓ (see [`handle_keys`]), [`search_history::history_button`] stands beside the
+/// field, and `search.settle` is asked once per frame what to record.
+pub fn show_bar(
+    ui: &mut Ui,
+    pdf: &mut PdfTab,
+    doc: &DocumentHandle,
+    tab: TabId,
+    focused: bool,
+    history: &SearchHistory,
+    queue: &mut Vec<Action>,
+) {
     if !pdf.ui.search.open {
         return;
     }
@@ -1026,11 +1164,18 @@ pub fn show_bar(ui: &mut Ui, pdf: &mut PdfTab, doc: &DocumentHandle, tab: TabId,
     }
 
     let id = input_id(tab);
+    let history_id = id.with("history");
+    // A click in the result list used the query.
+    if std::mem::take(&mut pdf.ui.search.record_pending) {
+        let query = pdf.ui.search.query.clone();
+        record_used(&mut pdf.ui.search, history, queue, query);
+    }
     let has_focus = ui.memory(|m| m.has_focus(id));
     // The keys are the bar's while the field has the keyboard, and while this view has it and no
-    // other text field does.
-    if has_focus || (focused && !ctx.text_edit_focused()) {
-        handle_keys(ui, pdf, id, has_focus, now);
+    // other text field does. An open history list has Esc.
+    let list_open = search_history::is_list_open(&ctx, history_id);
+    if !list_open && (has_focus || (focused && !ctx.text_edit_focused())) {
+        handle_keys(ui, pdf, id, has_focus, now, history, queue);
         if !pdf.ui.search.open {
             ui.memory_mut(|m| m.surrender_focus(id));
             return;
@@ -1054,6 +1199,7 @@ pub fn show_bar(ui: &mut Ui, pdf: &mut PdfTab, doc: &DocumentHandle, tab: TabId,
     let mut edited = false;
     let mut options_changed = false;
     let mut step_dir = None;
+    let mut history_event = None;
     let no_match = search.no_match();
     let error = search.error().map(str::to_owned);
     let dark = ui.visuals().dark_mode;
@@ -1076,6 +1222,7 @@ pub fn show_bar(ui: &mut Ui, pdf: &mut PdfTab, doc: &DocumentHandle, tab: TabId,
                 if ui.add(field).changed() {
                     edited = true;
                 }
+                history_event = search_history::history_button(ui, history_id, history);
                 let count = count_text(search.current_idx, &search.snapshot, search.percent);
                 if error.is_none() && search.has_query() {
                     let text = RichText::new(count);
@@ -1140,6 +1287,21 @@ pub fn show_bar(ui: &mut Ui, pdf: &mut PdfTab, doc: &DocumentHandle, tab: TabId,
             }
         });
 
+    match history_event {
+        Some(HistoryEvent::Pick(query)) => {
+            let search = &mut pdf.ui.search;
+            search.recall.reset();
+            search.use_query(query);
+            ctx.request_repaint();
+        }
+        Some(HistoryEvent::Remove(index)) => queue.push(Action::RemoveSearchHistory(index)),
+        Some(HistoryEvent::Clear) => queue.push(Action::ClearSearchHistory),
+        None => {}
+    }
+    if edited || options_changed {
+        // What is in the field is the user's own again: ↑ starts from the newest entry.
+        pdf.ui.search.recall.reset();
+    }
     if edited {
         pdf.ui.search.edited(now);
         // The search starts when the delay is over; wake up then.
@@ -1153,36 +1315,74 @@ pub fn show_bar(ui: &mut Ui, pdf: &mut PdfTab, doc: &DocumentHandle, tab: TabId,
         pdf.ui.search.list_open = !pdf.ui.search.list_open;
     }
     if let Some(forward) = step_dir {
-        step_tab(pdf, forward, now);
+        step_and_record(pdf, forward, now, history, queue);
     }
     if close {
-        pdf.ui.search.close();
+        close_and_record(pdf, history, queue);
         ui.memory_mut(|m| m.surrender_focus(id));
+        return;
+    }
+
+    // Settling: a query with results that stays for a while is recorded (FIND-14).
+    let search = &mut pdf.ui.search;
+    let has_matches = search.has_current_matches();
+    match search.settle.observe(&search.query, has_matches, now) {
+        SettleStep::Idle => {}
+        SettleStep::Wait(left) => ctx.request_repaint_after(left),
+        SettleStep::Record { query, replaces } => {
+            queue.push(Action::RecordSearch { query, replaces });
+        }
     }
 }
 
 /// The keys of the search bar: Esc closes it, Enter and Shift+Enter step. While the field has the
-/// keyboard F3, Shift+F3 step too and Ctrl+F selects the text of the field (the shortcut table
-/// does not see keys while a text field has the keyboard).
-fn handle_keys(ui: &mut Ui, pdf: &mut PdfTab, id: Id, in_field: bool, now: f64) {
+/// keyboard F3, Shift+F3 step too, Ctrl+F selects the text of the field (the shortcut table
+/// does not see keys while a text field has the keyboard), and ↑ / ↓ walk through the search
+/// history (FIND-13). A single-line `TextEdit` would move its cursor on ↑ / ↓, so the keys are
+/// taken here, before the field is drawn.
+fn handle_keys(
+    ui: &mut Ui,
+    pdf: &mut PdfTab,
+    id: Id,
+    in_field: bool,
+    now: f64,
+    history: &SearchHistory,
+    queue: &mut Vec<Action>,
+) {
     let ctx = ui.ctx().clone();
     // Shift is compared loosely, so the variant with Shift is asked first.
-    let (escape, prev, next, find) = ui.input_mut(|i| {
+    let (escape, prev, next, find, older, newer) = ui.input_mut(|i| {
+        // Shift+↑ / Shift+↓ are the field's own (selecting), not the history's.
+        let walk = in_field && !i.modifiers.shift;
+        let older = walk && i.consume_key(Modifiers::NONE, Key::ArrowUp);
+        let newer = walk && i.consume_key(Modifiers::NONE, Key::ArrowDown);
         let escape = i.consume_key(Modifiers::NONE, Key::Escape);
         let prev = i.consume_key(Modifiers::SHIFT, Key::Enter)
             || (in_field && i.consume_key(Modifiers::SHIFT, Key::F3));
         let next = i.consume_key(Modifiers::NONE, Key::Enter)
             || (in_field && i.consume_key(Modifiers::NONE, Key::F3));
         let find = in_field && i.consume_key(Modifiers::CTRL, Key::F);
-        (escape, prev, next, find)
+        (escape, prev, next, find, older, newer)
     });
     if escape {
-        pdf.ui.search.close();
+        close_and_record(pdf, history, queue);
         ctx.memory_mut(|m| m.surrender_focus(id));
     } else if prev {
-        step_tab(pdf, false, now);
+        step_and_record(pdf, false, now, history, queue);
     } else if next {
-        step_tab(pdf, true, now);
+        step_and_record(pdf, true, now, history, queue);
+    } else if older || newer {
+        let search = &mut pdf.ui.search;
+        let current = search.query.clone();
+        let recalled = if older {
+            search.recall.older(history, &current)
+        } else {
+            search.recall.newer(history, &current)
+        };
+        if let Some(query) = recalled {
+            search.use_query(query);
+            ctx.request_repaint();
+        }
     } else if find {
         pdf.ui.search.focus_input = true;
         ctx.request_repaint();
@@ -2073,6 +2273,9 @@ mod tests {
         repaints: Repaints,
         state: AppState,
         time: f64,
+        /// Seconds of egui time one frame takes. Tests about the two seconds of settling move
+        /// `time` by hand and make this small so that frames do not add up to them by accident.
+        step: f64,
     }
 
     impl Rig {
@@ -2085,6 +2288,7 @@ mod tests {
                 repaints,
                 state: AppState::new(),
                 time: 0.0,
+                step: 1.0 / 60.0,
             }
         }
 
@@ -2128,7 +2332,7 @@ mod tests {
 
         /// One frame of the window: shortcuts, the window, then the actions it queued.
         fn frame(&mut self, events: Vec<Event>) {
-            self.time += 1.0 / 60.0;
+            self.time += self.step;
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -2183,6 +2387,81 @@ mod tests {
 
         fn type_text(&mut self, text: &str) {
             self.frame(vec![Event::Text(text.to_owned())]);
+        }
+
+        /// One frame like [`Rig::frame`], returning the buttons of the accessibility tree:
+        /// label, bounds and whether they are disabled.
+        fn button_nodes(&mut self) -> Vec<(String, Rect, bool)> {
+            self.ctx.enable_accesskit();
+            self.time += self.step;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1000.0, 700.0),
+                )),
+                time: Some(self.time),
+                ..Default::default()
+            };
+            let state = &mut self.state;
+            let mut queue = Vec::new();
+            let output = self.ctx.run_ui(input, |ui| {
+                queue.extend(commands::handle_shortcuts(ui.ctx(), state));
+                show_window(ui, state, 0, &mut queue);
+            });
+            let update = output.platform_output.accesskit_update.clone();
+            output.drop_without_applying_deltas();
+            self.state.actions.append(&mut queue);
+            dispatch_queued(&mut self.state, &self.ctx);
+            update
+                .map(|u| u.nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, n)| n.role() == egui::accesskit::Role::Button)
+                .filter_map(|(_, n)| {
+                    let b = n.bounds()?;
+                    Some((
+                        n.label()?.to_owned(),
+                        Rect::from_min_max(
+                            egui::Pos2::new(b.x0 as f32, b.y0 as f32),
+                            egui::Pos2::new(b.x1 as f32, b.y1 as f32),
+                        ),
+                        n.is_disabled(),
+                    ))
+                })
+                .collect()
+        }
+
+        /// The center of the button called `label` in the accessibility tree.
+        fn button_center(&mut self, label: &str) -> egui::Pos2 {
+            let nodes = self.button_nodes();
+            nodes
+                .iter()
+                .find(|(l, _, _)| l == label)
+                .unwrap_or_else(|| panic!("no button {label:?} in {nodes:?}"))
+                .1
+                .center()
+        }
+
+        /// A primary click at `pos`, over three frames.
+        fn click(&mut self, pos: egui::Pos2) {
+            let button = |pressed| Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame(vec![Event::PointerMoved(pos)]);
+            self.frame(vec![button(true)]);
+            self.frame(vec![button(false)]);
+        }
+
+        fn history_texts(&self) -> Vec<String> {
+            self.state
+                .search_history
+                .entries()
+                .iter()
+                .map(|e| e.text.clone())
+                .collect()
         }
 
         /// Opens the bar with Ctrl+F and waits until its field has the keyboard.
@@ -2862,5 +3141,365 @@ mod tests {
         rig.key(Key::Escape, Modifiers::NONE);
         rig.frames(2);
         assert!(!rig.search(tab).open);
+    }
+
+    // --- the search history (WP-56) ----------------------------------------------------------
+
+    fn hist_q(text: &str, whole_word: bool) -> SearchQuery {
+        SearchQuery {
+            text: text.to_string(),
+            whole_word,
+            ..SearchQuery::default()
+        }
+    }
+
+    #[test]
+    fn enter_records_the_query_but_typing_alone_does_not() {
+        let pdf = needle_doc("wp56-enter", &[(1, 100.0), (3, 100.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        rig.frames(2);
+        assert!(rig.history_texts().is_empty(), "not before it is used");
+        rig.key(Key::Enter, Modifiers::NONE);
+        rig.frames(2);
+        assert_eq!(rig.history_texts(), ["needle"]);
+        // Shift+Enter and more Enters keep it one entry.
+        rig.key(Key::Enter, Modifiers::SHIFT);
+        rig.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(rig.history_texts(), ["needle"]);
+    }
+
+    #[test]
+    fn closing_the_bar_records_a_query_that_was_searched_but_not_an_empty_one() {
+        let pdf = needle_doc("wp56-close", &[(1, 100.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        rig.key(Key::Escape, Modifiers::NONE);
+        assert!(!rig.search(tab).open);
+        assert!(
+            rig.history_texts().is_empty(),
+            "an empty query is not recorded"
+        );
+
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        rig.key(Key::Escape, Modifiers::NONE);
+        rig.frames(2);
+        assert!(!rig.search(tab).open);
+        assert_eq!(rig.history_texts(), ["needle"]);
+
+        // The × button of the bar closes and records too.
+        dispatch(&mut rig.state, Action::ClearSearchHistory, &rig.ctx);
+        rig.open_bar(tab);
+        rig.frames_until("the search", |rig| rig.search(tab).snapshot().finished);
+        let close = rig.button_center("×");
+        rig.click(close);
+        rig.frames(2);
+        assert!(!rig.search(tab).open);
+        assert_eq!(rig.history_texts(), ["needle"]);
+    }
+
+    #[test]
+    fn a_click_in_the_result_list_records_the_query() {
+        let pdf = needle_doc("wp56-list", &[(1, 100.0), (4, 100.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        rig.frames(2);
+        assert!(rig.history_texts().is_empty());
+        let Some(Tab::Pdf(p)) = rig.state.tabs.get_mut(tab) else {
+            panic!("pdf tab");
+        };
+        assert!(go_to_result(p, 1));
+        rig.frames(2);
+        assert_eq!(rig.history_texts(), ["needle"]);
+    }
+
+    #[test]
+    fn f3_records_the_query_and_does_not_rewrite_the_history_each_time() {
+        let pdf = needle_doc("wp56-f3", &[(1, 100.0), (3, 100.0), (5, 100.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        rig.key(Key::Escape, Modifiers::NONE);
+        dispatch(&mut rig.state, Action::ClearSearchHistory, &rig.ctx);
+        // F3 with the bar closed opens it and searches again; the field gives up the keyboard so
+        // that F3 reaches the command table.
+        rig.key(Key::F3, Modifiers::NONE);
+        rig.frames_until("the search", |rig| {
+            let s = rig.search(tab);
+            s.live && s.snapshot().finished && s.current_index().is_some()
+        });
+        rig.ctx.memory_mut(|m| m.surrender_focus(input_id(tab)));
+        rig.frames(2);
+        assert!(!rig.ctx.text_edit_focused());
+        assert!(rig.history_texts().is_empty(), "opening records nothing");
+        rig.key(Key::F3, Modifiers::NONE);
+        assert_eq!(rig.history_texts(), ["needle"]);
+        let stamp = rig.state.search_history.entries()[0].last_used;
+        rig.state
+            .memory
+            .set_clock(std::sync::Arc::new(move || stamp + 500));
+        rig.key(Key::F3, Modifiers::SHIFT);
+        rig.key(Key::F3, Modifiers::NONE);
+        assert_eq!(rig.history_texts(), ["needle"]);
+        assert_eq!(
+            rig.state.search_history.entries()[0].last_used,
+            stamp,
+            "the newest query is not touched again"
+        );
+    }
+
+    #[test]
+    fn a_query_that_stays_with_results_is_recorded_after_two_seconds_and_a_beginning_is_replaced() {
+        let pdf = needle_doc("wp56-settle", &[(1, 100.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        rig.search_for(tab, "nee");
+        rig.time += 3.0;
+        rig.frames(3);
+        assert_eq!(rig.history_texts(), ["nee"]);
+        rig.type_text("dle");
+        rig.frames_until("the search", |rig| {
+            let s = rig.search(tab);
+            s.query.text == "needle" && s.live && s.snapshot().finished && !s.is_searching()
+        });
+        assert_eq!(rig.history_texts(), ["nee"], "not yet: it keeps changing");
+        rig.time += 3.0;
+        rig.frames(3);
+        assert_eq!(
+            rig.history_texts(),
+            ["needle"],
+            "the beginning was replaced"
+        );
+        // A query without results is never recorded.
+        rig.type_text("zzz");
+        rig.frames_until("the search", |rig| {
+            let s = rig.search(tab);
+            s.query.text == "needlezzz" && s.no_match()
+        });
+        rig.time += 5.0;
+        rig.frames(3);
+        assert_eq!(rig.history_texts(), ["needle"]);
+    }
+
+    #[test]
+    fn ctrl_f_in_a_tab_that_never_searched_takes_the_newest_history_entry() {
+        let pdf = needle_doc("wp56-fill", &[(1, 100.0), (3, 100.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.state.search_history.record(&hist_q("other", false), 1);
+        rig.state.search_history.record(&hist_q("needle", true), 2);
+        rig.open_bar(tab);
+        let s = rig.search(tab);
+        assert_eq!(s.query.text, "needle");
+        assert!(s.query.whole_word, "the options come along");
+        assert_eq!(s.starts, 1, "searched at once");
+        rig.frames_until("the search", |rig| rig.search(tab).snapshot().finished);
+        assert_eq!(rig.search(tab).snapshot().matches.len(), 2);
+        // The text is selected, so typing replaces it.
+        let state = TextEdit::load_state(&rig.ctx, input_id(tab)).expect("field state");
+        let range = state.cursor.char_range().expect("a selection");
+        let sorted = range.as_sorted_char_range();
+        assert_eq!((sorted.start.0, sorted.end.0), (0, 6));
+    }
+
+    #[test]
+    fn ctrl_f_with_an_empty_history_or_a_selected_word_or_an_old_query_does_not_take_it() {
+        let pdf = needle_doc("wp56-fill2", &[(0, 150.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        // No history: an empty field, nothing started.
+        rig.open_bar(tab);
+        assert_eq!(rig.search(tab).query.text, "");
+        assert_eq!(rig.search(tab).starts, 0);
+        rig.key(Key::Escape, Modifiers::NONE);
+
+        // A selected word wins over the history.
+        rig.state
+            .search_history
+            .record(&hist_q("history", false), 1);
+        let doc = rig.doc(tab);
+        let page_text = doc.page_text_wait(0).expect("page text");
+        let chars: String = page_text.chars.iter().map(|c| c.ch).collect();
+        let start = chars.find("heading").expect("heading") as u32;
+        let Some(Tab::Pdf(p)) = rig.state.tabs.get_mut(tab) else {
+            panic!("pdf tab");
+        };
+        select(p, start, start + 7, 0);
+        rig.open_bar(tab);
+        assert_eq!(rig.search(tab).query.text, "heading");
+        rig.key(Key::Escape, Modifiers::NONE);
+
+        // A tab that has a query keeps it.
+        rig.state.search_history.record(&hist_q("newer", false), 2);
+        rig.open_bar(tab);
+        assert_eq!(rig.search(tab).query.text, "heading");
+    }
+
+    #[test]
+    fn up_and_down_in_the_field_walk_through_the_history_without_scrolling_the_view() {
+        let pdf = needle_doc("wp56-recall", &[(0, 150.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.state.search_history.record(&hist_q("alpha", false), 1);
+        rig.state.search_history.record(&hist_q("beta", true), 2);
+        // Ctrl+F puts "beta" in the field (FIND-15); ↑ then skips it and shows "alpha".
+        rig.open_bar(tab);
+        rig.frames(2);
+        assert_eq!(rig.search(tab).query.text, "beta");
+        let scroll = rig.pdf(tab).ui.scroll();
+        let starts = rig.search(tab).starts;
+        rig.key(Key::ArrowUp, Modifiers::NONE);
+        rig.frames(2);
+        let s = rig.search(tab);
+        assert_eq!(s.query.text, "alpha");
+        assert!(!s.query.whole_word && !s.query.case_sensitive);
+        assert_eq!(
+            s.starts,
+            starts + 1,
+            "searched at once, without the input delay"
+        );
+        assert_eq!(rig.pdf(tab).ui.scroll(), scroll, "the view did not move");
+        assert!(rig.ctx.text_edit_focused(), "the field keeps the keyboard");
+        // At the oldest: ↑ stays.
+        rig.key(Key::ArrowUp, Modifiers::NONE);
+        assert_eq!(rig.search(tab).query.text, "alpha");
+        // ↓ comes back to what was typed before the walk.
+        rig.key(Key::ArrowDown, Modifiers::NONE);
+        rig.frames(2);
+        assert_eq!(rig.search(tab).query.text, "beta");
+        assert!(rig.search(tab).query.whole_word);
+        assert_eq!(rig.pdf(tab).ui.scroll(), scroll);
+        // The whole text is selected after a walk step.
+        let state = TextEdit::load_state(&rig.ctx, input_id(tab)).expect("field state");
+        let range = state.cursor.char_range().expect("a selection");
+        assert_ne!(range.primary.index, range.secondary.index);
+
+        // Typing makes the field the user's own again: ↑ starts at the newest entry.
+        rig.type_text("zz");
+        rig.key(Key::ArrowUp, Modifiers::NONE);
+        assert_eq!(rig.search(tab).query.text, "beta");
+        assert_eq!(rig.pdf(tab).ui.scroll(), scroll);
+    }
+
+    #[test]
+    fn up_and_down_scroll_the_view_when_the_field_does_not_have_the_keyboard() {
+        let pdf = needle_doc("wp56-view-keys", &[(0, 150.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.state.search_history.record(&hist_q("alpha", false), 1);
+        // The bar is closed: ↓ is the view's.
+        let before = rig.pdf(tab).ui.scroll();
+        rig.key(Key::ArrowDown, Modifiers::NONE);
+        rig.frames(2);
+        assert!(rig.pdf(tab).ui.scroll().y > before.y, "the view scrolled");
+        assert!(!rig.search(tab).open);
+    }
+
+    #[test]
+    fn the_history_button_has_a_name_is_disabled_when_empty_and_its_list_works() {
+        let pdf = needle_doc("wp56-button", &[(0, 150.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        // Empty history: the button is there and disabled.
+        let nodes = rig.button_nodes();
+        let found = nodes
+            .iter()
+            .find(|(label, _, _)| label == tr("find.history_label"))
+            .expect("the history button has a name");
+        assert!(found.2, "disabled without history");
+
+        rig.state.search_history.record(&hist_q("alpha", false), 1);
+        rig.state.search_history.record(&hist_q("beta", true), 2);
+        rig.frames(2);
+        let nodes = rig.button_nodes();
+        let found = nodes
+            .iter()
+            .find(|(label, _, _)| label == tr("find.history_label"))
+            .expect("the history button");
+        assert!(!found.2, "enabled with history");
+
+        // Open the list: a line per entry, newest first, and the clear button.
+        let center = rig.button_center(tr("find.history_label"));
+        rig.click(center);
+        rig.frames(2);
+        let nodes = rig.button_nodes();
+        let position = |name: &str| {
+            nodes
+                .iter()
+                .position(|(l, _, _)| l == name)
+                .unwrap_or_else(|| panic!("no {name:?} in {nodes:?}"))
+        };
+        let beta_line = format!("beta ({})", tr("find.word_label"));
+        let _ = (
+            position(&beta_line),
+            position("alpha"),
+            position(tr("find.history_clear")),
+        );
+
+        // × removes the line and the list stays open.
+        let remove_alpha = format!("{}: alpha", tr("find.history_remove"));
+        let center = rig.button_center(&remove_alpha);
+        rig.click(center);
+        rig.frames(2);
+        assert_eq!(rig.history_texts(), ["beta"]);
+        assert!(
+            rig.button_nodes().iter().any(|(l, _, _)| l == &beta_line),
+            "the list is still open"
+        );
+
+        // A click on a line puts that search in the field, with its options, and closes the list.
+        let center = rig.button_center(&beta_line);
+        rig.click(center);
+        rig.frames(3);
+        assert_eq!(rig.search(tab).query.text, "beta");
+        assert!(rig.search(tab).query.whole_word);
+        assert!(
+            !rig.button_nodes().iter().any(|(l, _, _)| l == &beta_line),
+            "the list closed"
+        );
+        assert!(rig.ctx.text_edit_focused(), "the field has the keyboard");
+
+        // Clear Search History empties the history.
+        let center = rig.button_center(tr("find.history_label"));
+        rig.click(center);
+        rig.frames(2);
+        let center = rig.button_center(tr("find.history_clear"));
+        rig.click(center);
+        rig.frames(2);
+        assert!(rig.history_texts().is_empty());
+    }
+
+    #[test]
+    fn the_clear_command_is_in_the_edit_menu_and_needs_a_history() {
+        let edit: Vec<&str> = commands::in_menu(MenuGroup::Edit).map(|c| c.id).collect();
+        assert!(edit.contains(&"edit.clear_search_history"));
+        let command = commands::command("edit.clear_search_history").expect("command");
+        assert_eq!(command.shortcut, None);
+        assert!(lookup(current_lang(), command.name_key).is_some());
+        let mut state = AppState::new();
+        assert!(!(command.enabled)(&state), "nothing to clear");
+        assert_eq!(command.run(&state), None);
+        state.search_history.record(&hist_q("x", false), 1);
+        assert!((command.enabled)(&state));
+        assert_eq!(command.run(&state), Some(Action::ClearSearchHistory));
     }
 }

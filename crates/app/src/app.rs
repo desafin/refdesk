@@ -80,6 +80,7 @@ fn start_prefs(state: &mut AppState, ctx: &egui::Context) {
     if let Some(paths) = &state.paths {
         state.prefs = Prefs::load(&paths.prefs_file());
     }
+    crate::panels::search_history::load_into(state);
     apply_scroll_speed(state, ctx);
 }
 

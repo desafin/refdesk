@@ -8,7 +8,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use refdesk_core::{
-    Config, DocStateDb, DocumentHandle, Paths, Prefs, ViewState, WorkspaceScan, WorkspaceWatcher,
+    Config, DocStateDb, DocumentHandle, Paths, Prefs, SearchHistory, ViewState, WorkspaceScan,
+    WorkspaceWatcher,
 };
 
 use crate::action::Action;
@@ -378,6 +379,8 @@ pub struct AppState {
     pub status_notice: Option<StatusNotice>,
     /// What is remembered about each document (`documents.json`, SES-3).
     pub doc_db: DocStateDb,
+    /// The searches made, newest first (`search_history.json`, FIND-13). Only `dispatch` changes it.
+    pub search_history: SearchHistory,
     /// The section path line above PDF views is shown (TOC-6). Not saved.
     pub show_breadcrumb: bool,
     /// Where captures put their image. `None` uses the system clipboard; tests set a fake (WP-54).
@@ -420,6 +423,7 @@ impl AppState {
             prefs: Prefs::default(),
             status_notice: None,
             doc_db: DocStateDb::default(),
+            search_history: SearchHistory::default(),
             show_breadcrumb: true,
             capture_clipboard: None,
             memory: Memory::default(),

@@ -18,6 +18,7 @@ pub mod config;
 pub mod docstate;
 pub mod paths;
 pub mod prefs;
+pub mod search_history;
 pub mod session;
 
 pub use atomic::{atomic_write, bad_path, quarantine, read_json_or_default};
@@ -29,6 +30,10 @@ pub use prefs::{
     SCROLL_SPEED_STEPS, ScrollSpeedItem, clamp_scroll_speed, effective_scroll_speed,
     line_scroll_speed, multiplier_of_line_scroll_speed, scroll_speed_label, scroll_speed_menu,
     step_scroll_speed,
+};
+pub use search_history::{
+    MAX_SEARCH_HISTORY, MAX_SEARCH_TEXT_CHARS, SearchHistory, SearchHistoryEntry,
+    normalize_search_text,
 };
 pub use session::{LayoutNode, Session, SessionTab, SessionWindow, SessionWorkspace};
 
