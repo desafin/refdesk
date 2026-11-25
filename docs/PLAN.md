@@ -57,7 +57,7 @@
 | 01 | M0 검증 앱 | M0 | 00 | M | Opus | 앱 완료, 사용자 점검 대기 |
 | 10 | core 데이터 모델과 탐색 로직 | M1 | 00 | M | Sonnet | 완료 |
 | 11 | 테스트용 PDF 생성기 | M1 | 00 | M | Sonnet | 완료 |
-| 12 | core 엔진 | M1 | 10, 11 | L | Opus | 진행 중 |
+| 12 | core 엔진 | M1 | 10, 11 | L | Opus | 완료 |
 | 13 | core 배치 계산 | M1 | 10 | S | Sonnet | 완료 |
 | 14 | app 뼈대 | M1 | 10 | M | Sonnet | 완료 |
 | 15 | PDF 뷰 | M1 | 12, 13, 14 | L | Opus |  |

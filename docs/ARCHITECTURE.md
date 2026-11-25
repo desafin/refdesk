@@ -202,6 +202,13 @@ pub struct RenderedImage { pub width: u32, pub height: u32, pub rgb: Vec<u8> }
 - 열기 실패, 페이지 로드 실패는 `DocStatus::Failed` 또는 `EngineError` 로 전달한다(R-9).
 - `render_region_wait` 는 쪽 전체를 그 배율로 그린 뒤 잘라 내도 된다(최적화는 나중). 쪽 밖으로 나간 영역은 쪽 안으로 줄인다.
 - 워커는 `DocumentHandle` 의 마지막 복제본이 사라지면 종료한다.
+- 처리 순서: 제어(reload, 암호) → `Visible`/`Preview` 렌더 → 블록하지 않는 텍스트·링크 요청 → `*_wait` 요청 → `Prefetch`/`Background` 렌더.
+  즉 화면에 보이는 것이 검색·비교 같은 백그라운드 작업보다 먼저다.
+- 실패한 렌더 키·쪽은 기억해 두고 다시 시도하지 않는다(매 프레임 재시도 방지). `reload` 때 비운다.
+- 쪽 하나의 크기를 읽지 못하면 앞 쪽의 크기로 두고 문서는 연다. 렌더 하나의 픽셀 수는 1억 2천만으로 제한한다.
+- 다른 파일을 가리키는 링크의 목적지는 쪽 번호만 살린다(`DestKind::Fit`).
+- mupdf 0.8.0 은 깨진 링크 목적지에서 panic 할 수 있어 backend 가 MuPDF 호출을 `catch_unwind` 로 감싼다.
+- 시험용으로 `DocumentHandle::open_with(path, notifier, EngineOptions)` 가 있다(대기 요청 만료 시간 조절).
 
 참고 설계: `references/viewers/tdf/src/renderer.rs`(전용 스레드, 쪽 사이 취소, 현재 쪽 주변 우선).
 
