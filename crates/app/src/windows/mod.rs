@@ -25,6 +25,7 @@ use crate::i18n::tr;
 use crate::panels::status_bar;
 use crate::panels::toc;
 use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore, WindowId};
+use crate::views::diff_view;
 use crate::views::pdf_view::{self, ViewContext};
 use crate::views::textures::TextureCache;
 use dock::DockHost;
@@ -135,7 +136,7 @@ pub fn window_title(state: &AppState, index: usize) -> String {
         .windows
         .get(index)
         .and_then(|w| w.dock.focused_tab())
-        .filter(|t| state.tabs.pdf(*t).is_some());
+        .filter(|t| !matches!(state.tabs.get(*t), Some(Tab::Start) | None));
     match active {
         Some(tab) => tr("window.title").replace("{title}", &tab_title(state, tab)),
         None => APP_ID.to_owned(),
@@ -209,6 +210,21 @@ pub fn show_window(
     let shown = window.dock.tabs();
     let window_focus = window.dock.focused_tab();
     let (toc_open, toc_width) = (window.toc_open, window.toc_width);
+
+    // The dialog of "Compare Documents…" shows in the window that has the focus.
+    if window_index == state.focused_window_index()
+        && let Some(dialog) = state.diff_dialog.as_mut()
+    {
+        let mut open: Vec<std::path::PathBuf> = state
+            .docs
+            .iter()
+            .map(|(_, doc)| doc.path().to_path_buf())
+            .collect();
+        open.sort();
+        if !diff_view::show_dialog(ui.ctx(), dialog, &open, queue) {
+            state.diff_dialog = None;
+        }
+    }
 
     // Everything the tab bars and menus show is worked out before the window's layout is
     // borrowed for drawing.
@@ -302,8 +318,11 @@ fn tab_menu(ctx: &egui::Context, state: &AppState, tab: TabId) -> Vec<MenuItem> 
             })
         })
         .collect();
+    if let Some(compare) = compare_menu(state, tab) {
+        items.push(compare);
+    }
     let own = state.window_of(tab);
-    let movable = state.tabs.pdf(tab).is_some();
+    let movable = matches!(state.tabs.get(tab), Some(Tab::Pdf(_) | Tab::Diff(_)));
     let targets: Vec<MenuEntry> = state
         .windows
         .iter()
@@ -323,6 +342,43 @@ fn tab_menu(ctx: &egui::Context, state: &AppState, tab: TabId) -> Vec<MenuItem> 
         });
     }
     items
+}
+
+/// "Compare With ▸" for a PDF tab: the other open documents; choosing one compares this tab's
+/// document (older, left) with it (newer, right).
+fn compare_menu(state: &AppState, tab: TabId) -> Option<MenuItem> {
+    let own = state.docs.get(state.tabs.pdf(tab)?.doc)?.path();
+    let mut others: Vec<std::path::PathBuf> = state
+        .docs
+        .iter()
+        .map(|(_, doc)| doc.path().to_path_buf())
+        .filter(|path| path != own)
+        .collect();
+    others.sort();
+    let mut entries: Vec<MenuEntry> = others
+        .into_iter()
+        .map(|path| MenuEntry {
+            label: diff_view::file_name(&path),
+            shortcut: None,
+            enabled: true,
+            action: Action::StartDiff {
+                left: own.to_path_buf(),
+                right: path,
+            },
+        })
+        .collect();
+    if entries.is_empty() {
+        entries.push(MenuEntry {
+            label: tr("diff.no_other_docs").to_owned(),
+            shortcut: None,
+            enabled: false,
+            action: Action::ShowDiffDialog,
+        });
+    }
+    Some(MenuItem::Submenu {
+        label: tr("diff.compare_with"),
+        entries,
+    })
 }
 
 /// Draws one menu entry; a click queues its action and closes the menu.
@@ -362,13 +418,17 @@ pub fn tab_title(state: &AppState, tab: TabId) -> String {
                     .replace("{n}", &(earlier + 1).to_string())
             }
         }
+        Some(Tab::Diff(diff)) => diff_view::tab_title(diff, &state.docs),
         Some(Tab::Start) => tr("tab.start").to_owned(),
         None => tr("tab.unknown").to_owned(),
     }
 }
 
-/// The full path of a PDF tab's document.
+/// The full path of a PDF tab's document (both paths for a comparison tab).
 fn tab_tooltip(state: &AppState, tab: TabId) -> Option<String> {
+    if let Some(diff) = state.tabs.diff(tab) {
+        return diff_view::tab_tooltip(diff, &state.docs);
+    }
     let pdf = state.tabs.pdf(tab)?;
     let doc = state.docs.get(pdf.doc)?;
     Some(doc.path().display().to_string())
@@ -413,6 +473,15 @@ impl DockHost for WindowHost<'_> {
                     ui.label(tr("tab.unknown"));
                 }
             },
+            Some(Tab::Diff(diff)) => {
+                let cx = ViewContext {
+                    tab_id: tab,
+                    focused: self.focus == Some(tab),
+                    textures: self.textures,
+                    queue: self.queue,
+                };
+                diff_view::show(ui, diff, self.docs, cx);
+            }
             Some(Tab::Start) => draw_start_page(ui, self.queue),
             None => {}
         }
@@ -439,7 +508,7 @@ impl DockHost for WindowHost<'_> {
 
     fn is_closeable(&self, tab: TabId) -> bool {
         // The start page has no close button; it goes away by itself when a document opens.
-        matches!(self.tabs.get(tab), Some(Tab::Pdf(_)))
+        matches!(self.tabs.get(tab), Some(Tab::Pdf(_) | Tab::Diff(_)))
     }
 
     fn close_requested(&mut self, tab: TabId) {
@@ -755,19 +824,69 @@ mod tests {
         );
     }
 
-    fn move_targets(menu: &[MenuItem]) -> Option<Vec<(String, Action, bool)>> {
+    fn submenu(menu: &[MenuItem], key: &str) -> Option<Vec<(String, Action, bool)>> {
         menu.iter().find_map(|item| match item {
-            MenuItem::Submenu { label, entries } => {
-                assert_eq!(*label, tr("window.move_to"));
-                Some(
-                    entries
-                        .iter()
-                        .map(|e| (e.label.clone(), e.action.clone(), e.enabled))
-                        .collect(),
-                )
-            }
-            MenuItem::Entry(_) => None,
+            MenuItem::Submenu { label, entries } if *label == tr(key) => Some(
+                entries
+                    .iter()
+                    .map(|e| (e.label.clone(), e.action.clone(), e.enabled))
+                    .collect(),
+            ),
+            _ => None,
         })
+    }
+
+    fn move_targets(menu: &[MenuItem]) -> Option<Vec<(String, Action, bool)>> {
+        submenu(menu, "window.move_to")
+    }
+
+    #[test]
+    fn compare_with_lists_the_other_open_documents() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let a = open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let alone = submenu(&tab_menu(&ctx, &state, a), "diff.compare_with").expect("submenu");
+        assert_eq!(alone.len(), 1);
+        assert!(!alone[0].2, "nothing to compare with yet");
+        open(&mut state, &ctx, "/refdesk-test/c.pdf");
+        open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        let entries = submenu(&tab_menu(&ctx, &state, a), "diff.compare_with").expect("submenu");
+        let start = |right: &str| Action::StartDiff {
+            left: "/refdesk-test/a.pdf".into(),
+            right: right.into(),
+        };
+        assert_eq!(
+            entries,
+            vec![
+                ("b.pdf".to_owned(), start("/refdesk-test/b.pdf"), true),
+                ("c.pdf".to_owned(), start("/refdesk-test/c.pdf"), true),
+            ]
+        );
+
+        // A comparison tab: its own title and tooltip, closeable, no compare submenu.
+        dispatch(&mut state, start("/refdesk-test/b.pdf"), &ctx);
+        let diff = state.focus.expect("comparison");
+        let title = tab_title(&state, diff);
+        assert!(
+            title.contains("a.pdf") && title.contains("b.pdf"),
+            "{title}"
+        );
+        assert_eq!(
+            tab_tooltip(&state, diff).as_deref(),
+            Some("/refdesk-test/a.pdf\n/refdesk-test/b.pdf")
+        );
+        assert_eq!(
+            window_title(&state, 0),
+            tr("window.title").replace("{title}", &title)
+        );
+        let menu = tab_menu(&ctx, &state, diff);
+        assert!(submenu(&menu, "diff.compare_with").is_none());
+        assert!(
+            matches!(&menu[0], MenuItem::Entry(e) if e.enabled && e.action == Action::CloseTab(diff))
+        );
+        for _ in 0..2 {
+            assert!(frame(&ctx, &mut state).is_empty());
+        }
     }
 
     #[test]

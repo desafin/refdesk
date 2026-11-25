@@ -10,6 +10,7 @@ use refdesk_core::{DocumentHandle, ViewState};
 use crate::action::Action;
 use crate::overlays::palette::PaletteState;
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
+use crate::views::diff_view::{DiffDialog, DiffTab};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::views::preload::Preloader;
 use crate::views::textures::TextureCache;
@@ -143,6 +144,8 @@ pub struct PdfTab {
 pub enum Tab {
     /// A PDF document.
     Pdf(PdfTab),
+    /// A comparison of two documents (WP-62). Boxed: it holds two views.
+    Diff(Box<DiffTab>),
     /// The start page.
     Start,
 }
@@ -186,6 +189,14 @@ impl TabStore {
         }
     }
 
+    /// The comparison tab with this id; `None` for other kinds of tab.
+    pub fn diff(&self, id: TabId) -> Option<&DiffTab> {
+        match self.tabs.get(&id) {
+            Some(Tab::Diff(tab)) => Some(tab),
+            _ => None,
+        }
+    }
+
     /// Every tab, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (TabId, &Tab)> {
         self.tabs.iter().map(|(id, tab)| (*id, tab))
@@ -196,11 +207,13 @@ impl TabStore {
         self.tabs.remove(&id)
     }
 
-    /// True while some tab shows `doc`.
+    /// True while some tab shows `doc` (a comparison tab shows two documents).
     pub fn doc_in_use(&self, doc: DocId) -> bool {
-        self.tabs
-            .values()
-            .any(|tab| matches!(tab, Tab::Pdf(p) if p.doc == doc))
+        self.tabs.values().any(|tab| match tab {
+            Tab::Pdf(p) => p.doc == doc,
+            Tab::Diff(d) => d.docs().contains(&doc),
+            Tab::Start => false,
+        })
     }
 
     /// Number of tabs.
@@ -267,6 +280,8 @@ pub struct AppState {
     /// Set by `dispatch` when the file dialog should be opened; the app starts it on the next
     /// frame and clears the flag.
     pub file_dialog_requested: bool,
+    /// The dialog for choosing two documents to compare, while it is open (WP-62).
+    pub diff_dialog: Option<DiffDialog>,
     /// Recently closed PDF tabs, oldest first, at most [`MAX_CLOSED_TABS`].
     pub closed_tabs: Vec<ClosedTab>,
     /// The command palette and quick open (WP-43).
@@ -296,6 +311,7 @@ impl AppState {
             preload: Preloader::default(),
             actions: Vec::new(),
             file_dialog_requested: false,
+            diff_dialog: None,
             closed_tabs: Vec::new(),
             palette: PaletteState::default(),
             next_window: 1,
@@ -378,6 +394,12 @@ impl AppState {
     pub fn focused_pdf(&self) -> Option<(TabId, &PdfTab)> {
         let id = self.focus?;
         self.tabs.pdf(id).map(|tab| (id, tab))
+    }
+
+    /// The comparison tab commands apply to: the focused tab, if it is a comparison tab.
+    pub fn focused_diff(&self) -> Option<(TabId, &DiffTab)> {
+        let id = self.focus?;
+        self.tabs.diff(id).map(|tab| (id, tab))
     }
 }
 

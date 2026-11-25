@@ -392,7 +392,9 @@ pub fn quick_items(state: &AppState, query: &str, recent: &[PathBuf]) -> Vec<Qui
         .iter()
         .filter_map(|(_, tab)| match tab {
             crate::state::Tab::Pdf(pdf) => state.docs.get(pdf.doc).map(|d| d.path()),
-            crate::state::Tab::Start => None,
+            // A document that is open only inside a comparison stays in the recent list, so it
+            // can still be opened as a tab of its own.
+            crate::state::Tab::Diff(_) | crate::state::Tab::Start => None,
         })
         .collect();
     for path in recent

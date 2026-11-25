@@ -13,6 +13,7 @@ use crate::action::Action;
 use crate::commands::{self, Command, ZOOM_PRESETS};
 use crate::i18n::tr;
 use crate::state::{AppState, Tab, TabId};
+use crate::views::diff_view;
 use crate::views::preload::Progress;
 
 /// The open page number field.
@@ -181,6 +182,24 @@ pub fn show(ui: &mut Ui, state: &mut AppState, tab: Option<TabId>, queue: &mut V
     let Some(tab_id) = tab else {
         return;
     };
+    if let Some(Tab::Diff(diff)) = state.tabs.get(tab_id) {
+        // A comparison tab: where each side is, and the state of the comparison (WP-62).
+        let side_text = |pdf: &crate::state::PdfTab| {
+            let count = state
+                .docs
+                .get(pdf.doc)
+                .and_then(|d| d.info())
+                .map_or(0, |i| i.page_sizes.len() as u32);
+            page_text(pdf.ui.current_page, count, &[])
+        };
+        let text = format!("{} | {}", side_text(&diff.left), side_text(&diff.right));
+        ui.horizontal(|ui| {
+            ui.label(text);
+            ui.separator();
+            ui.label(diff_view::status_text(diff, &state.docs));
+        });
+        return;
+    }
     let Some(Tab::Pdf(tab)) = state.tabs.get(tab_id) else {
         return;
     };

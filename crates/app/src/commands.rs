@@ -10,7 +10,7 @@ use refdesk_core::ZoomMode;
 
 use crate::action::Action;
 use crate::overlays::palette::PaletteMode;
-use crate::state::{AppState, PdfTab, TabId};
+use crate::state::{AppState, PdfTab, Tab, TabId};
 use crate::windows::dock::SplitDir;
 
 /// The menu a command appears in.
@@ -100,6 +100,31 @@ fn has_pdf_focus(state: &AppState) -> bool {
     state.focused_pdf().is_some()
 }
 
+/// The focused tab can zoom: a PDF tab or a comparison tab.
+fn has_zoom_focus(state: &AppState) -> bool {
+    focused_zoom(state).is_some()
+}
+
+/// The focused tab that zooms, with its zoom mode and actual factor: a PDF tab, or the side in
+/// use of a comparison tab.
+fn focused_zoom(state: &AppState) -> Option<(TabId, ZoomMode, Option<f32>)> {
+    let id = state.focus?;
+    let pdf = match state.tabs.get(id)? {
+        Tab::Pdf(pdf) => pdf,
+        Tab::Diff(diff) => diff.side(diff.active),
+        Tab::Start => return None,
+    };
+    Some((id, pdf.view.zoom, pdf.ui.effective_zoom))
+}
+
+/// The focused comparison tab has a valid result with changes to move between (DIFF-5).
+fn has_diff_changes(state: &AppState) -> bool {
+    state.focused_diff().is_some_and(|(_, diff)| {
+        diff.fresh_result(&state.docs)
+            .is_some_and(|r| !r.changes.is_empty())
+    })
+}
+
 /// The focused pane has more than one tab.
 fn has_several_tabs(state: &AppState) -> bool {
     let dock = &state.focused_window().dock;
@@ -133,7 +158,7 @@ fn split_focused(state: &AppState, dir: SplitDir) -> Option<Action> {
 }
 
 fn can_close_tab(state: &AppState) -> bool {
-    state.focus.is_some_and(|tab| state.tabs.pdf(tab).is_some())
+    state.focus.is_some_and(|tab| is_document_tab(state, tab))
 }
 
 fn has_ready_pdf_focus(state: &AppState) -> bool {
@@ -144,15 +169,15 @@ fn has_ready_pdf_focus(state: &AppState) -> bool {
 }
 
 fn zoom_action(state: &AppState, change: fn(ZoomMode, Option<f32>) -> ZoomMode) -> Option<Action> {
-    let (tab, pdf) = state.focused_pdf()?;
+    let (tab, zoom, effective) = focused_zoom(state)?;
     Some(Action::SetZoom {
         tab,
-        zoom: change(pdf.view.zoom, pdf.ui.effective_zoom),
+        zoom: change(zoom, effective),
     })
 }
 
 fn set_zoom(state: &AppState, zoom: ZoomMode) -> Option<Action> {
-    let (tab, _) = state.focused_pdf()?;
+    let (tab, _, _) = focused_zoom(state)?;
     Some(Action::SetZoom { tab, zoom })
 }
 
@@ -200,7 +225,7 @@ pub static COMMANDS: &[Command] = &[
         menu: MenuGroup::View,
         shortcut: Some(KeyboardShortcut::new(CTRL, Key::Equals)),
         aliases: &[KeyboardShortcut::new(CTRL, Key::Plus)],
-        enabled: has_pdf_focus,
+        enabled: has_zoom_focus,
         action: |s| zoom_action(s, zoom_in),
     },
     Command {
@@ -209,7 +234,7 @@ pub static COMMANDS: &[Command] = &[
         menu: MenuGroup::View,
         shortcut: Some(KeyboardShortcut::new(CTRL, Key::Minus)),
         aliases: &[],
-        enabled: has_pdf_focus,
+        enabled: has_zoom_focus,
         action: |s| zoom_action(s, zoom_out),
     },
     Command {
@@ -218,7 +243,7 @@ pub static COMMANDS: &[Command] = &[
         menu: MenuGroup::View,
         shortcut: Some(KeyboardShortcut::new(CTRL, Key::Num0)),
         aliases: &[],
-        enabled: has_pdf_focus,
+        enabled: has_zoom_focus,
         action: |s| set_zoom(s, ZoomMode::Custom(1.0)),
     },
     Command {
@@ -227,7 +252,7 @@ pub static COMMANDS: &[Command] = &[
         menu: MenuGroup::View,
         shortcut: None,
         aliases: &[],
-        enabled: has_pdf_focus,
+        enabled: has_zoom_focus,
         action: |s| set_zoom(s, ZoomMode::FitWidth),
     },
     Command {
@@ -236,7 +261,7 @@ pub static COMMANDS: &[Command] = &[
         menu: MenuGroup::View,
         shortcut: None,
         aliases: &[],
-        enabled: has_pdf_focus,
+        enabled: has_zoom_focus,
         action: |s| set_zoom(s, ZoomMode::FitPage),
     },
     Command {
@@ -274,6 +299,33 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::ShowPalette(PaletteMode::QuickOpen)),
+    },
+    Command {
+        id: "diff.start",
+        name_key: "cmd.diff.start",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ShowDiffDialog),
+    },
+    Command {
+        id: "diff.next_change",
+        name_key: "cmd.diff.next_change",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F7)),
+        aliases: &[],
+        enabled: has_diff_changes,
+        action: |s| s.focus.map(Action::NextChange),
+    },
+    Command {
+        id: "diff.prev_change",
+        name_key: "cmd.diff.prev_change",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::F7)),
+        aliases: &[],
+        enabled: has_diff_changes,
+        action: |s| s.focus.map(Action::PrevChange),
     },
     Command {
         id: "tab.next",
@@ -354,7 +406,7 @@ pub static COMMANDS: &[Command] = &[
         menu: MenuGroup::Window,
         shortcut: Some(KeyboardShortcut::new(CTRL_ALT, Key::N)),
         aliases: &[],
-        enabled: has_pdf_focus,
+        enabled: can_close_tab,
         action: |s| s.focus.map(Action::DetachTab),
     },
     Command {
@@ -394,6 +446,11 @@ fn is_pdf_tab(state: &AppState, tab: TabId) -> bool {
     state.tabs.pdf(tab).is_some()
 }
 
+/// A tab that shows documents (a PDF or a comparison), as opposed to the start page.
+fn is_document_tab(state: &AppState, tab: TabId) -> bool {
+    matches!(state.tabs.get(tab), Some(Tab::Pdf(_) | Tab::Diff(_)))
+}
+
 fn has_pane_siblings(state: &AppState, tab: TabId) -> bool {
     state
         .window_of(tab)
@@ -406,7 +463,7 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
     TabMenuEntry {
         name_key: "cmd.tab.close",
         command_id: Some("tab.close"),
-        enabled: is_pdf_tab,
+        enabled: is_document_tab,
         action: Action::CloseTab,
     },
     TabMenuEntry {
@@ -442,7 +499,7 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
     TabMenuEntry {
         name_key: "cmd.window.detach_tab",
         command_id: Some("window.detach_tab"),
-        enabled: is_pdf_tab,
+        enabled: is_document_tab,
         action: Action::DetachTab,
     },
 ];
@@ -491,7 +548,7 @@ pub fn preset_command(percent: u32) -> Option<&'static Command> {
 
 /// Choosing a zoom preset (in percent) for the focused view.
 pub fn zoom_preset(state: &AppState, percent: u32) -> Option<Action> {
-    if !has_pdf_focus(state) {
+    if !has_zoom_focus(state) {
         return None;
     }
     set_zoom(state, ZoomMode::Custom(percent as f32 / 100.0))
@@ -765,6 +822,72 @@ mod tests {
         assert_eq!(
             find("tab.reopen_closed").run(&state),
             Some(Action::ReopenClosedTab)
+        );
+    }
+
+    #[test]
+    fn diff_commands_are_in_the_view_menu_with_their_shortcuts() {
+        let menu: Vec<&str> = in_menu(MenuGroup::View).map(|c| c.id).collect();
+        for (id, shortcut) in [
+            ("diff.start", None),
+            (
+                "diff.next_change",
+                Some(KeyboardShortcut::new(Modifiers::NONE, Key::F7)),
+            ),
+            (
+                "diff.prev_change",
+                Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::F7)),
+            ),
+        ] {
+            assert!(menu.contains(&id), "{id} is not in the View menu");
+            assert_eq!(command(id).expect("command").shortcut, shortcut, "{id}");
+        }
+        // Without a comparison tab there is no change to move to.
+        let state = AppState::new();
+        assert!(
+            command("diff.next_change")
+                .expect("command")
+                .run(&state)
+                .is_none()
+        );
+        assert!(
+            command("diff.prev_change")
+                .expect("command")
+                .run(&state)
+                .is_none()
+        );
+        assert_eq!(
+            command("diff.start").expect("command").run(&state),
+            Some(Action::ShowDiffDialog)
+        );
+    }
+
+    #[test]
+    fn zoom_commands_apply_to_a_comparison_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(
+            &mut state,
+            Action::StartDiff {
+                left: "/refdesk-test/a.pdf".into(),
+                right: "/refdesk-test/b.pdf".into(),
+            },
+            &ctx,
+        );
+        let tab = state.focus.expect("comparison");
+        assert_eq!(
+            command("view.zoom_reset").expect("command").run(&state),
+            Some(Action::SetZoom {
+                tab,
+                zoom: ZoomMode::Custom(1.0)
+            })
+        );
+        assert!(command("tab.close").expect("command").run(&state).is_some());
+        assert!(
+            command("tab.split_right")
+                .expect("command")
+                .run(&state)
+                .is_none()
         );
     }
 

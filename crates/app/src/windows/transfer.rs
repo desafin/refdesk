@@ -23,21 +23,23 @@ pub fn new_window(state: &mut AppState) -> WindowId {
     id
 }
 
-/// Moves a PDF tab into a new window of its own and focuses it. Returns the new window, or
-/// `None` (and changes nothing) when the tab is not a PDF tab in some window.
+/// Moves a PDF or comparison tab into a new window of its own and focuses it. Returns the new
+/// window, or `None` (and changes nothing) when the tab is not such a tab in some window.
 pub fn detach_tab(state: &mut AppState, tab: TabId) -> Option<WindowId> {
-    state.tabs.pdf(tab)?;
+    if !movable(state, tab) {
+        return None;
+    }
     let from = state.windows[state.window_of(tab)?].id;
     let to = state.add_window();
     move_between(state, tab, from, to);
     Some(to)
 }
 
-/// Moves a PDF tab into the focused pane of window `to` and focuses it. Returns false (and
-/// changes nothing) when there is no such window, the tab is not a PDF tab in some window, or it
-/// already is in `to`.
+/// Moves a PDF or comparison tab into the focused pane of window `to` and focuses it. Returns
+/// false (and changes nothing) when there is no such window, the tab is not such a tab in some
+/// window, or it already is in `to`.
 pub fn move_tab(state: &mut AppState, tab: TabId, to: WindowId) -> bool {
-    if state.tabs.pdf(tab).is_none() || state.window_index(to).is_none() {
+    if !movable(state, tab) || state.window_index(to).is_none() {
         return false;
     }
     let Some(from) = state.window_of(tab).map(|w| state.windows[w].id) else {
@@ -63,7 +65,7 @@ pub fn merge_all(state: &mut AppState) {
         };
         for tab in state.windows[w].dock.tabs() {
             state.windows[w].dock.remove_tab(tab);
-            if matches!(state.tabs.get(tab), Some(Tab::Pdf(_))) {
+            if movable(state, tab) {
                 put_tab(state, tab, 0, None);
             } else {
                 state.tabs.remove(tab);
@@ -83,7 +85,7 @@ pub fn merge_all(state: &mut AppState) {
 }
 
 /// Closes a window other than the main one with all its tabs. The PDF tabs are remembered for
-/// reopening; a document no other tab shows is dropped. Returns false (and changes nothing) for
+/// reopening; a document no other tab (PDF or comparison) shows is dropped. Returns false (and changes nothing) for
 /// the main window and for an unknown id.
 pub fn close_window(state: &mut AppState, id: WindowId) -> bool {
     if id == state.main_window().id {
@@ -94,15 +96,19 @@ pub fn close_window(state: &mut AppState, id: WindowId) -> bool {
     };
     let mut docs: Vec<DocId> = Vec::new();
     for tab in state.windows[w].dock.tabs() {
-        if let Some(Tab::Pdf(pdf)) = state.tabs.remove(tab) {
-            if let Some(doc) = state.docs.get(pdf.doc) {
-                let path = doc.path().to_path_buf();
-                state.remember_closed(ClosedTab {
-                    path,
-                    view: pdf.view,
-                });
+        match state.tabs.remove(tab) {
+            Some(Tab::Pdf(pdf)) => {
+                if let Some(doc) = state.docs.get(pdf.doc) {
+                    let path = doc.path().to_path_buf();
+                    state.remember_closed(ClosedTab {
+                        path,
+                        view: pdf.view,
+                    });
+                }
+                docs.push(pdf.doc);
             }
-            docs.push(pdf.doc);
+            Some(Tab::Diff(diff)) => docs.extend(diff.docs()),
+            Some(Tab::Start) | None => {}
         }
     }
     state.remove_window(id);
@@ -115,6 +121,11 @@ pub fn close_window(state: &mut AppState, id: WindowId) -> bool {
         state.focus = state.main_window().dock.focused_tab();
     }
     true
+}
+
+/// Tabs that move between windows: PDF and comparison tabs (start pages are dropped instead).
+fn movable(state: &AppState, tab: TabId) -> bool {
+    matches!(state.tabs.get(tab), Some(Tab::Pdf(_) | Tab::Diff(_)))
 }
 
 /// Puts `tab` into window `w`: right after `near` when given and in that window, else into the
@@ -537,5 +548,107 @@ mod tests {
         assert_eq!(state.windows[1].dock.focused_tab(), Some(a));
         assert_eq!(state.docs.len(), 2);
         assert_eq!(state.tabs.len(), 2);
+    }
+
+    fn start_diff(state: &mut AppState, ctx: &egui::Context, left: &str, right: &str) -> TabId {
+        dispatch(
+            state,
+            Action::StartDiff {
+                left: left.into(),
+                right: right.into(),
+            },
+            ctx,
+        );
+        let tab = state.focus.expect("focused");
+        assert!(state.tabs.diff(tab).is_some(), "a comparison tab");
+        tab
+    }
+
+    #[test]
+    fn a_comparison_tab_can_be_detached_and_moved_to_another_window() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let diff = start_diff(
+            &mut state,
+            &ctx,
+            "/refdesk-test/a.pdf",
+            "/refdesk-test/b.pdf",
+        );
+        dispatch(&mut state, Action::DetachTab(diff), &ctx);
+        assert_eq!(state.windows.len(), 2);
+        assert_eq!(tabs_of(&state, 1), vec![diff]);
+        assert_eq!(state.focus, Some(diff));
+
+        let main = state.main_window().id;
+        dispatch(
+            &mut state,
+            Action::MoveTab {
+                tab: diff,
+                to: main,
+            },
+            &ctx,
+        );
+        assert_eq!(state.window_of(diff), Some(0));
+        assert_eq!(state.windows.len(), 1, "the emptied window closed");
+        assert!(
+            state.tabs.diff(diff).is_some(),
+            "the tab and its views are kept"
+        );
+        assert_eq!(state.docs.len(), 2);
+    }
+
+    #[test]
+    fn merging_all_windows_keeps_a_comparison_tab_of_a_secondary_window() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        let diff = start_diff(
+            &mut state,
+            &ctx,
+            "/refdesk-test/b.pdf",
+            "/refdesk-test/c.pdf",
+        );
+        assert_eq!(state.window_of(diff), Some(1));
+        dispatch(&mut state, Action::MergeAllWindows, &ctx);
+        assert_eq!(state.windows.len(), 1);
+        assert_eq!(state.window_of(diff), Some(0));
+        assert!(state.tabs.diff(diff).is_some());
+        assert_eq!(state.docs.len(), 3);
+        assert_eq!(state.focus, Some(diff));
+    }
+
+    #[test]
+    fn closing_a_window_with_a_comparison_tab_releases_its_documents() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        let diff = start_diff(
+            &mut state,
+            &ctx,
+            "/refdesk-test/a.pdf",
+            "/refdesk-test/b.pdf",
+        );
+        let id = state.windows[1].id;
+        assert_eq!(state.docs.len(), 2);
+        dispatch(&mut state, Action::CloseWindow(id), &ctx);
+        assert!(state.tabs.get(diff).is_none());
+        assert_eq!(
+            state.docs.len(),
+            1,
+            "only the document a pdf tab still shows is left"
+        );
+        assert!(
+            state
+                .docs
+                .find(std::path::Path::new("/refdesk-test/a.pdf"))
+                .is_some()
+        );
+        assert!(
+            state.closed_tabs.is_empty(),
+            "comparison tabs are not reopened as pdf tabs"
+        );
     }
 }

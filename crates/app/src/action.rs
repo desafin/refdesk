@@ -3,15 +3,16 @@
 //! Widgets push [`Action`]s onto a queue; the queue is dispatched at the end of the frame
 //! (`docs/ARCHITECTURE.md` §5.2). `dispatch` only changes state, so tests run it without a window.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
+use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::overlays::palette::{self, PaletteMode};
 use crate::panels::status_bar::GotoInput;
 use crate::state::{AppState, ClosedTab, DocId, PdfTab, Tab, TabId, WindowId, normalize_path};
+use crate::views::diff_view::{self, DiffDialog, DiffTab};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::windows::dock::SplitDir;
 use crate::windows::{self, transfer};
@@ -56,13 +57,32 @@ pub enum Action {
     },
     /// Copy the selected text of a PDF tab to the clipboard (SEL-2).
     CopySelection(TabId),
-    /// Compare two documents.
+    /// Compare two documents in a new comparison tab of the focused pane (DIFF-1).
     StartDiff {
         /// The older document.
         left: PathBuf,
         /// The newer document.
         right: PathBuf,
     },
+    /// Open the dialog for choosing two documents to compare.
+    ShowDiffDialog,
+    /// Compare the documents of a comparison tab again (after a cancel, an error or a change).
+    RerunDiff(TabId),
+    /// Stop the running comparison of a comparison tab.
+    CancelDiff(TabId),
+    /// Change what a comparison ignores; it compares again when the options differ.
+    SetDiffOptions {
+        /// The comparison tab.
+        tab: TabId,
+        /// The new options.
+        options: DiffOptions,
+    },
+    /// Exchange the older and the newer document of a comparison tab and compare again.
+    SwapDiffSides(TabId),
+    /// Move both views of a comparison tab to the next change (DIFF-5).
+    NextChange(TabId),
+    /// Move both views of a comparison tab to the previous change (DIFF-5).
+    PrevChange(TabId),
     /// Open the page number field of the status bar for a PDF tab.
     ShowGoToPage(TabId),
     /// Open the palette with this list, or close it when it already shows it (CMD-1, CMD-2).
@@ -159,19 +179,52 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::NextTab => cycle_tab(state, true),
         Action::PrevTab => cycle_tab(state, false),
         Action::FocusNextPane => focus_next_pane(state),
-        Action::SetZoom { tab, zoom } => {
-            if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
-                pdf.view.zoom = zoom;
+        Action::SetZoom { tab, zoom } => match state.tabs.get_mut(tab) {
+            Some(Tab::Pdf(pdf)) => pdf.view.zoom = zoom,
+            // Both sides while they scroll together, else the side in use.
+            Some(Tab::Diff(diff)) if diff.sync_scroll => {
+                diff.left.view.zoom = zoom;
+                diff.right.view.zoom = zoom;
             }
-        }
+            Some(Tab::Diff(diff)) => diff.side_mut(diff.active).view.zoom = zoom,
+            _ => {}
+        },
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
         Action::StartDiff { left, right } => {
-            // The comparison view is built by a later work package. Until then the two documents
-            // are only opened as tabs, left first, so the right one ends up focused.
-            for path in [left, right] {
-                open_file(state, OpenTarget { path, page: None }, ctx);
+            let tab = insert_diff_tab(state, &left, &right, ctx);
+            place_new_tab(state, tab, None);
+        }
+        Action::ShowDiffDialog => {
+            let path = |id: DocId| state.docs.get(id).map(|d| d.path().to_path_buf());
+            let dialog = match state.focus.and_then(|t| state.tabs.get(t)) {
+                Some(Tab::Pdf(pdf)) => DiffDialog::new(path(pdf.doc), None),
+                Some(Tab::Diff(diff)) => DiffDialog::new(path(diff.left.doc), path(diff.right.doc)),
+                _ => DiffDialog::default(),
+            };
+            state.diff_dialog = Some(dialog);
+        }
+        Action::RerunDiff(tab) => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+                diff.start(&state.docs, notifier(ctx));
             }
         }
+        Action::CancelDiff(tab) => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+                diff.cancel();
+            }
+        }
+        Action::SetDiffOptions { tab, options } => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+                diff.set_options(options, &state.docs, notifier(ctx));
+            }
+        }
+        Action::SwapDiffSides(tab) => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+                diff.swap(&state.docs, notifier(ctx));
+            }
+        }
+        Action::NextChange(tab) => go_to_change(state, tab, true),
+        Action::PrevChange(tab) => go_to_change(state, tab, false),
         Action::ShowGoToPage(tab) => {
             if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
                 pdf.ui.goto = Some(GotoInput::default());
@@ -246,26 +299,26 @@ fn place_new_tab(state: &mut AppState, tab: TabId, near: Option<TabId>) {
 /// opened again: its existing tab gets the focus instead (OPEN-5).
 fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
     let path = normalize_path(&target.path);
-    if let Some(doc) = state.docs.find(&path) {
-        if let Some(tab) = existing_tab_for(state, doc) {
-            if let Some(page) = target.page {
-                jump_to_page(state, tab, page);
-            }
-            let from = state.focused_window_index();
-            focus_tab(state, tab);
-            // The tab may be in another window: bring that window forward.
-            if let Some(w) = state.window_of(tab).filter(|w| *w != from) {
-                windows::raise(ctx, state, state.windows[w].id);
-            }
-            return;
+    let open = state.docs.find(&path);
+    if let Some(tab) = open.and_then(|doc| existing_tab_for(state, doc)) {
+        if let Some(page) = target.page {
+            jump_to_page(state, tab, page);
         }
-        // A document without a tab should not exist (closing the last tab drops it). Recover by
-        // dropping the stale entry and opening it again.
-        state.docs.remove(doc);
+        let from = state.focused_window_index();
+        focus_tab(state, tab);
+        // The tab may be in another window: bring that window forward.
+        if let Some(w) = state.window_of(tab).filter(|w| *w != from) {
+            windows::raise(ctx, state, state.windows[w].id);
+        }
+        return;
     }
 
-    let handle = DocumentHandle::open(&path, notifier(ctx));
-    let doc = state.docs.insert(handle);
+    // A document shown only by a comparison tab gets a view of its own on the same handle.
+    let doc = open.unwrap_or_else(|| {
+        state
+            .docs
+            .insert(DocumentHandle::open(&path, notifier(ctx)))
+    });
     let mut view = ViewState::new(path.clone());
     if let Some(page) = target.page {
         let loc = Location::new(page, 0.0, 0.0);
@@ -279,6 +332,46 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
         toc: Box::default(),
     }));
     place_new_tab(state, tab, None);
+}
+
+/// Moves both views of a comparison tab to the next or previous change, when its result is
+/// still valid.
+fn go_to_change(state: &mut AppState, tab: TabId, forward: bool) {
+    if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab)
+        && let Some(result) = diff.fresh_result(&state.docs)
+    {
+        diff.go_to_change(&result, forward);
+    }
+}
+
+/// The open document of `path`, opened now if no tab shows it yet.
+fn open_document(state: &mut AppState, path: &Path, ctx: &egui::Context) -> DocId {
+    let path = normalize_path(path);
+    match state.docs.find(&path) {
+        Some(doc) => doc,
+        None => state
+            .docs
+            .insert(DocumentHandle::open(&path, notifier(ctx))),
+    }
+}
+
+/// Creates a comparison tab of `left` (older) and `right` (newer) and starts comparing; the
+/// documents are shared with the tabs that already show them. The tab is not put into any
+/// window yet. Used by [`Action::StartDiff`] and for restoring a `SessionTab::Diff`.
+pub fn insert_diff_tab(
+    state: &mut AppState,
+    left: &Path,
+    right: &Path,
+    ctx: &egui::Context,
+) -> TabId {
+    let left_doc = open_document(state, left, ctx);
+    let right_doc = open_document(state, right, ctx);
+    let mut diff = DiffTab::new(
+        diff_view::side_tab(left_doc, normalize_path(left)),
+        diff_view::side_tab(right_doc, normalize_path(right)),
+    );
+    diff.start(&state.docs, notifier(ctx));
+    state.tabs.insert(Tab::Diff(Box::new(diff)))
 }
 
 /// The tab to show for a document that is already open: the focused one if it shows the
@@ -388,17 +481,28 @@ fn close_tab(state: &mut AppState, tab: TabId) {
         .focus
         .is_none_or(|f| f == tab || state.window_of(f) == Some(w));
     state.windows[w].dock.remove_tab(tab);
-    if let Some(Tab::Pdf(pdf)) = state.tabs.remove(tab) {
-        if let Some(doc) = state.docs.get(pdf.doc) {
-            let path = doc.path().to_path_buf();
-            state.remember_closed(ClosedTab {
-                path,
-                view: pdf.view,
-            });
+    match state.tabs.remove(tab) {
+        Some(Tab::Pdf(pdf)) => {
+            if let Some(doc) = state.docs.get(pdf.doc) {
+                let path = doc.path().to_path_buf();
+                state.remember_closed(ClosedTab {
+                    path,
+                    view: pdf.view,
+                });
+            }
+            if !state.tabs.doc_in_use(pdf.doc) {
+                state.docs.remove(pdf.doc);
+            }
         }
-        if !state.tabs.doc_in_use(pdf.doc) {
-            state.docs.remove(pdf.doc);
+        // Dropping the tab cancels its comparison; its documents go when no tab shows them.
+        Some(Tab::Diff(diff)) => {
+            for doc in diff.docs() {
+                if !state.tabs.doc_in_use(doc) {
+                    state.docs.remove(doc);
+                }
+            }
         }
+        Some(Tab::Start) | None => {}
     }
     if state.windows[w].dock.is_empty() {
         let start = state.tabs.insert(Tab::Start);
@@ -819,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn start_diff_opens_both_documents_as_tabs() {
+    fn start_diff_opens_both_documents_in_one_comparison_tab() {
         let ctx = egui::Context::default();
         let mut state = AppState::new();
         dispatch(
@@ -832,19 +936,80 @@ mod tests {
         );
         assert_eq!(state.docs.len(), 2);
         let tabs = state.main_window().dock.tabs();
-        assert_eq!(tabs.len(), 2);
-        let path_of = |tab: TabId| {
-            let pdf = state.tabs.pdf(tab).expect("a pdf tab");
-            state
-                .docs
-                .get(pdf.doc)
-                .expect("document")
-                .path()
-                .to_path_buf()
-        };
-        assert_eq!(path_of(tabs[0]), PathBuf::from("/refdesk-test/old.pdf"));
-        assert_eq!(path_of(tabs[1]), PathBuf::from("/refdesk-test/new.pdf"));
-        assert_eq!(state.focus, Some(tabs[1]));
+        assert_eq!(tabs.len(), 1);
+        let diff = state.tabs.diff(tabs[0]).expect("a comparison tab");
+        let path_of = |doc: DocId| state.docs.get(doc).expect("document").path().to_path_buf();
+        assert_eq!(
+            path_of(diff.left.doc),
+            PathBuf::from("/refdesk-test/old.pdf")
+        );
+        assert_eq!(
+            path_of(diff.right.doc),
+            PathBuf::from("/refdesk-test/new.pdf")
+        );
+        assert_eq!(state.focus, Some(tabs[0]));
+    }
+
+    #[test]
+    fn closing_a_comparison_tab_drops_documents_no_other_tab_shows() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        for _ in 0..2 {
+            dispatch(
+                &mut state,
+                Action::StartDiff {
+                    left: PathBuf::from("/refdesk-test/same.pdf"),
+                    right: PathBuf::from("/refdesk-test/same.pdf"),
+                },
+                &ctx,
+            );
+        }
+        assert_eq!(state.docs.len(), 1, "one file, opened once");
+        let tabs = state.main_window().dock.tabs();
+        dispatch(&mut state, Action::CloseTab(tabs[0]), &ctx);
+        assert_eq!(state.docs.len(), 1, "the other comparison still shows it");
+        dispatch(&mut state, Action::CloseTab(tabs[1]), &ctx);
+        assert_eq!(state.docs.len(), 0);
+        assert!(
+            state.closed_tabs.is_empty(),
+            "comparisons are not reopened as pdf tabs"
+        );
+    }
+
+    #[test]
+    fn zooming_a_comparison_tab_zooms_both_sides_while_synchronized() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(
+            &mut state,
+            Action::StartDiff {
+                left: PathBuf::from("/refdesk-test/old.pdf"),
+                right: PathBuf::from("/refdesk-test/new.pdf"),
+            },
+            &ctx,
+        );
+        let tab = state.focus.expect("comparison");
+        let zoom = ZoomMode::Custom(1.5);
+        dispatch(&mut state, Action::SetZoom { tab, zoom }, &ctx);
+        let diff = state.tabs.diff(tab).expect("comparison");
+        assert_eq!((diff.left.view.zoom, diff.right.view.zoom), (zoom, zoom));
+        if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+            diff.sync_scroll = false;
+            diff.active = refdesk_core::Side::Right;
+        }
+        dispatch(
+            &mut state,
+            Action::SetZoom {
+                tab,
+                zoom: ZoomMode::FitPage,
+            },
+            &ctx,
+        );
+        let diff = state.tabs.diff(tab).expect("comparison");
+        assert_eq!(
+            (diff.left.view.zoom, diff.right.view.zoom),
+            (zoom, ZoomMode::FitPage)
+        );
     }
 
     #[test]
