@@ -30,7 +30,7 @@ X=$(mktemp -d); XDG_STATE_HOME=$X/state XDG_CONFIG_HOME=$X/config \
   ./target/debug/refdesk --no-single-instance 파일.pdf
 ```
 
-- `target/debug/refdesk` 는 주 작업 공간에서 `cargo build -p refdesk` 를 한 직후에만 실행한다(worktree 들이 `target/` 을 공유한다).
+- `target/debug/refdesk` 는 `cargo build -p refdesk` 를 한 직후에만 실행한다. worktree 는 빌드 폴더를 공유하지 않는다(`docs/PLAN.md` §2). 병합 뒤 빌드가 이상하면 `cargo clean -p refdesk -p refdesk-core`.
 - 이 머신(GNOME Wayland)에서 `orca computer` 는 화면 캡처, 키 입력, 스크롤을 지원하지 않는다. 되는 것은 접근성 트리 읽기(`get-app-state`)와 요소 클릭(`click --element-index`)이다. 메뉴 막대, 상태 표시줄, 탭은 트리에 보이고, 쪽 그림과 팝업 메뉴는 보이지 않는다.
 - 프로세스를 끝낼 때 `pkill -f <패턴>` 을 쓰면 그 명령을 실행하는 셸까지 죽는다. `pgrep -x refdesk` 로 찾고 PID 로 끝낸다.
 
