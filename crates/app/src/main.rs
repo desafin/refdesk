@@ -7,6 +7,7 @@ mod commands;
 mod i18n;
 mod overlays;
 mod panels;
+mod session;
 mod state;
 mod theme;
 mod views;
@@ -16,10 +17,12 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use eframe::egui;
-use refdesk_core::{IpcListener, IpcRequest, Paths, ipc};
+use refdesk_core::{Config, IpcListener, IpcRequest, Language, Paths, ipc};
 
 use crate::app::RefdeskApp;
 use crate::cli::Cli;
+use crate::i18n::Lang;
+use crate::session::Startup;
 
 /// Opens the socket other instances send their requests to. Every request is queued on `tx` and
 /// the UI is woken up. Failure (another instance owns the socket, no permission) is only a
@@ -107,9 +110,23 @@ fn init_logging() {
     }
 }
 
+/// Applies the `language` setting before any text is looked up.
+fn apply_language(language: Language) {
+    let lang = match language {
+        Language::Auto => return,
+        Language::Ko => Lang::Ko,
+        Language::En => Lang::En,
+    };
+    i18n::force_lang(lang);
+}
+
 fn main() -> eframe::Result {
     init_logging();
-    let (request, single_instance) = match cli::parse(std::env::args_os().skip(1)) {
+    let paths = Paths::from_env();
+    // Read first: the language setting applies to the help text too. Never written by the app.
+    let config = Config::load(&paths.config_file());
+    apply_language(config.language);
+    let (request, single_instance, restore) = match cli::parse(std::env::args_os().skip(1)) {
         Cli::Help => {
             println!("{}", cli::usage());
             return Ok(());
@@ -125,7 +142,8 @@ fn main() -> eframe::Result {
         Cli::Run {
             request,
             single_instance,
-        } => (request, single_instance),
+            restore,
+        } => (request, single_instance, restore),
     };
 
     // A running instance has another current directory: send it absolute paths.
@@ -137,7 +155,7 @@ fn main() -> eframe::Result {
         }
     };
 
-    let socket = Paths::from_env().socket_path;
+    let socket = paths.socket_path.clone();
     if single_instance {
         match ipc::send(&socket, &request) {
             // The running instance has it. Nothing left to do.
@@ -150,11 +168,19 @@ fn main() -> eframe::Result {
         }
     }
 
+    // The session is read before the window exists: the main window opens at its saved size.
+    let startup = Startup::load(paths, config, restore);
+    let main_window = session::main_geometry(&startup.session);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("refdesk")
+        // Lets GNOME match the window to `refdesk.desktop` (StartupWMClass=refdesk).
+        .with_app_id("refdesk")
+        .with_inner_size(session::sane_size(main_window.size));
+    if main_window.maximized {
+        viewport = viewport.with_maximized(true);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("refdesk")
-            // Lets GNOME match the window to `refdesk.desktop` (StartupWMClass=refdesk).
-            .with_app_id("refdesk"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -169,6 +195,7 @@ fn main() -> eframe::Result {
                 request,
                 remote,
                 listener.flatten(),
+                startup,
             )))
         }),
     )

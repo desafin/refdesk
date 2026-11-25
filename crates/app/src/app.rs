@@ -1,18 +1,22 @@
 //! `RefdeskApp`: the `eframe::App` implementation (`docs/ARCHITECTURE.md` §5.2).
 //!
 //! One frame:
-//! 1. `logic()` turns outside events (the file chooser's result) into actions.
+//! 1. `logic()` turns outside events (the file chooser's result) into actions and runs the
+//!    session save timer.
 //! 2. `ui()` draws every window (`windows::show_all`); widgets only push actions onto the queue.
 //! 3. The end of `ui()` dispatches the queue. Structure changes happen only there (rule R-6).
+//!
+//! At start the last session is restored (`session::start`); on exit it is saved.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use egui::Ui;
-use refdesk_core::{IpcListener, IpcRequest};
+use refdesk_core::{IpcListener, IpcRequest, Theme};
 
 use crate::action::{Action, OpenTarget, dispatch_queued};
 use crate::i18n::tr;
+use crate::session::{self, Saver, Startup};
 use crate::state::AppState;
 use crate::theme;
 use crate::views::{preload, textures};
@@ -27,26 +31,60 @@ pub struct RefdeskApp {
     remote: Receiver<IpcRequest>,
     /// Keeps the socket open for as long as the app lives.
     _listener: Option<IpcListener>,
+    /// Saves the session and the document records (SES-5).
+    saver: Saver,
 }
 
 impl RefdeskApp {
     /// Creates the app. `initial` is this process's own command line; it is handled like a
     /// request from another process, but the window is not raised. `remote` delivers the requests
     /// of other processes; `listener` is the open socket they arrive on, if there is one.
+    /// `startup` holds the settings and the stored session.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         initial: IpcRequest,
         remote: Receiver<IpcRequest>,
         listener: Option<IpcListener>,
+        startup: Startup,
     ) -> RefdeskApp {
         theme::install(&cc.egui_ctx);
-        let mut state = AppState::new();
-        state.actions.extend(actions_for_request(initial));
+        apply_theme(&cc.egui_ctx, startup.config.theme);
+        let (state, saver) = initial_state(startup, initial, &cc.egui_ctx);
         RefdeskApp {
             state,
             dialog: None,
             remote,
             _listener: listener,
+            saver,
+        }
+    }
+}
+
+/// The state the app starts with: the last session restored (when allowed), then the files of
+/// the command line added as tabs (SES-2).
+fn initial_state(startup: Startup, initial: IpcRequest, ctx: &egui::Context) -> (AppState, Saver) {
+    let mut state = AppState::new();
+    let saver = session::start(&mut state, startup, ctx);
+    state.actions.extend(actions_for_request(initial));
+    (state, saver)
+}
+
+/// Applies the `theme` setting.
+fn apply_theme(ctx: &egui::Context, theme: Theme) {
+    ctx.set_theme(match theme {
+        Theme::System => egui::ThemePreference::System,
+        Theme::Light => egui::ThemePreference::Light,
+        Theme::Dark => egui::ThemePreference::Dark,
+    });
+}
+
+impl RefdeskApp {
+    /// Runs the save timer and schedules the frame a pending save needs.
+    fn tick_saver(&mut self, ctx: &egui::Context) {
+        session::poll_fingerprints(&mut self.state, ctx);
+        let now = ctx.input(|i| i.time);
+        if let Some(wait) = self.saver.tick(&mut self.state, now) {
+            ctx.request_repaint_after(wait);
         }
     }
 }
@@ -64,6 +102,8 @@ impl eframe::App for RefdeskApp {
         textures::collect_rendered(ctx, &self.state.docs, &mut self.state.textures);
         // WP-17: render every page's preview in the background.
         preload::step(ctx, &mut self.state);
+        // WP-41: save the session two seconds after it last changed.
+        self.tick_saver(ctx);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -74,7 +114,16 @@ impl eframe::App for RefdeskApp {
         windows::show_all(ui, &mut self.state, &mut queue);
 
         self.state.actions.append(&mut queue);
+        let dispatched = !self.state.actions.is_empty();
         dispatch_queued(&mut self.state, &ctx);
+        if dispatched {
+            // The save timer runs in `logic()`; make sure it sees what just changed.
+            ctx.request_repaint();
+        }
+    }
+
+    fn on_exit(&mut self) {
+        self.saver.save_now(&mut self.state);
     }
 }
 
@@ -190,6 +239,112 @@ mod tests {
                 .tabs()
                 .iter()
                 .any(|t| state.tabs.pdf(*t).is_some())
+        );
+    }
+
+    /// A start-up whose session shows `/refdesk-test/restored.pdf`.
+    fn startup_with_one_tab() -> Startup {
+        let path = PathBuf::from("/refdesk-test/restored.pdf");
+        let mut startup = Startup::empty();
+        startup.session.tabs.insert(
+            "t0".into(),
+            refdesk_core::SessionTab::Pdf {
+                path: path.clone(),
+                view: refdesk_core::ViewState::new(path),
+            },
+        );
+        startup.session.windows.push(refdesk_core::SessionWindow {
+            main: true,
+            layout: refdesk_core::LayoutNode::Tabs {
+                tabs: vec!["t0".into()],
+                active: 0,
+            },
+            ..Default::default()
+        });
+        startup
+    }
+
+    fn open_request(paths: &[&str]) -> IpcRequest {
+        IpcRequest::Open {
+            targets: paths.iter().map(|p| target(p, None)).collect(),
+        }
+    }
+
+    fn pdf_paths(state: &AppState) -> Vec<PathBuf> {
+        state
+            .windows
+            .iter()
+            .flat_map(|w| w.dock.tabs())
+            .filter_map(|t| state.tabs.pdf(t))
+            .filter_map(|p| state.docs.get(p.doc))
+            .map(|d| d.path().to_path_buf())
+            .collect()
+    }
+
+    #[test]
+    fn command_line_files_are_added_after_the_restored_session() {
+        let ctx = egui::Context::default();
+        let (mut state, _saver) = initial_state(
+            startup_with_one_tab(),
+            open_request(&["/refdesk-test/new.pdf"]),
+            &ctx,
+        );
+        assert_eq!(pdf_paths(&state).len(), 1, "restored before the files");
+        dispatch_queued(&mut state, &ctx);
+        assert_eq!(
+            pdf_paths(&state),
+            vec![
+                PathBuf::from("/refdesk-test/restored.pdf"),
+                PathBuf::from("/refdesk-test/new.pdf")
+            ]
+        );
+        let focused = state.focused_pdf().expect("focus").1.doc;
+        assert_eq!(
+            state.docs.get(focused).expect("doc").path(),
+            std::path::Path::new("/refdesk-test/new.pdf")
+        );
+    }
+
+    #[test]
+    fn a_command_line_file_already_in_the_session_only_gets_the_focus() {
+        let ctx = egui::Context::default();
+        let mut startup = startup_with_one_tab();
+        startup.session.tabs.insert(
+            "t1".into(),
+            refdesk_core::SessionTab::Pdf {
+                path: PathBuf::from("/refdesk-test/other.pdf"),
+                view: refdesk_core::ViewState::new(PathBuf::from("/refdesk-test/other.pdf")),
+            },
+        );
+        if let refdesk_core::LayoutNode::Tabs { tabs, .. } = &mut startup.session.windows[0].layout
+        {
+            tabs.push("t1".into());
+        }
+        let (mut state, _saver) =
+            initial_state(startup, open_request(&["/refdesk-test/other.pdf"]), &ctx);
+        let restored = pdf_paths(&state);
+        let focused_before = state.focus;
+        dispatch_queued(&mut state, &ctx);
+        assert_eq!(pdf_paths(&state), restored, "no new tab");
+        assert_ne!(state.focus, focused_before);
+        let focused = state.focused_pdf().expect("focus").1.doc;
+        assert_eq!(
+            state.docs.get(focused).expect("doc").path(),
+            std::path::Path::new("/refdesk-test/other.pdf")
+        );
+    }
+
+    #[test]
+    fn no_restore_starts_with_only_the_command_line_files() {
+        let ctx = egui::Context::default();
+        let mut startup = startup_with_one_tab();
+        startup.restore = false;
+        let (mut state, _saver) =
+            initial_state(startup, open_request(&["/refdesk-test/new.pdf"]), &ctx);
+        dispatch_queued(&mut state, &ctx);
+        assert_eq!(
+            pdf_paths(&state),
+            vec![PathBuf::from("/refdesk-test/new.pdf")]
         );
     }
 

@@ -17,16 +17,18 @@ use std::collections::HashMap;
 use egui::{
     CentralPanel, Id, Panel, Ui, ViewportBuilder, ViewportClass, ViewportCommand, ViewportId,
 };
-use refdesk_core::DocumentHandle;
+use refdesk_core::{DocStatus, DocumentHandle};
 
 use crate::action::Action;
 use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
 use crate::panels::status_bar;
 use crate::panels::toc;
+use crate::session;
 use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore, WindowId};
 use crate::views::diff_view;
 use crate::views::pdf_view::{self, ViewContext};
+use crate::views::start_page::{self, StartPage};
 use crate::views::textures::TextureCache;
 use dock::DockHost;
 
@@ -69,10 +71,15 @@ pub fn show_all(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
     // `dispatch` runs after every window is drawn, so the window list is fixed here.
     for index in 1..state.windows.len() {
         let id = state.windows[index].id;
-        let builder = ViewportBuilder::default()
+        // A window restored from the session opens at its saved size (WP-41).
+        let geom = state.memory.initial_geometry(id);
+        let mut builder = ViewportBuilder::default()
             .with_title(window_title(state, index))
             .with_app_id(APP_ID)
-            .with_inner_size(NEW_WINDOW_SIZE);
+            .with_inner_size(geom.map_or(NEW_WINDOW_SIZE, |g| session::sane_size(g.size)));
+        if geom.is_some_and(|g| g.maximized) {
+            builder = builder.with_maximized(true);
+        }
         ctx.show_viewport_immediate(viewport_id(state, id), builder, |ui, class| {
             let own_window = class != ViewportClass::EmbeddedWindow;
             if own_window && ui.ctx().input(|i| i.viewport().close_requested()) {
@@ -99,6 +106,10 @@ fn draw_window(
         return;
     };
     let ctx = ui.ctx().clone();
+    if own_window {
+        // The window size is saved in the session.
+        session::note_window(&ctx, state, id);
+    }
     // In a child viewport's callback, `ctx.input` is that window's input.
     if own_window && ctx.input(|i| i.focused) {
         state.follow_window_focus(index);
@@ -201,7 +212,7 @@ pub fn show_window(
         state,
         window_index,
         queue,
-        &crate::overlays::palette::no_recent_documents,
+        &crate::session::recent_document_paths,
     );
     let Some(window) = state.windows.get(window_index) else {
         return;
@@ -236,6 +247,10 @@ pub fn show_window(
         .iter()
         .map(|t| (*t, tab_menu(ui.ctx(), state, *t)))
         .collect();
+    let start = shown
+        .iter()
+        .any(|t| matches!(state.tabs.get(*t), Some(Tab::Start)))
+        .then(|| session::start_page(state, ui.ctx()));
 
     Panel::bottom(Id::unique(("status_bar", window_id))).show(ui, |ui| {
         // The status bar describes the focused tab of this window.
@@ -274,6 +289,7 @@ pub fn show_window(
         focus: *focus,
         titles,
         menus,
+        start,
         queue,
     };
     CentralPanel::default().show(ui, |ui| {
@@ -442,6 +458,8 @@ struct WindowHost<'a> {
     focus: Option<TabId>,
     titles: HashMap<TabId, (String, Option<String>)>,
     menus: HashMap<TabId, Vec<MenuItem>>,
+    /// What the start page shows; `None` when this window has no start page.
+    start: Option<StartPage>,
     queue: &'a mut Vec<Action>,
 }
 
@@ -461,6 +479,15 @@ impl DockHost for WindowHost<'_> {
         match self.tabs.get_mut(tab) {
             Some(Tab::Pdf(pdf)) => match self.docs.get(pdf.doc) {
                 Some(doc) => {
+                    if let DocStatus::Failed(message) = doc.status() {
+                        // Retry and close buttons; a missing file stays a tab (SES-6).
+                        start_page::show_failed_document(ui, tab, doc.path(), &message, self.queue);
+                        return;
+                    }
+                    if let Some(info) = doc.info() {
+                        // A remembered place may lie past the end of a shorter new version.
+                        session::fit_view_to_document(&mut pdf.view, info.page_sizes.len());
+                    }
                     let cx = ViewContext {
                         tab_id: tab,
                         focused: self.focus == Some(tab),
@@ -482,7 +509,7 @@ impl DockHost for WindowHost<'_> {
                 };
                 diff_view::show(ui, diff, self.docs, cx);
             }
-            Some(Tab::Start) => draw_start_page(ui, self.queue),
+            Some(Tab::Start) => draw_start_page(ui, self.start.as_ref(), self.queue),
             None => {}
         }
     }
@@ -528,17 +555,10 @@ pub fn draw_pdf_tab(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle, cx: Vie
     pdf_view::show(ui, tab, doc, cx);
 }
 
-/// Draws the start page: the application name and a button to open files.
-fn draw_start_page(ui: &mut Ui, queue: &mut Vec<Action>) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.3);
-        ui.heading("refdesk");
-        ui.label(tr("start.hint"));
-        ui.add_space(8.0);
-        if ui.button(tr("start.open_button")).clicked() {
-            queue.push(Action::OpenFileDialog);
-        }
-    });
+/// Draws the start page: the application name, a button to open files, the recent documents
+/// and a few shortcuts (`views/start_page.rs`).
+fn draw_start_page(ui: &mut Ui, page: Option<&StartPage>, queue: &mut Vec<Action>) {
+    start_page::show(ui, page.unwrap_or(&StartPage::default()), queue);
 }
 
 #[cfg(test)]

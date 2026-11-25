@@ -115,6 +115,7 @@ pub type RecentDocuments<'a> = &'a dyn Fn(&AppState) -> Vec<PathBuf>;
 ///
 /// To attach the real list, pass a function that returns the paths of the recently opened
 /// documents, most recent first, in `windows::show_window` where this one is passed.
+#[cfg(test)]
 pub fn no_recent_documents(_: &AppState) -> Vec<PathBuf> {
     Vec::new()
 }

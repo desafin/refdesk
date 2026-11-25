@@ -2,7 +2,7 @@
 //! environment and touches no files, so the tests need no window.
 //!
 //! ```text
-//! refdesk [options] [file[#page=N]]...
+//! refdesk [--no-restore] [--no-single-instance] [file[#page=N]]...
 //! refdesk --diff old.pdf new.pdf
 //! ```
 //!
@@ -26,6 +26,8 @@ pub enum Cli {
         /// `false` with `--no-single-instance`: do not look for a running instance and do not
         /// open the socket.
         single_instance: bool,
+        /// `false` with `--no-restore`: start without the last session (it is still saved).
+        restore: bool,
     },
     /// Print the usage text and exit with status 0.
     Help,
@@ -58,6 +60,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
     let mut targets: Vec<OpenTarget> = Vec::new();
     let mut diff: Option<(PathBuf, PathBuf)> = None;
     let mut single_instance = true;
+    let mut restore = true;
     let mut options_ended = false;
 
     while let Some(arg) = args.next() {
@@ -71,6 +74,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
                 "--version" | "-V" => return Cli::Version,
                 "--no-single-instance" => {
                     single_instance = false;
+                    continue;
+                }
+                "--no-restore" => {
+                    restore = false;
                     continue;
                 }
                 "--diff" => {
@@ -102,6 +109,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Cli {
     Cli::Run {
         request,
         single_instance,
+        restore,
     }
 }
 
@@ -136,6 +144,7 @@ mod tests {
         Cli::Run {
             request: IpcRequest::Open { targets },
             single_instance,
+            restore: true,
         }
     }
 
@@ -177,6 +186,7 @@ mod tests {
                     right: PathBuf::from("new.pdf"),
                 },
                 single_instance: true,
+                restore: true,
             }
         );
     }
@@ -246,8 +256,37 @@ mod tests {
                     right: PathBuf::from("b.pdf"),
                 },
                 single_instance: false,
+                restore: true,
             }
         );
+    }
+
+    #[test]
+    fn no_restore_is_a_flag_anywhere() {
+        let Cli::Run {
+            request: IpcRequest::Open { targets },
+            single_instance,
+            restore,
+        } = parse_strs(&["a.pdf", "--no-restore", "b.pdf"])
+        else {
+            panic!("expected an open request");
+        };
+        assert!(!restore);
+        assert!(single_instance);
+        assert_eq!(targets, vec![target("a.pdf", None), target("b.pdf", None)]);
+        assert!(matches!(
+            parse_strs(&["--no-restore", "--no-single-instance"]),
+            Cli::Run {
+                restore: false,
+                single_instance: false,
+                ..
+            }
+        ));
+        // After `--` it is a file name.
+        assert!(matches!(
+            parse_strs(&["--", "--no-restore"]),
+            Cli::Run { restore: true, .. }
+        ));
     }
 
     #[test]
@@ -305,6 +344,7 @@ mod tests {
         for needle in [
             "--diff",
             "--no-single-instance",
+            "--no-restore",
             "--help",
             "--version",
             "#page=",

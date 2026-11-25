@@ -1,7 +1,7 @@
 //! A small translation table (Korean and English). Everything the user reads goes through [`tr`].
 //!
-//! The language comes from the `LANG` environment variable: a value starting with `ko` selects
-//! Korean, anything else English.
+//! The language comes from the `language` setting ([`force_lang`]) or else from the `LANG`
+//! environment variable: a value starting with `ko` selects Korean, anything else English.
 
 use std::sync::OnceLock;
 
@@ -121,6 +121,20 @@ pub const TABLE: &[Row] = &[
     ("tab.start", "시작", "Start"),
     ("tab.unknown", "(알 수 없음)", "(unknown)"),
     ("start.open_button", "파일 열기", "Open a file"),
+    ("start.recent", "최근 문서", "Recent documents"),
+    (
+        "start.no_recent",
+        "최근에 연 문서가 없습니다",
+        "No recently opened documents",
+    ),
+    ("start.missing", "파일 없음", "File not found"),
+    ("start.shortcuts", "단축키", "Shortcuts"),
+    ("time.just_now", "방금", "just now"),
+    ("time.minutes", "{n}분 전", "{n} min ago"),
+    ("time.hours", "{n}시간 전", "{n} h ago"),
+    ("time.days", "{n}일 전", "{n} days ago"),
+    ("time.months", "{n}개월 전", "{n} months ago"),
+    ("time.years", "{n}년 전", "{n} years ago"),
     (
         "start.hint",
         "PDF 파일을 열어 읽기 시작하세요.",
@@ -135,6 +149,7 @@ pub const TABLE: &[Row] = &[
         "A password is required",
     ),
     ("doc.failed", "열 수 없습니다: {}", "Could not open: {}"),
+    ("doc.retry", "다시 시도", "Try Again"),
     ("dialog.title", "PDF 파일 열기", "Open PDF files"),
     ("dialog.filter", "PDF 문서", "PDF documents"),
     (
@@ -146,6 +161,7 @@ pub const TABLE: &[Row] = &[
 옵션:
   --diff A B             두 PDF 를 비교한다
   --no-single-instance   실행 중인 인스턴스를 찾지 않고 새로 띄운다 (개발용)
+  --no-restore           마지막 세션을 복원하지 않는다
   -h, --help             이 도움말을 보인다
   -V, --version          버전을 보인다
   --                     이 뒤의 인자는 모두 파일로 본다
@@ -158,6 +174,7 @@ pub const TABLE: &[Row] = &[
 Options:
   --diff A B             compare two PDF files
   --no-single-instance   start a new instance without looking for a running one (for development)
+  --no-restore           do not restore the last session
   -h, --help             show this help
   -V, --version          show the version
   --                     treat everything after it as a file
@@ -309,9 +326,17 @@ pub fn lang_from_env_value(value: Option<&str>) -> Lang {
     }
 }
 
-/// The language of this process, decided once from `LANG`.
+/// The language of this process, decided once: [`force_lang`] or else `LANG`.
+static LANG: OnceLock<Lang> = OnceLock::new();
+
+/// Sets the language for the rest of the process (the `language` setting). Has no effect once
+/// any text was looked up; returns whether it took effect.
+pub fn force_lang(lang: Lang) -> bool {
+    LANG.set(lang).is_ok()
+}
+
+/// The language of this process, decided once from [`force_lang`] or `LANG`.
 pub fn current_lang() -> Lang {
-    static LANG: OnceLock<Lang> = OnceLock::new();
     *LANG.get_or_init(|| lang_from_env_value(std::env::var("LANG").ok().as_deref()))
 }
 

@@ -5,11 +5,12 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use refdesk_core::{DocumentHandle, ViewState};
+use refdesk_core::{Config, DocStateDb, DocumentHandle, Paths, ViewState};
 
 use crate::action::Action;
 use crate::overlays::palette::PaletteState;
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
+use crate::session::Memory;
 use crate::views::diff_view::{DiffDialog, DiffTab};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::views::preload::Preloader;
@@ -286,6 +287,14 @@ pub struct AppState {
     pub closed_tabs: Vec<ClosedTab>,
     /// The command palette and quick open (WP-43).
     pub palette: PaletteState,
+    /// Where the session and the document records are saved; `None` saves nothing (tests).
+    pub paths: Option<Paths>,
+    /// The settings from `config.toml`, read once at start. The app never writes that file.
+    pub config: Config,
+    /// What is remembered about each document (`documents.json`, SES-3).
+    pub doc_db: DocStateDb,
+    /// Session bookkeeping: focus order, fingerprints, window sizes (WP-41).
+    pub memory: Memory,
     next_window: u64,
 }
 
@@ -296,7 +305,8 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// A state with one window that shows the start page.
+    /// A state with one window that shows the start page. Reads no files; `session::start` fills
+    /// in the stored values.
     pub fn new() -> AppState {
         let mut tabs = TabStore::new();
         let start = tabs.insert(Tab::Start);
@@ -314,6 +324,10 @@ impl AppState {
             diff_dialog: None,
             closed_tabs: Vec::new(),
             palette: PaletteState::default(),
+            paths: None,
+            config: Config::default(),
+            doc_db: DocStateDb::default(),
+            memory: Memory::default(),
             next_window: 1,
         }
     }

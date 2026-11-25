@@ -6,11 +6,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, ViewState, ZoomMode};
+use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, ZoomMode};
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::overlays::palette::{self, PaletteMode};
 use crate::panels::status_bar::GotoInput;
+use crate::panels::toc::TocState;
+use crate::session;
 use crate::state::{AppState, ClosedTab, DocId, PdfTab, Tab, TabId, WindowId, normalize_path};
 use crate::views::diff_view::{self, DiffDialog, DiffTab};
 use crate::views::pdf_view::PdfViewUiState;
@@ -31,6 +33,8 @@ pub enum Action {
     CloseOtherTabs(TabId),
     /// Open the most recently closed PDF tab again, at the place it showed.
     ReopenClosedTab,
+    /// Open the document of a PDF tab again, e.g. after the missing file came back (SES-6).
+    RetryOpen(TabId),
     /// Show a tab and make it the target of commands.
     FocusTab(TabId),
     /// Open another view of the same document, copying the view state.
@@ -139,7 +143,7 @@ pub enum OpenHow {
 }
 
 /// The notifier handed to documents: it asks egui for a new frame.
-fn notifier(ctx: &egui::Context) -> Notifier {
+pub(crate) fn notifier(ctx: &egui::Context) -> Notifier {
     let ctx = ctx.clone();
     Arc::new(move || ctx.request_repaint())
 }
@@ -159,6 +163,11 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::CloseTab(tab) => close_tab(state, tab),
         Action::CloseOtherTabs(tab) => close_other_tabs(state, tab),
         Action::ReopenClosedTab => reopen_closed_tab(state, ctx),
+        Action::RetryOpen(tab) => {
+            if let Some(doc) = state.tabs.pdf(tab).and_then(|p| state.docs.get(p.doc)) {
+                doc.reload();
+            }
+        }
         Action::FocusTab(tab) => {
             let before = state.focused_window_index();
             focus_tab(state, tab);
@@ -248,6 +257,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             if id == state.main_window().id {
                 quit(ctx);
             } else {
+                session::record_window(state, id);
                 transfer::close_window(state, id);
             }
         }
@@ -319,18 +329,36 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
             .docs
             .insert(DocumentHandle::open(&path, notifier(ctx)))
     });
-    let mut view = ViewState::new(path.clone());
-    if let Some(page) = target.page {
+    // Where the reader left this document last time (SES-3), else the top at the default zoom.
+    let remembered = session::remembered_view(state, &path);
+    let mut view = remembered.view;
+    if let Some(page) = target.page.filter(|_| !remembered.found) {
         let loc = Location::new(page, 0.0, 0.0);
         view.anchor = loc;
-        view.history = refdesk_core::History::new(Place { doc: path, loc });
+        view.history = refdesk_core::History::new(Place {
+            doc: path.clone(),
+            loc,
+        });
+    }
+    let mut toc = Box::<TocState>::default();
+    if let Some(collapsed) = remembered.toc_collapsed {
+        toc.set_collapsed_paths(collapsed);
     }
     let tab = state.tabs.insert(Tab::Pdf(PdfTab {
         doc,
         view,
         ui: PdfViewUiState::default(),
-        toc: Box::default(),
+        toc,
     }));
+    if remembered.found
+        && let Some(page) = target.page
+    {
+        // A requested page is a jump from the remembered place, so Back returns there.
+        jump_to_page(state, tab, page);
+    }
+    // Without a record by path, the content fingerprint may still find one (a moved file).
+    let waiting = (!remembered.found && target.page.is_none()).then_some(tab);
+    session::document_opened(state, waiting, &path);
     place_new_tab(state, tab, None);
 }
 
@@ -477,6 +505,7 @@ fn close_tab(state: &mut AppState, tab: TabId) {
     if state.windows[w].dock.tab_count() == 1 && matches!(state.tabs.get(tab), Some(Tab::Start)) {
         return;
     }
+    session::record_tab(state, tab);
     let focus_here = state
         .focus
         .is_none_or(|f| f == tab || state.window_of(f) == Some(w));
@@ -534,9 +563,13 @@ fn reopen_closed_tab(state: &mut AppState, ctx: &egui::Context) {
     };
     let doc = match state.docs.find(&closed.path) {
         Some(doc) => doc,
-        None => state
-            .docs
-            .insert(DocumentHandle::open(&closed.path, notifier(ctx))),
+        None => {
+            let doc = state
+                .docs
+                .insert(DocumentHandle::open(&closed.path, notifier(ctx)));
+            session::document_opened(state, None, &closed.path);
+            doc
+        }
     };
     let tab = state.tabs.insert(Tab::Pdf(PdfTab {
         doc,
@@ -598,6 +631,7 @@ fn focus_next_pane(state: &mut AppState) {
 mod tests {
     use super::*;
     use crate::state::MAX_CLOSED_TABS;
+    use refdesk_core::ViewState;
     use std::path::Path;
 
     fn open(state: &mut AppState, ctx: &egui::Context, path: &str) {
