@@ -4,10 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use refdesk_core::{Config, DocStateDb, DocumentHandle, Paths, ViewState};
 
 use crate::action::Action;
+use crate::overlays::capture::Clipboard;
 use crate::overlays::palette::PaletteState;
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
 use crate::session::Memory;
@@ -295,6 +297,8 @@ pub struct AppState {
     pub doc_db: DocStateDb,
     /// The section path line above PDF views is shown (TOC-6). Not saved.
     pub show_breadcrumb: bool,
+    /// Where captures put their image. `None` uses the system clipboard; tests set a fake (WP-54).
+    pub capture_clipboard: Option<Arc<dyn Clipboard>>,
     /// Session bookkeeping: focus order, fingerprints, window sizes (WP-41).
     pub memory: Memory,
     next_window: u64,
@@ -330,6 +334,7 @@ impl AppState {
             config: Config::default(),
             doc_db: DocStateDb::default(),
             show_breadcrumb: true,
+            capture_clipboard: None,
             memory: Memory::default(),
             next_window: 1,
         }

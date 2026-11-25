@@ -94,6 +94,38 @@ pub const TABLE: &[Row] = &[
         "이 텍스트로 검색",
         "Search for This Text",
     ),
+    ("cmd.edit.capture_region", "영역 캡처", "Capture Area"),
+    (
+        "cmd.edit.capture_page",
+        "현재 쪽 캡처",
+        "Capture Current Page",
+    ),
+    (
+        "shot.hint",
+        "끌어서 영역 선택 · Esc 취소",
+        "Drag to select an area · Esc to cancel",
+    ),
+    ("shot.size", "{w} × {h} px", "{w} × {h} px"),
+    ("shot.working", "캡처하는 중…", "Capturing…"),
+    (
+        "shot.copied",
+        "캡처해 복사함 {w} × {h}",
+        "Captured and copied {w} × {h}",
+    ),
+    (
+        "shot.copy_failed",
+        "캡처했지만 복사하지 못함 ({err}) {w} × {h}",
+        "Captured, but could not copy ({err}) {w} × {h}",
+    ),
+    ("shot.failed", "캡처하지 못함: {}", "Could not capture: {}"),
+    ("shot.save", "저장", "Save"),
+    ("shot.saving", "저장하는 중…", "Saving…"),
+    ("shot.saved", "저장함: {}", "Saved: {}"),
+    (
+        "shot.save_failed",
+        "저장하지 못함: {}",
+        "Could not save: {}",
+    ),
     ("find.hint", "문서에서 찾기", "Find in document"),
     ("find.count", "{n} / {total}", "{n} / {total}"),
     (

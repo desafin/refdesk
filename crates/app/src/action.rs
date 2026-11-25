@@ -6,9 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, ZoomMode};
+use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, Rect, ZoomMode};
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
+use crate::overlays::capture;
 use crate::overlays::palette::{self, PaletteMode};
 use crate::panels::search;
 use crate::panels::status_bar::GotoInput;
@@ -68,6 +69,25 @@ pub enum Action {
     Find(TabId),
     /// Search for the selected text of a PDF tab, even over several lines (FIND-6).
     FindSelection(TabId),
+    /// Turn the capture mode of a PDF tab on, or off when it is on: the next drag on a page
+    /// captures that area (SHOT-1).
+    StartCapture(TabId),
+    /// Capture the whole page a PDF tab shows (SHOT-4).
+    CapturePage(TabId),
+    /// Capture a region of a page of a PDF tab: the rectangle is in page space and `scale_milli`
+    /// is the render scale times 1000 (SHOT-1, SHOT-2). Sent by the view when a drag ends.
+    CaptureRegion {
+        /// The tab that was dragged in.
+        tab: TabId,
+        /// The page (zero-based).
+        page: u32,
+        /// The region in page space.
+        rect: Rect,
+        /// The render scale times 1000.
+        scale_milli: u32,
+    },
+    /// Save the last capture of a PDF tab as a PNG file (SHOT-3).
+    SaveCapture(TabId),
     /// Move a PDF tab to the next match of its search (FIND-1).
     FindNext(TabId),
     /// Move a PDF tab to the previous match of its search (FIND-1).
@@ -230,6 +250,15 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
         Action::Find(tab) => search::find(state, tab, false, ctx),
         Action::FindSelection(tab) => search::find(state, tab, true, ctx),
+        Action::StartCapture(tab) => capture::start(state, tab),
+        Action::CapturePage(tab) => capture::capture_page(state, tab, ctx),
+        Action::CaptureRegion {
+            tab,
+            page,
+            rect,
+            scale_milli,
+        } => capture::capture_region(state, tab, page, rect, scale_milli, ctx),
+        Action::SaveCapture(tab) => capture::save(state, tab, ctx),
         Action::FindNext(tab) => search::step(state, tab, true, ctx),
         Action::FindPrev(tab) => search::step(state, tab, false, ctx),
         Action::StartDiff { left, right } => {

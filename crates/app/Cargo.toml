@@ -17,6 +17,9 @@ egui.workspace = true
 egui_dock.workspace = true
 rfd.workspace = true
 log.workspace = true
+png.workspace = true
+# Local time for capture file names; pure Rust, reads the system time zone itself.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 
 [dev-dependencies]
 egui_kittest.workspace = true

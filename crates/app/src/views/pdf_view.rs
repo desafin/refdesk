@@ -28,6 +28,7 @@ use refdesk_core::{
 use crate::action::{Action, OpenTarget};
 use crate::commands;
 use crate::i18n::tr;
+use crate::overlays::capture::CaptureState;
 use crate::overlays::link_preview::{self, ShowEnv, UpdateEnv};
 use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
@@ -196,6 +197,8 @@ pub struct PdfViewUiState {
     /// The search bar's query, what it found and the current match (FIND-1). Boxed to keep tabs
     /// small.
     pub search: Box<SearchState>,
+    /// The capture mode and the notice of the last capture (SHOT-1). Boxed to keep tabs small.
+    pub capture: Box<CaptureState>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -218,6 +221,49 @@ impl PdfViewUiState {
     /// The current scroll offset in content space.
     pub fn scroll(&self) -> Point {
         self.scroll
+    }
+
+    /// Capture mode input for a frame (see [`CaptureState::input`]). Returns true while the mode
+    /// is on: the pointer is then not for selecting text or following links.
+    fn capture_input(
+        &mut self,
+        ui: &Ui,
+        response: &egui::Response,
+        view_rect: Rect,
+        focused: bool,
+        tab: TabId,
+        queue: &mut Vec<Action>,
+    ) -> bool {
+        let Some(g) = self.geometry.as_deref() else {
+            return false;
+        };
+        self.capture.input(
+            ui,
+            response,
+            view_rect,
+            focused,
+            &g.layout,
+            self.scroll,
+            tab,
+            queue,
+        )
+    }
+
+    /// Draws the capture mode and the capture notice.
+    fn capture_paint(
+        &mut self,
+        ui: &Ui,
+        view_rect: Rect,
+        hovered: bool,
+        now: f64,
+        tab: TabId,
+        queue: &mut Vec<Action>,
+    ) {
+        if let Some(g) = self.geometry.as_deref() {
+            self.capture
+                .paint(ui, view_rect, hovered, &g.layout, self.scroll);
+        }
+        self.capture.show_notice(ui, view_rect, now, tab, queue);
     }
 
     /// Whether some text is selected.
@@ -658,6 +704,8 @@ fn show_document(
     let state = &mut tab.ui;
     state.sync(&tab.view, &info.page_sizes, info.generation, viewport);
     state.selection.sync_generation(info.generation);
+    // In capture mode a drag draws a rectangle and a click follows no link.
+    let capturing = state.capture_input(ui, &response, view_rect, cx.focused, cx.tab_id, cx.queue);
 
     let now = ui.input(|i| i.time);
     let texts = |page: u32| doc.page_text(page);
@@ -673,7 +721,7 @@ fn show_document(
         now,
         over_link: false,
     };
-    let hover = hovered_link(ui, &response, state, &env);
+    let hover = hovered_link(ui, &response, state, &env).filter(|_| !capturing);
     let hover_text = hover.as_ref().map(|h| {
         links::describe(
             &h.link.target,
@@ -818,6 +866,7 @@ fn show_document(
             pixels,
         },
     );
+    state.capture_paint(ui, view_rect, hovered, now, cx.tab_id, cx.queue);
     // The popup says the same as the tooltip, and more.
     if let Some(text) = hover_text
         && !preview_open

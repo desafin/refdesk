@@ -664,7 +664,16 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 결과가 오면 클립보드에 넣고 알림을 띄운다. 알림에는 "저장" 버튼이 있다. PNG 인코딩과 파일 쓰기도 백그라운드에서 한다.
 사각형이 두 쪽에 걸치면 시작한 쪽 안으로 줄인다.
 
-클립보드: 먼저 egui 의 `ctx.copy_image` 를 쓴다. 이 머신에서 다른 앱에 붙여 넣어지지 않으면 `wl-copy --type image/png` 로 넘긴다(§6).
+클립보드: `wl-copy` 가 `PATH` 에 있고 Wayland 세션이면 PNG 를 `wl-copy --type image/png` 의 표준 입력으로 넘기고(백그라운드 스레드, 2초 안에 끝나야 한다),
+없거나 실패하면 egui 의 `ctx.copy_image` 를 쓴다. GNOME Wayland 에서 `ctx.copy_image` 는 X11 클립보드로 들어가 다른 앱에 붙지 않을 수 있어서 순서를 이렇게 정했다(§6).
+클립보드는 `Clipboard` trait 뒤에 있고(`AppState.capture_clipboard` 로 바꿔 끼운다), 방법 고르기(`plan_methods`)는 순수 함수다.
+
+구현 메모(WP-54)
+- 동작은 `Action::StartCapture / CapturePage / CaptureRegion { tab, page, rect, scale_milli } / SaveCapture` 다. 뷰는 놓는 순간 `CaptureRegion` 을 큐에 넣고, 스레드는 `dispatch` 가 띄운다.
+- 캡처 모드와 알림은 뷰마다 `PdfViewUiState.capture`(저장하지 않음, 복제하면 비어서 시작). 스레드는 `Inbox` 로 결과를 남기고 뷰가 매 프레임 꺼내 간다. 알림은 6초, 저장하면 6초 더.
+- 사각형은 시작점을 **페이지 공간**으로 들고 있다가(스크롤해도 같은 자리) 시작한 쪽의 좌표계로 끝점을 환산해 쪽 안으로 줄인다. 어느 변이든 4 논리 픽셀 미만이면 취소.
+- 배율 = 화면 배율(레이아웃 배율 × `pixels_per_point`) × `config.capture.scale`, 올림. 긴 변 8000 픽셀과 엔진의 쪽 전체 1억 2천만 픽셀 제한을 넘지 않게 낮춘다(`capture_scale_milli`).
+- 파일 이름은 `문서이름-p쪽-YYYYMMDD-HHMMSS.png`(현지 시각, 쪽은 1부터). 같은 이름이 있으면 `-2`, `-3`. `AppState.paths` 가 없으면 저장은 꺼진다.
 
 ### 5.8 세션
 
@@ -696,7 +705,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 | 텍스처가 모든 창에서 공유되는가 | 공유된다(egui 컨텍스트가 하나) | 아니라면 `views/textures.rs` 를 창별로 |
 | `logic()` 과 자식 창의 호출 순서 | 프레임마다 `logic` → `ui`, 자식 창은 `ui` 안에서 | §5.2 의 흐름 |
 | 한글 입력 | 텍스트 칸에서 fcitx5 조합이 된다 | 안 되면 검색 입력 방식 재검토 |
-| 이미지 클립보드 | `ctx.copy_image` 로 복사한 이미지가 다른 앱에 붙는다 | 안 되면 `overlays/capture.rs` 가 `wl-copy` 를 쓴다 |
+| 이미지 클립보드 | `ctx.copy_image` 로 복사한 이미지가 다른 앱에 붙는다 | 안 되면 `overlays/capture.rs` 가 `wl-copy` 를 쓴다(WP-54 는 `wl-copy` 를 먼저 시도하는 순서로 구현) |
 
 ## 7. 오류와 로그
 
