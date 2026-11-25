@@ -1,0 +1,22 @@
+# WP-01: M0 verification app. Throwaway code; see README.md.
+[package]
+name = "refdesk-m0"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Versions and features mirror [workspace.dependencies] in the root Cargo.toml.
+mupdf = { version = "0.8.0", default-features = false, features = ["system-fonts", "base14-fonts"] }
+eframe = "0.37"
+egui_dock = "0.22"
+font-kit = { version = "0.14", features = ["source-fontconfig-dlopen"] }
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal", "wayland"] }
+png = "0.18.1"
+log = "0.4.35"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Standalone project: not part of the root workspace.
+[workspace]

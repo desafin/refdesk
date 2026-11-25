@@ -61,11 +61,21 @@ egui·eframe·egui_dock·mupdf 의 현재 API 는 모델이 기억하는 것과 
 - `eframe::App` 의 화면 함수는 `update` 가 아니라 `fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame)` 이고, UI 없는 처리는 `fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame)` 이다.
 - `DockArea` 는 `.show_inside(ui, &mut viewer)` 로 그린다. `TabViewer` 는 `id()` 구현이 필수다.
 - 자식 창은 `ctx.show_viewport_immediate(id, builder, |ui, class| { .. })` 이다.
+- `TopBottomPanel` 은 없다. `egui::Panel::top(id)` / `Panel::bottom(id)` 를 `.show(ui, ..)` 로 그린다. `CentralPanel` 도 `Ui` 를 받는다.
+- `ctx.screen_rect()` 는 없다. `ctx.viewport_rect()` / `ctx.content_rect()` 를 쓴다.
+- 메뉴를 닫는 것은 `ui.close()` 다(`close_menu` 는 없다). `egui::Id::new` 는 폐기 예정이고 `Id::unique(..)` 를 쓴다.
+- 글꼴 추가는 `ctx.add_font(FontInsert::new(..))`. eframe 은 `NativeOptions::system_font_fallback`(기본 켜짐)으로 없는 글리프를 시스템 글꼴에서 찾는다.
+- egui_dock 0.22: `TabViewer::context_menu(ui, tab, path: NodePath)`, `is_closeable(&self, &Tab)`, `allowed_in_windows(&self, &mut Tab)`.
+  `find_tab_from` / `remove_tab` 은 `TabPath` 를 쓴다. 드래그 상태는 비공개이고, 끄는 탭의 `Response` 는 따로 만들어지므로
+  `on_tab_button` 에서 `response.dragged()` 로는 끌기를 알 수 없다(`spikes/m0/src/main.rs` 의 감지 방법 참고).
+- mupdf 0.8: `Pixmap::samples()` 는 `stride()` 에 패딩이 있을 수 있다. `Document` 는 `Send` 가 아니다.
+- eframe: 창이 여러 개여도 painter 가 하나라 텍스처는 공유된다. 자식 창의 이벤트는 부모 창을 다시 그리는 것으로 처리된다.
 
 **추측으로 쓰지 말고 고정된 버전의 소스를 읽는다.**
 
 - 정확한 버전의 소스: `~/.cargo/registry/src/*/{egui-0.37.0, eframe-0.37.0, egui_dock-0.22.0, mupdf-0.8.0}`
-- 컴파일 확인된 사용 예: `spikes/feasibility/src/bin/probe.rs`(mupdf), `uicheck.rs`(eframe + egui_dock + 자식 창)
+- 컴파일 확인된 사용 예: `spikes/feasibility/src/bin/probe.rs`(mupdf), `uicheck.rs`(eframe + egui_dock + 자식 창),
+  `spikes/m0/src/main.rs`(여러 창, 탭 이동, 끌기 감지, 파일 선택기, 클립보드 — 실제로 실행되는 앱)
 - `references/` 의 클론은 더 새 버전이라 시그니처가 다를 수 있다. 설계와 예제를 참고하는 용도다.
 
 ## 3. 좌표와 단위
