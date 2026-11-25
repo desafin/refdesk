@@ -14,6 +14,11 @@
 //! screen ([`mark_rects`], [`change_bar`]), its colors ([`mark_fill`]), which change is the next
 //! or previous one ([`pick_change`], [`reading_pos`]) and where the other side scrolls to
 //! ([`place_scroll`], [`DiffTab::follow`]). The egui part draws and reads the pointer.
+//!
+//! WP-63 adds the change list on the right of the tab (DIFF-5) and a position strip beside the
+//! scroll bar of each view (DIFF-7). Both are built in `panels::changes`; this file only gives
+//! them their place: the panel is a right-hand side panel of the tab, and each side reserves a
+//! strip of [`STRIP_WIDTH`] next to its view, so `pdf_view` is not touched.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,12 +27,13 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 use refdesk_core::{
     DiffJob, DiffOptions, DiffResult, DocStatus, DocumentHandle, DocumentInfo, Location, Mark,
-    MarkKind, Notifier, PageLayout, Point, Rect, SessionTab, Side, Size, ViewState,
+    MarkKind, Notifier, Outline, PageLayout, Point, Rect, SessionTab, Side, Size, ViewState,
 };
 
 use crate::action::Action;
 use crate::commands;
 use crate::i18n::tr;
+use crate::panels::changes::{self, ChangesState, Overview, PanelContent, STRIP_WIDTH};
 use crate::state::{DocId, DocStore, PdfTab, TabId};
 use crate::views::pdf_view::{self, PdfViewUiState, ViewContext, anchor_at};
 
@@ -37,6 +43,10 @@ pub const SYNC_LINE: f32 = 0.25;
 
 /// Where a change is placed when moving to it, as a fraction of the viewport height (DIFF-5).
 pub const CHANGE_LINE: f32 = 1.0 / 3.0;
+
+/// Where a click on a position strip puts the clicked place, as a fraction of the viewport
+/// height from its top: the middle.
+const STRIP_LINE: f32 = 0.5;
 
 /// Two positions closer than this (pt) count as the same place when looking for the next change.
 const NAV_TOLERANCE: f64 = 1.0;
@@ -94,6 +104,8 @@ pub struct DiffTab {
     pub active: Side,
     /// A short message for the band (an i18n key), such as "this is the last change".
     pub notice: Option<&'static str>,
+    /// The change list on the right of the tab (DIFF-5) and what the position strips draw from.
+    pub changes: ChangesState,
     /// The reference locations ([`SYNC_LINE`]) of both sides as of the last frame, to see which
     /// side moved. `None` until both views are laid out.
     last_ref: Option<(Location, Location)>,
@@ -151,6 +163,7 @@ impl DiffTab {
             current: None,
             active: Side::Left,
             notice: None,
+            changes: ChangesState::default(),
             last_ref: None,
             nav_anchor: None,
         }
@@ -213,7 +226,6 @@ impl DiffTab {
     }
 
     /// The result, if there is one (it may be stale; see [`DiffTab::fresh_result`]).
-    #[allow(dead_code)] // for the change list panel (the next work package)
     pub fn result(&self) -> Option<&Arc<DiffResult>> {
         self.outcome.as_ref().and_then(|o| o.as_ref().ok())
     }
@@ -422,6 +434,25 @@ impl DiffTab {
             right: docs.get(self.right.doc)?.path().to_path_buf(),
         })
     }
+}
+
+/// Scrolls a view so that `loc` is on the line [`STRIP_LINE`] of its viewport. Returns whether it
+/// moved; a view that is not laid out yet does not.
+fn center_on(pdf: &mut PdfTab, loc: Location) -> bool {
+    let Some(layout) = pdf.ui.layout() else {
+        return false;
+    };
+    let to = place_scroll(
+        layout,
+        loc,
+        pdf.ui.viewport(),
+        STRIP_LINE,
+        pdf.ui.scroll().x,
+    );
+    let before = pdf.ui.scroll();
+    pdf.ui.scroll_to(to);
+    pdf.ui.commit(&mut pdf.view);
+    pdf.ui.scroll() != before
 }
 
 /// The current generations of both documents, if both are open.
@@ -682,6 +713,10 @@ pub fn show(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, cx: ViewContext<'_>
     } = cx;
     tab.poll();
     band(ui, tab, docs, tab_id, queue);
+    let result = tab.fresh_result(docs);
+    prepare_changes(tab, docs, result.as_ref());
+    show_changes_panel(ui, tab, docs, tab_id, queue);
+    let overview = result.as_ref().and_then(|_| tab.changes.overview());
 
     let rest = ui.available_rect_before_wrap();
     if rest.width() < 2.0 * SPLIT_GAP || rest.height() < 1.0 {
@@ -701,8 +736,10 @@ pub fn show(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, cx: ViewContext<'_>
     }
     let driver = tab.active;
     let follower = other(driver);
-    let result = tab.fresh_result(docs);
-    let marks = result.as_deref().map(|r| (r, tab.current));
+    let overlay = Overlay {
+        marks: result.as_deref().map(|r| (r, tab.current)),
+        overview: overview.as_deref(),
+    };
 
     // The driver takes its input first; the follower is then placed and drawn in the same frame.
     let doc = docs.get(tab.side(driver).doc).cloned();
@@ -719,7 +756,7 @@ pub fn show(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, cx: ViewContext<'_>
         tab,
         doc.as_ref(),
         side_cx,
-        marks,
+        overlay,
     );
 
     if tab.sync_scroll && result.is_some() {
@@ -744,7 +781,7 @@ pub fn show(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, cx: ViewContext<'_>
         tab,
         doc.as_ref(),
         side_cx,
-        marks,
+        overlay,
     );
 
     ui.painter().vline(
@@ -757,8 +794,85 @@ pub fn show(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, cx: ViewContext<'_>
     );
 }
 
-/// Draws one side: the PDF view, then the marks over it. Only the active side of a focused tab
-/// takes the keys.
+/// The outline of a document (empty while it is not open).
+fn outline_of(info: &Option<Arc<DocumentInfo>>) -> &Outline {
+    static EMPTY: std::sync::OnceLock<Outline> = std::sync::OnceLock::new();
+    match info {
+        Some(info) => &info.outline,
+        None => EMPTY.get_or_init(Outline::new),
+    }
+}
+
+/// Makes the change list and the strips ready for a result that is valid now. Nothing is
+/// recomputed for a result that was prepared already.
+fn prepare_changes(tab: &mut DiffTab, docs: &DocStore, result: Option<&Arc<DiffResult>>) {
+    let Some(result) = result else {
+        return;
+    };
+    let left = docs.get(tab.left.doc).and_then(|d| d.info());
+    let right = docs.get(tab.right.doc).and_then(|d| d.info());
+    tab.changes
+        .prepare(result, outline_of(&left), outline_of(&right));
+}
+
+/// The change list, on the right of the tab under the band (DIFF-5). Its width is the user's to
+/// drag; egui remembers it per tab.
+fn show_changes_panel(
+    ui: &mut Ui,
+    tab: &mut DiffTab,
+    docs: &DocStore,
+    tab_id: TabId,
+    queue: &mut Vec<Action>,
+) {
+    if !tab.changes.open {
+        return;
+    }
+    let phase = tab.phase(docs);
+    let left = docs.get(tab.left.doc).and_then(|d| d.info());
+    let right = docs.get(tab.right.doc).and_then(|d| d.info());
+    let stale = match &phase {
+        Phase::Stale => tab.result().cloned(),
+        _ => None,
+    };
+    let content = match &phase {
+        Phase::Running(progress) => PanelContent::Running(*progress),
+        Phase::Done(result) => PanelContent::Result {
+            result,
+            left: outline_of(&left),
+            right: outline_of(&right),
+            stale: false,
+        },
+        Phase::Stale => match &stale {
+            Some(result) => PanelContent::Result {
+                result,
+                left: outline_of(&left),
+                right: outline_of(&right),
+                stale: true,
+            },
+            None => PanelContent::Unavailable,
+        },
+        Phase::Cancelled | Phase::Failed(_) => PanelContent::Unavailable,
+    };
+    let current = tab.current;
+    egui::Panel::right(egui::Id::unique(("diff-changes", tab_id)))
+        .resizable(true)
+        .default_size(changes::DEFAULT_PANEL_WIDTH)
+        .size_range(changes::PANEL_WIDTH_RANGE.0..=changes::PANEL_WIDTH_RANGE.1)
+        .show(ui, |ui| {
+            changes::show(ui, &mut tab.changes, content, current, tab_id, queue);
+        });
+}
+
+/// What is drawn over the views of a valid result: the marks of the changes (with the current
+/// one) and the position strips.
+#[derive(Clone, Copy)]
+struct Overlay<'a> {
+    marks: Option<(&'a DiffResult, Option<usize>)>,
+    overview: Option<&'a Overview>,
+}
+
+/// Draws one side: the PDF view, then the marks over it, then the position strip beside its
+/// scroll bar. `rect` holds all of it. Only the active side of a focused tab takes the keys.
 fn draw_side(
     ui: &mut Ui,
     rect: egui::Rect,
@@ -766,13 +880,18 @@ fn draw_side(
     tab: &mut DiffTab,
     doc: Option<&DocumentHandle>,
     cx: ViewContext<'_>,
-    marks: Option<(&DiffResult, Option<usize>)>,
+    overlay: Overlay<'_>,
 ) {
+    let Overlay { marks, overview } = overlay;
     let salt = match side {
         Side::Left => "diff-left",
         Side::Right => "diff-right",
     };
-    let mut child = ui.new_child(UiBuilder::new().id_salt(salt).max_rect(rect));
+    let tab_id = cx.tab_id;
+    // The strip takes the right edge, next to the vertical scroll bar of the view.
+    let strip_x = (rect.max.x - STRIP_WIDTH).max(rect.min.x);
+    let view_area = egui::Rect::from_min_max(rect.min, pos2(strip_x, rect.max.y));
+    let mut child = ui.new_child(UiBuilder::new().id_salt(salt).max_rect(view_area));
     let cx = ViewContext {
         focused: cx.focused && tab.active == side,
         ..cx
@@ -810,6 +929,47 @@ fn draw_side(
         if current == Some(mark.change as usize) {
             painter.rect_stroke(r.expand(1.0), 0.0, outline, StrokeKind::Outside);
         }
+    }
+
+    if let Some(overview) = overview {
+        // As high as the vertical scroll bar of the view.
+        let strip = egui::Rect::from_min_size(
+            pos2(strip_x, rect.min.y),
+            vec2(rect.max.x - strip_x, viewport.h),
+        );
+        let id = ui.scope_id().with(("diff-strip", tab_id, salt));
+        draw_strip(ui, id, strip, side, overview, pdf);
+    }
+}
+
+/// The position strip of one side: the changes of its document as ticks, the part the view shows
+/// as a pale band. A press or drag on it scrolls the view to that place.
+fn draw_strip(
+    ui: &mut Ui,
+    id: egui::Id,
+    strip: egui::Rect,
+    side: Side,
+    overview: &Overview,
+    pdf: &mut PdfTab,
+) {
+    let extent = overview.extent(side);
+    let (ticks, span) = {
+        let Some(layout) = pdf.ui.layout() else {
+            return;
+        };
+        let (scroll, viewport) = (pdf.ui.scroll(), pdf.ui.viewport());
+        let top = ref_location(layout, scroll, viewport, 0.0);
+        let bottom = ref_location(layout, scroll, viewport, 1.0);
+        (
+            changes::strip_ticks(
+                overview.points(side),
+                strip.height().floor().max(0.0) as u32,
+            ),
+            changes::visible_span(extent, top, bottom),
+        )
+    };
+    if let Some(fraction) = changes::show_strip(ui, id, strip, &ticks, Some(span)) {
+        center_on(pdf, extent.location_at(fraction));
     }
 }
 
@@ -872,6 +1032,18 @@ fn band(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, tab_id: TabId, queue: &
                 _ => None,
             };
             tab.set_sync(sync, result.as_deref());
+        }
+        let name = commands::command("diff.toggle_changes").map_or("", |c| tr(c.name_key));
+        let hint = match commands::shortcut_text(ui.ctx(), "diff.toggle_changes") {
+            Some(keys) => format!("{name} ({keys})"),
+            None => name.to_owned(),
+        };
+        if ui
+            .selectable_label(tab.changes.open, tr("changes.title"))
+            .on_hover_text(hint)
+            .clicked()
+        {
+            queue.push(Action::ToggleChangesPanel(tab_id));
         }
         ui.menu_button(tr("diff.options"), |ui| {
             let mut options = tab.options;
@@ -2104,5 +2276,376 @@ mod tests {
         })
         .drop_without_applying_deltas();
         assert!(state.diff_dialog.is_some());
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // Change list and position strips (WP-63)
+    // --------------------------------------------------------------------------------------------
+
+    /// Like [`write`], with a table of contents: "1 First" on the first page, "2 Second" on the
+    /// third.
+    fn write_with_contents(paras: &[String], stem: &str) -> TempPdf {
+        flow_document(paras, &FlowOptions::default())
+            .outline_leaf("1 First", 1, 0.0)
+            .outline_leaf("2 Second", 3, 0.0)
+            .write_temp(stem)
+    }
+
+    /// Two documents with contents and a few changes spread over them.
+    fn changed_pair() -> (Vec<String>, Vec<String>) {
+        let mut left = paragraphs(60, "p");
+        let mut right = left.clone();
+        right.insert(12, long_paragraph(60));
+        left[30] = left[30].replacen("engine", "motor", 1);
+        right.remove(50);
+        (left, right)
+    }
+
+    fn compare_with_contents(left: &[String], right: &[String]) -> Fixture {
+        let lf = write_with_contents(left, "wp63-left");
+        let rf = write_with_contents(right, "wp63-right");
+        let (l, r) = (lf.path().to_path_buf(), rf.path().to_path_buf());
+        start(&l, &r, vec![lf, rf])
+    }
+
+    #[test]
+    fn the_change_list_groups_by_the_contents_of_the_real_documents() {
+        let (left, right) = changed_pair();
+        let mut fx = compare_with_contents(&left, &right);
+        let result = fx.result();
+        assert!(result.changes.len() >= 3, "{:?}", result.changes);
+        // Drawing prepares the list.
+        for _ in 0..2 {
+            fx.frame();
+        }
+        let d = fx.diff();
+        let grouping = d.changes.grouping().expect("prepared");
+        let outline = |side| {
+            fx.doc(side)
+                .info()
+                .map(|i| i.outline.clone())
+                .expect("outline")
+        };
+        assert_eq!(outline(Side::Left).items.len(), 2);
+        let expected =
+            changes::group_changes(&result.changes, &outline(Side::Left), &outline(Side::Right));
+        assert_eq!(grouping.groups, expected.groups);
+        assert!(
+            grouping.groups.iter().all(|g| matches!(
+                g.key,
+                changes::GroupKey::Section(_) | changes::GroupKey::Start
+            )),
+            "{:?}",
+            grouping.groups
+        );
+        // Every change is in a group and the rows hold each of them once.
+        let rows = fx.diff_mut().changes.rows();
+        for i in 0..result.changes.len() as u32 {
+            assert!(changes::row_of_change(&rows, i).is_some(), "change {i}");
+        }
+    }
+
+    #[test]
+    fn clicking_a_row_moves_both_views_and_makes_it_the_current_change() {
+        let (left, right) = changed_pair();
+        let mut fx = compare(&left, &right);
+        let result = fx.result();
+        let last = result.changes.len() - 1;
+        assert!(last >= 1);
+        fx.lay_out(VIEWPORT);
+        let tab = fx.tab;
+
+        // The click of a row is this action; it goes where F7 goes.
+        fx.dispatch(Action::GoToChange { tab, index: last });
+        assert_eq!(fx.diff().current, Some(last));
+        for side in [Side::Left, Side::Right] {
+            let sizes = page_sizes(&result, side);
+            let at = stacked_y(sizes, fx.at_line(side, CHANGE_LINE));
+            let want = stacked_y(sizes, pick(result.changes[last].anchor, side));
+            assert!((at - want).abs() < 0.5, "{side:?}: {at} vs {want}");
+        }
+        // Previous change continues from the clicked one.
+        fx.dispatch(Action::PrevChange(tab));
+        assert_eq!(fx.diff().current, Some(last - 1));
+        // A change that does not exist is ignored.
+        fx.dispatch(Action::GoToChange { tab, index: 9999 });
+        assert_eq!(fx.diff().current, Some(last - 1));
+    }
+
+    #[test]
+    fn a_row_cannot_be_used_once_the_result_is_stale() {
+        let (left, right) = inserted_pair();
+        let mut fx = compare(&left, &right);
+        fx.result();
+        let doc = fx.doc(Side::Right);
+        let old = doc.info().expect("info").generation;
+        doc.reload();
+        fx.wait_until("the reload", |_| {
+            doc.info().is_some_and(|i| i.generation != old)
+        });
+        let tab = fx.tab;
+        fx.dispatch(Action::GoToChange { tab, index: 0 });
+        assert_eq!(fx.diff().current, None);
+    }
+
+    #[test]
+    fn moving_with_f7_unfolds_the_group_and_targets_the_row() {
+        let (left, right) = changed_pair();
+        let mut fx = compare(&left, &right);
+        let result = fx.result();
+        fx.lay_out(VIEWPORT);
+        for _ in 0..2 {
+            fx.frame();
+        }
+        let tab = fx.tab;
+        // Fold the group the second change is in.
+        let group = fx
+            .diff()
+            .changes
+            .grouping()
+            .and_then(|g| g.group_of(1))
+            .expect("group");
+        fx.diff_mut().changes.toggle_fold(group);
+        assert!(changes::row_of_change(&fx.diff_mut().changes.rows(), 1).is_none());
+
+        fx.dispatch(Action::NextChange(tab));
+        fx.dispatch(Action::NextChange(tab));
+        assert_eq!(fx.diff().current, Some(1));
+        // The list notices on its next draw: the row comes back and is scrolled to.
+        let current = fx.diff().current;
+        fx.diff_mut().changes.note_current(current);
+        assert_eq!(fx.diff().changes.pending_scroll(), Some(1));
+        assert!(!fx.diff().changes.is_folded(group));
+        assert!(changes::row_of_change(&fx.diff_mut().changes.rows(), 1).is_some());
+        // Drawing uses the request up.
+        fx.frame();
+        assert_eq!(fx.diff().changes.pending_scroll(), None);
+        assert!(!fx.diff().changes.is_folded(group));
+        assert_eq!(
+            result.changes.len(),
+            fx.diff().changes.grouping().map_or(0, |g| g
+                .groups
+                .iter()
+                .map(|g| g.changes.len())
+                .sum())
+        );
+    }
+
+    #[test]
+    fn the_panel_toggles_and_the_kind_filter_only_touches_the_list() {
+        let (left, right) = inserted_pair();
+        let mut fx = compare(&left, &right);
+        fx.result();
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty());
+        }
+        let tab = fx.tab;
+        assert!(fx.diff().changes.open, "open by default");
+        fx.dispatch(Action::ToggleChangesPanel(tab));
+        assert!(!fx.diff().changes.open);
+        // The strips still have their data while the panel is closed.
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty());
+        }
+        assert!(fx.diff().changes.overview().is_some());
+        fx.dispatch(Action::ToggleChangesPanel(tab));
+        assert!(fx.diff().changes.open);
+
+        // Switching every kind off empties the list but not the marks or the counts.
+        for kind in changes::KINDS {
+            fx.diff_mut().changes.toggle_kind(kind);
+        }
+        assert!(fx.diff_mut().changes.rows().is_empty());
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty());
+        }
+        let result = fx.result();
+        assert_eq!((result.added, result.removed, result.modified), (1, 0, 0));
+        assert!(!result.right_marks.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn the_change_list_draws_while_running_finished_without_changes_and_stale() {
+        // Running, then finished with changes.
+        let (left, right) = inserted_pair();
+        let mut fx = compare(&left, &right);
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty());
+        }
+        fx.result();
+        for _ in 0..3 {
+            assert!(fx.frame().is_empty());
+        }
+        assert!(fx.diff().changes.grouping().is_some());
+        // Stale: the list stays, dimmed.
+        let doc = fx.doc(Side::Left);
+        let old = doc.info().expect("info").generation;
+        doc.reload();
+        fx.wait_until("the reload", |_| {
+            doc.info().is_some_and(|i| i.generation != old)
+        });
+        assert_eq!(fx.diff().phase(&fx.state.docs), Phase::Stale);
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty(), "a stale list cannot be clicked");
+        }
+        // Cancelled: nothing to list.
+        let tab = fx.tab;
+        fx.dispatch(Action::CancelDiff(tab));
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty());
+        }
+
+        // A file against itself: no differences.
+        let f = write(&paragraphs(8, "s"), "wp63-same");
+        let path = f.path().to_path_buf();
+        let mut same = start(&path, &path, vec![f]);
+        same.result();
+        for _ in 0..3 {
+            assert!(same.frame().is_empty());
+        }
+        assert_eq!(
+            same.diff().changes.grouping().map(|g| g.groups.len()),
+            Some(0)
+        );
+        assert!(same.diff_mut().changes.rows().is_empty());
+    }
+
+    #[test]
+    fn a_click_on_a_strip_scrolls_that_view_to_the_place() {
+        let (left, right) = inserted_pair();
+        let mut fx = compare(&left, &right);
+        let result = fx.result();
+        for _ in 0..2 {
+            fx.frame();
+        }
+        fx.lay_out(VIEWPORT);
+        let overview = fx.diff().changes.overview().expect("overview");
+        for side in [Side::Left, Side::Right] {
+            let extent = overview.extent(side);
+            for fraction in [0.1_f32, 0.5, 0.9] {
+                let want = extent.location_at(fraction);
+                let pdf = fx.diff_mut().side_mut(side);
+                center_on(pdf, want);
+                let sizes = page_sizes(&result, side);
+                let at = fx.at_line(side, STRIP_LINE);
+                let got = extent.fraction(at);
+                assert!(
+                    (got - fraction).abs() < 0.01,
+                    "{side:?} {fraction}: scrolled to {got} ({at:?}, wanted {want:?}, {} pages)",
+                    sizes.len()
+                );
+            }
+        }
+        // The right strip has the addition; the left one has nothing (it is only in the right).
+        assert_eq!(overview.points(Side::Right).len(), 1);
+        assert!(overview.points(Side::Left).is_empty());
+        let right_extent = overview.extent(Side::Right);
+        let point = overview.points(Side::Right)[0];
+        let want = right_extent.fraction(result.changes[0].anchor.1);
+        assert_eq!(point.fraction, want);
+        // A view that is not laid out does not move.
+        let mut fresh = DiffTab::new(
+            side_tab(DocId::for_test(1), PathBuf::from("/refdesk-test/a.pdf")),
+            side_tab(DocId::for_test(2), PathBuf::from("/refdesk-test/b.pdf")),
+        );
+        assert!(!center_on(&mut fresh.left, Location::new(0, 0.0, 100.0)));
+    }
+
+    #[test]
+    fn copying_in_a_comparison_tab_takes_the_text_of_the_side_in_use() {
+        use refdesk_core::{Selection, TextPos};
+        let left = paragraphs(6, "p");
+        let right = paragraphs(6, "q");
+        let mut fx = compare(&left, &right);
+        fx.result();
+        let tab = fx.tab;
+        let find = |id: &str| commands::command(id).expect("command");
+        let select = |fx: &mut Fixture, side: Side| {
+            fx.diff_mut()
+                .side_mut(side)
+                .ui
+                .selection
+                .set_for_test(Selection {
+                    anchor: TextPos { page: 0, ch: 0 },
+                    focus: TextPos { page: 0, ch: 14 },
+                });
+        };
+        assert!(!(find("edit.copy").enabled)(&fx.state), "nothing selected");
+
+        // Selected on the right while the left is in use: nothing to copy.
+        select(&mut fx, Side::Right);
+        fx.diff_mut().active = Side::Left;
+        assert!(!(find("edit.copy").enabled)(&fx.state));
+        fx.diff_mut().active = Side::Right;
+        assert!((find("edit.copy").enabled)(&fx.state));
+        assert_eq!(
+            find("edit.copy").run(&fx.state),
+            Some(Action::CopySelection(tab))
+        );
+
+        // The copy goes through a worker when the text is not extracted yet: wait for it.
+        fx.dispatch(Action::CopySelection(tab));
+        let copied = copied_text(&mut fx);
+        assert!(copied.contains("q0"), "{copied:?}");
+        assert!(!copied.contains("p0"), "{copied:?}");
+
+        // The same selection on the left, in use now, copies the left text.
+        select(&mut fx, Side::Left);
+        fx.diff_mut().active = Side::Left;
+        fx.dispatch(Action::CopySelection(tab));
+        let copied = copied_text(&mut fx);
+        assert!(copied.contains("p0"), "{copied:?}");
+        assert!(!copied.contains("q0"), "{copied:?}");
+    }
+
+    /// Runs frames until the platform is asked to copy some text, and returns it.
+    fn copied_text(fx: &mut Fixture) -> String {
+        let mut text = None;
+        let ctx = fx.ctx.clone();
+        fx.repaints.wait_until("the copied text", || {
+            let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            for command in &output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(t) = command {
+                    text = Some(t.clone());
+                }
+            }
+            output.drop_without_applying_deltas();
+            text.is_some()
+        });
+        text.unwrap_or_default()
+    }
+
+    #[test]
+    fn the_changes_command_belongs_to_comparison_tabs() {
+        let find = |id: &str| commands::command(id).expect("command");
+        let toggle = find("diff.toggle_changes");
+        assert_eq!(toggle.menu, commands::MenuGroup::View);
+        assert_eq!(
+            toggle.shortcut,
+            Some(egui::KeyboardShortcut::new(
+                egui::Modifiers::NONE,
+                egui::Key::F8
+            ))
+        );
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        assert!(!(toggle.enabled)(&state), "no tab");
+        assert_eq!(toggle.run(&state), None);
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![refdesk_core::OpenTarget::parse("/refdesk-test/a.pdf")]),
+            &ctx,
+        );
+        assert!(!(toggle.enabled)(&state), "a pdf tab");
+        assert_eq!(toggle.run(&state), None);
+
+        let (left, right) = inserted_pair();
+        let fx = compare(&left, &right);
+        // Usable even while the comparison still runs.
+        assert!((toggle.enabled)(&fx.state));
+        assert_eq!(
+            toggle.run(&fx.state),
+            Some(Action::ToggleChangesPanel(fx.tab))
+        );
     }
 }

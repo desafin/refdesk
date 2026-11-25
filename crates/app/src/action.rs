@@ -59,7 +59,8 @@ pub enum Action {
         /// The new zoom.
         zoom: ZoomMode,
     },
-    /// Copy the selected text of a PDF tab to the clipboard (SEL-2).
+    /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
+    /// clipboard (SEL-2).
     CopySelection(TabId),
     /// Compare two documents in a new comparison tab of the focused pane (DIFF-1).
     StartDiff {
@@ -87,6 +88,16 @@ pub enum Action {
     NextChange(TabId),
     /// Move both views of a comparison tab to the previous change (DIFF-5).
     PrevChange(TabId),
+    /// Move both views of a comparison tab to change `index` and make it the current one (a
+    /// click in the change list, DIFF-5).
+    GoToChange {
+        /// The comparison tab.
+        tab: TabId,
+        /// Index into `DiffResult::changes`.
+        index: usize,
+    },
+    /// Show or hide the change list of a comparison tab (DIFF-5).
+    ToggleChangesPanel(TabId),
     /// Open the page number field of the status bar for a PDF tab.
     ShowGoToPage(TabId),
     /// Open the palette with this list, or close it when it already shows it (CMD-1, CMD-2).
@@ -238,8 +249,29 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 diff.swap(&state.docs, notifier(ctx));
             }
         }
-        Action::NextChange(tab) => go_to_change(state, tab, true),
-        Action::PrevChange(tab) => go_to_change(state, tab, false),
+        Action::NextChange(tab) => {
+            go_to_change(state, tab, true);
+            // The change list follows the current change on the next frame.
+            ctx.request_repaint();
+        }
+        Action::PrevChange(tab) => {
+            go_to_change(state, tab, false);
+            ctx.request_repaint();
+        }
+        Action::GoToChange { tab, index } => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab)
+                && let Some(result) = diff.fresh_result(&state.docs)
+            {
+                diff.move_to_change(&result, index);
+            }
+            ctx.request_repaint();
+        }
+        Action::ToggleChangesPanel(tab) => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+                diff.changes.open = !diff.changes.open;
+            }
+            ctx.request_repaint();
+        }
         Action::ShowGoToPage(tab) => {
             if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
                 pdf.ui.goto = Some(GotoInput::default());
@@ -530,9 +562,16 @@ fn mark_arrival(state: &mut AppState, tab: TabId, loc: Location) {
 /// Copies the selected text of a PDF tab. Does nothing without a selection.
 fn copy_selection(state: &mut AppState, tab: TabId, ctx: &egui::Context) {
     let AppState { docs, tabs, .. } = state;
-    if let Some(Tab::Pdf(pdf)) = tabs.get_mut(tab)
-        && let Some(doc) = docs.get(pdf.doc)
-    {
+    // A comparison tab copies from the side in use.
+    let pdf = match tabs.get_mut(tab) {
+        Some(Tab::Pdf(pdf)) => pdf,
+        Some(Tab::Diff(diff)) => {
+            let side = diff.active;
+            diff.side_mut(side)
+        }
+        _ => return,
+    };
+    if let Some(doc) = docs.get(pdf.doc) {
         crate::views::pdf_view::copy_selection(ctx, doc, &mut pdf.ui);
     }
 }

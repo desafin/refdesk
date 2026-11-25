@@ -97,6 +97,7 @@ pub const TABLE: &[Row] = &[
     ("cmd.diff.start", "문서 비교…", "Compare Documents…"),
     ("cmd.diff.next_change", "다음 변경", "Next Change"),
     ("cmd.diff.prev_change", "이전 변경", "Previous Change"),
+    ("cmd.diff.toggle_changes", "변경 목록 패널", "Change List"),
     ("toc.title", "목차", "Contents"),
     ("toc.filter_hint", "목차 필터", "Filter contents"),
     (
@@ -259,6 +260,34 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "diff.last_change",
         "마지막 변경입니다",
         "This is the last change",
+    ),
+    ("changes.title", "변경 목록", "Changes"),
+    ("changes.kind_added", "추가", "Added"),
+    ("changes.kind_removed", "삭제", "Removed"),
+    ("changes.kind_modified", "변경", "Changed"),
+    (
+        "changes.filter_hint",
+        "이 종류를 목록에서 보이거나 숨깁니다",
+        "Show or hide this kind in the list",
+    ),
+    ("changes.start", "문서 처음", "Start of document"),
+    ("changes.page", "{n}쪽", "p. {n}"),
+    (
+        "changes.page_both",
+        "이전 {left}쪽 → 이후 {right}쪽",
+        "old p. {left} → new p. {right}",
+    ),
+    ("changes.tip_left", "이전", "Old"),
+    ("changes.tip_right", "이후", "New"),
+    (
+        "changes.all_hidden",
+        "표시할 종류가 모두 꺼져 있습니다",
+        "Every kind is switched off",
+    ),
+    (
+        "changes.no_result",
+        "비교 결과가 없습니다",
+        "There is no comparison result",
     ),
     ("diff.compare_with", "다른 문서와 비교", "Compare With"),
     (

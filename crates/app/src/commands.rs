@@ -129,6 +129,11 @@ fn has_diff_changes(state: &AppState) -> bool {
     })
 }
 
+/// The focused tab is a comparison tab.
+fn has_diff_focus(state: &AppState) -> bool {
+    state.focused_diff().is_some()
+}
+
 /// The focused pane has more than one tab.
 fn has_several_tabs(state: &AppState) -> bool {
     let dock = &state.focused_window().dock;
@@ -141,11 +146,14 @@ fn has_several_panes(state: &AppState) -> bool {
     state.focused_window().dock.pane_count() > 1
 }
 
-/// The focused PDF view has selected text.
+/// The focused PDF view (the side in use of a comparison tab) has selected text.
 fn has_selection(state: &AppState) -> bool {
-    state
-        .focused_pdf()
-        .is_some_and(|(_, pdf)| pdf.ui.has_selection())
+    match state.focus.and_then(|id| state.tabs.get(id)) {
+        Some(Tab::Pdf(pdf)) => pdf.ui.has_selection(),
+        // A comparison tab copies from the side in use.
+        Some(Tab::Diff(diff)) => diff.side(diff.active).ui.has_selection(),
+        _ => false,
+    }
 }
 
 /// The focused PDF view has an earlier history entry.
@@ -362,6 +370,15 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_diff_changes,
         action: |s| s.focus.map(Action::PrevChange),
+    },
+    Command {
+        id: "diff.toggle_changes",
+        name_key: "cmd.diff.toggle_changes",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F8)),
+        aliases: &[],
+        enabled: has_diff_focus,
+        action: |s| s.focus.map(Action::ToggleChangesPanel),
     },
     Command {
         id: "tab.next",
@@ -914,6 +931,10 @@ mod tests {
         let menu: Vec<&str> = in_menu(MenuGroup::View).map(|c| c.id).collect();
         for (id, shortcut) in [
             ("diff.start", None),
+            (
+                "diff.toggle_changes",
+                Some(KeyboardShortcut::new(Modifiers::NONE, Key::F8)),
+            ),
             (
                 "diff.next_change",
                 Some(KeyboardShortcut::new(Modifiers::NONE, Key::F7)),
