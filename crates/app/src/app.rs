@@ -16,7 +16,7 @@ use crate::commands::{self, MenuGroup};
 use crate::i18n::tr;
 use crate::state::AppState;
 use crate::theme;
-use crate::views::textures;
+use crate::views::{preload, textures};
 use crate::windows;
 
 /// The application.
@@ -63,6 +63,8 @@ impl eframe::App for RefdeskApp {
         }
         // WP-15: upload finished renders; drop textures of closed documents.
         textures::collect_rendered(ctx, &self.state.docs, &mut self.state.textures);
+        // WP-17: render every page's preview in the background.
+        preload::step(ctx, &mut self.state);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {

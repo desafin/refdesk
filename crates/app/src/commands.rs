@@ -343,6 +343,31 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
     },
 ];
 
+/// The command with this identifier.
+pub fn command(id: &str) -> Option<&'static Command> {
+    COMMANDS.iter().find(|c| c.id == id)
+}
+
+/// The zoom factors, in percent, offered by the zoom menu of the status bar (VIEW-11).
+pub const ZOOM_PRESETS: &[u32] = &[50, 75, 100, 125, 150, 200, 400];
+
+/// The command of the table that sets exactly this zoom preset, if there is one; the zoom menu
+/// runs it and shows its shortcut.
+pub fn preset_command(percent: u32) -> Option<&'static Command> {
+    match percent {
+        100 => command("view.zoom_reset"),
+        _ => None,
+    }
+}
+
+/// Choosing a zoom preset (in percent) for the focused view.
+pub fn zoom_preset(state: &AppState, percent: u32) -> Option<Action> {
+    if !has_pdf_focus(state) {
+        return None;
+    }
+    set_zoom(state, ZoomMode::Custom(percent as f32 / 100.0))
+}
+
 /// The commands listed in a menu, in table order.
 pub fn in_menu(group: MenuGroup) -> impl Iterator<Item = &'static Command> {
     COMMANDS.iter().filter(move |c| c.menu == group)

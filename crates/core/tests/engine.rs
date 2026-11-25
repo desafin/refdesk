@@ -740,3 +740,37 @@ fn page_labels_are_read() {
     let info = doc.ready();
     assert_eq!(info.page_labels, vec!["i", "ii", "A-1"]);
 }
+
+#[test]
+fn failed_renders_are_reported_until_reload() {
+    let pdf = pages_with_text(2);
+    let doc = Doc::open_with(pdf.path(), no_expiry());
+    doc.ready();
+    // 612 x 792 pt at 200x is far beyond the per-render pixel limit: this render always fails.
+    let bad = key(0, 200_000, 0);
+    let good = key(1, 1000, 0);
+    assert!(!doc.handle.render_failed(bad), "nothing was requested yet");
+
+    doc.handle.request_render(bad, Priority::Visible);
+    doc.handle.request_render(good, Priority::Visible);
+    doc.collect_until(|g| g.iter().any(|r| r.key == good));
+    // A failed render does not notify. Blocking jobs are served only after every pending
+    // Visible render, so once this returns the failure has been recorded.
+    doc.handle.render_wait(key(1, 500, 0)).unwrap();
+    assert!(doc.handle.render_failed(bad));
+    assert!(!doc.handle.render_failed(good));
+    // Pages past the end are ignored, not rendered, so they never count as failed.
+    let past_end = key(9, 1000, 0);
+    doc.handle.request_render(past_end, Priority::Visible);
+    doc.handle.render_wait(key(1, 500, 0)).unwrap();
+    assert!(!doc.handle.render_failed(past_end));
+
+    doc.handle.reload();
+    doc.wait_for("generation 1", |h| h.info().filter(|i| i.generation == 1));
+    assert!(!doc.handle.render_failed(bad), "a reload forgets failures");
+    let bad_now = key(0, 200_000, 1);
+    assert!(!doc.handle.render_failed(bad_now));
+    doc.handle.request_render(bad_now, Priority::Visible);
+    doc.handle.render_wait(key(1, 500, 1)).unwrap();
+    assert!(doc.handle.render_failed(bad_now));
+}

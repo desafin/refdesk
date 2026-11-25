@@ -9,6 +9,7 @@ use refdesk_core::{DocumentHandle, ViewState};
 
 use crate::action::Action;
 use crate::views::pdf_view::PdfViewUiState;
+use crate::views::preload::Preloader;
 use crate::views::textures::TextureCache;
 use crate::windows::dock::DockLayout;
 
@@ -172,6 +173,11 @@ impl TabStore {
         }
     }
 
+    /// Every tab, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (TabId, &Tab)> {
+        self.tabs.iter().map(|(id, tab)| (*id, tab))
+    }
+
     /// Removes and returns a tab.
     pub fn remove(&mut self, id: TabId) -> Option<Tab> {
         self.tabs.remove(&id)
@@ -225,6 +231,8 @@ pub struct AppState {
     pub focus: Option<TabId>,
     /// Textures of rendered pages, shared by all views and windows.
     pub textures: TextureCache,
+    /// Background rendering of every page's preview (WP-17).
+    pub preload: Preloader,
     /// Actions collected during this frame.
     pub actions: Vec<Action>,
     /// Set by `dispatch` when the file dialog should be opened; the app starts it on the next
@@ -259,6 +267,7 @@ impl AppState {
             windows: vec![window],
             focus: Some(start),
             textures: TextureCache::default(),
+            preload: Preloader::default(),
             actions: Vec::new(),
             file_dialog_requested: false,
             closed_tabs: Vec::new(),

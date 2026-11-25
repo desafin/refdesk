@@ -1,6 +1,7 @@
-//! Tab contents: the PDF view and the texture cache it draws from.
+//! Tab contents: the PDF view, the texture cache it draws from and the page preloader.
 
 pub mod pdf_view;
+pub mod preload;
 pub mod textures;
 
 /// Helpers for tests that wait on document workers without sleeping.

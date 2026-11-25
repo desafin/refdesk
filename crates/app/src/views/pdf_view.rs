@@ -32,10 +32,17 @@ use crate::views::textures::{Pick, TextureCache};
 pub const PAGE_GAP: f32 = 8.0;
 /// Space around the document, in logical pixels.
 pub const MARGIN: f32 = 12.0;
-/// Pages before and after the visible ones that are rendered ahead of time.
-pub const PREFETCH_PAGES: u32 = 2;
+/// Pages before and after the visible ones that are rendered sharp ahead of time while the view
+/// stands still.
+pub const PREFETCH_STILL: u32 = 6;
+/// While scrolling: pages rendered ahead in the direction of the scroll...
+pub const PREFETCH_AHEAD: u32 = 10;
+/// ...and behind it.
+pub const PREFETCH_BEHIND: u32 = 3;
 /// A zoom gesture counts as finished this long after its last change.
 pub const ZOOM_SETTLE_SECS: f64 = 0.08;
+/// The view counts as scrolling until this long after the scroll offset last changed.
+pub const SCROLL_SETTLE_SECS: f64 = 0.3;
 /// Thickness of the scroll bars.
 const SCROLLBAR: f32 = 12.0;
 /// Shortest scroll bar thumb.
@@ -87,6 +94,58 @@ impl ZoomGesture {
     }
 }
 
+/// Which way the view is moving, for choosing the pages rendered ahead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollMotion {
+    /// Not scrolling.
+    #[default]
+    Still,
+    /// Scrolling towards the end of the document.
+    Down,
+    /// Scrolling towards the start of the document.
+    Up,
+}
+
+/// Tracks vertical scrolling from one frame to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollTracker {
+    last_y: Option<f32>,
+    direction: ScrollMotion,
+    last_change: Option<f64>,
+}
+
+impl ScrollTracker {
+    /// Records the vertical scroll offset of a frame at time `now` (seconds).
+    pub fn note(&mut self, y: f32, now: f64) {
+        if let Some(last) = self.last_y
+            && y != last
+        {
+            self.direction = if y > last {
+                ScrollMotion::Down
+            } else {
+                ScrollMotion::Up
+            };
+            self.last_change = Some(now);
+        }
+        self.last_y = Some(y);
+    }
+
+    /// The motion at time `now`: the last direction within [`SCROLL_SETTLE_SECS`] of the last
+    /// change, else still.
+    pub fn motion(&self, now: f64) -> ScrollMotion {
+        match self.remaining(now) {
+            Some(_) => self.direction,
+            None => ScrollMotion::Still,
+        }
+    }
+
+    /// Time until the view counts as still; `None` when it already does.
+    pub fn remaining(&self, now: f64) -> Option<Duration> {
+        let left = SCROLL_SETTLE_SECS - (now - self.last_change?);
+        (left > 0.0).then(|| Duration::from_secs_f64(left))
+    }
+}
+
 /// The unsaved state of one PDF view.
 #[derive(Clone, Debug, Default)]
 pub struct PdfViewUiState {
@@ -100,6 +159,8 @@ pub struct PdfViewUiState {
     fit_page: u32,
     /// The ongoing zoom gesture.
     pub zoom_gesture: ZoomGesture,
+    /// Recent scrolling, for the pages rendered ahead. Boxed to keep tabs small.
+    pub scroll_motion: Box<ScrollTracker>,
     /// The page across the vertical middle of the viewport, as of the last frame.
     pub current_page: Option<u32>,
     /// The actual zoom factor (1.0 = 100%) as of the last frame; it differs from the zoom mode
@@ -276,8 +337,9 @@ impl PdfViewUiState {
         }
     }
 
-    /// The renders to request this frame: visible pages, then the neighbors, skipping pages
-    /// whose exact texture is there. Nothing while a zoom gesture lasts.
+    /// The renders to request this frame, most important first: visible pages, then the
+    /// neighbors (see [`plan_pages`]), skipping pages whose exact texture is there. Nothing while
+    /// a zoom gesture lasts.
     pub fn frame_requests(
         &self,
         generation: u32,
@@ -291,11 +353,14 @@ impl PdfViewUiState {
         if self.zoom_gesture.in_progress(now) {
             return Vec::new();
         }
-        let keys: Vec<(RenderKey, Priority)> =
-            plan_pages(self.visible_pages(), g.layout.page_count())
-                .into_iter()
-                .filter_map(|(page, prio)| Some((self.render_key(page, generation, pixels)?, prio)))
-                .collect();
+        let keys: Vec<(RenderKey, Priority)> = plan_pages(
+            self.visible_pages(),
+            g.layout.page_count(),
+            self.scroll_motion.motion(now),
+        )
+        .into_iter()
+        .filter_map(|(page, prio)| Some((self.render_key(page, generation, pixels)?, prio)))
+        .collect();
         keys.into_iter().filter(|(k, _)| !has_exact(*k)).collect()
     }
 }
@@ -343,15 +408,36 @@ pub fn render_scale_milli(layout_scale: f32, page_pt: Size, pixels: PixelInfo) -
     ((scale * 1000.0).round() as u32).max(1)
 }
 
-/// Which pages to request: the visible ones at `Visible`, then up to [`PREFETCH_PAGES`] on each
-/// side at `Prefetch`, never past the ends of the document.
-pub fn plan_pages(visible: Range<u32>, page_count: u32) -> Vec<(u32, Priority)> {
+/// Which pages to request, most important first: the visible ones at `Visible`, then their
+/// neighbors at `Prefetch`, nearest first (on a tie the one ahead). Standing still that is
+/// [`PREFETCH_STILL`] pages on each side; scrolling, [`PREFETCH_AHEAD`] in the direction of the
+/// scroll and [`PREFETCH_BEHIND`] the other way. Never past the ends of the document.
+pub fn plan_pages(
+    visible: Range<u32>,
+    page_count: u32,
+    motion: ScrollMotion,
+) -> Vec<(u32, Priority)> {
     let start = visible.start.min(page_count);
     let end = visible.end.min(page_count).max(start);
     let mut out: Vec<(u32, Priority)> = (start..end).map(|p| (p, Priority::Visible)).collect();
-    let after = end..end.saturating_add(PREFETCH_PAGES).min(page_count);
-    let before = start.saturating_sub(PREFETCH_PAGES)..start;
-    out.extend(after.chain(before.rev()).map(|p| (p, Priority::Prefetch)));
+    let (after_n, before_n) = match motion {
+        ScrollMotion::Still => (PREFETCH_STILL, PREFETCH_STILL),
+        ScrollMotion::Down => (PREFETCH_AHEAD, PREFETCH_BEHIND),
+        ScrollMotion::Up => (PREFETCH_BEHIND, PREFETCH_AHEAD),
+    };
+    let after = |d: u32| {
+        (d <= after_n)
+            .then(|| end + d - 1)
+            .filter(|p| *p < page_count)
+    };
+    let before = |d: u32| (d <= before_n).then(|| start.checked_sub(d)).flatten();
+    for d in 1..=after_n.max(before_n) {
+        let pair = match motion {
+            ScrollMotion::Up => [before(d), after(d)],
+            _ => [after(d), before(d)],
+        };
+        out.extend(pair.into_iter().flatten().map(|p| (p, Priority::Prefetch)));
+    }
     out
 }
 
@@ -583,18 +669,30 @@ fn show_document(
         }
     }
     scroll_bars(ui, id, outer, view_rect, state);
+    state.scroll_motion.note(state.scroll().y, now);
     state.commit(&mut tab.view);
 
     let pixels = PixelInfo {
         pixels_per_point: ui.ctx().pixels_per_point(),
         max_texture_side: ui.input(|i| i.max_texture_side),
     };
-    for (key, prio) in state.frame_requests(info.generation, pixels, now, |k| {
+    let requests = state.frame_requests(info.generation, pixels, now, |k| {
         cx.textures.contains(tab.doc, k)
-    }) {
+    });
+    // Within one priority the engine serves the most recent request first: the most important
+    // page is requested last.
+    for (key, prio) in requests.into_iter().rev() {
         doc.request_render(key, prio);
     }
-    if let Some(left) = state.zoom_gesture.remaining(now) {
+    // Run a frame when the zoom gesture or the scrolling counts as finished, so the requests
+    // for that state go out.
+    for left in [
+        state.zoom_gesture.remaining(now),
+        state.scroll_motion.remaining(now),
+    ]
+    .into_iter()
+    .flatten()
+    {
         ui.ctx().request_repaint_after(left);
     }
 
@@ -805,63 +903,111 @@ mod tests {
         (a - b).abs() < 0.01
     }
 
+    fn prefetched(plan: &[(u32, Priority)]) -> Vec<u32> {
+        plan.iter()
+            .filter(|(_, p)| *p == Priority::Prefetch)
+            .map(|(page, _)| *page)
+            .collect()
+    }
+
+    fn visible(plan: &[(u32, Priority)]) -> Vec<u32> {
+        plan.iter()
+            .filter(|(_, p)| *p == Priority::Visible)
+            .map(|(page, _)| *page)
+            .collect()
+    }
+
     #[test]
-    fn plan_requests_visible_then_two_neighbors_each_side() {
+    fn standing_still_prefetches_six_pages_each_side_nearest_first() {
+        let plan = plan_pages(50..52, 100, ScrollMotion::Still);
+        assert_eq!(visible(&plan), vec![50, 51]);
         assert_eq!(
-            plan_pages(5..7, 100),
-            vec![
-                (5, Priority::Visible),
-                (6, Priority::Visible),
-                (7, Priority::Prefetch),
-                (8, Priority::Prefetch),
-                (4, Priority::Prefetch),
-                (3, Priority::Prefetch),
-            ]
+            prefetched(&plan),
+            vec![52, 49, 53, 48, 54, 47, 55, 46, 56, 45, 57, 44]
+        );
+        // Visible pages come first in the list.
+        assert!(plan[..2].iter().all(|(_, p)| *p == Priority::Visible));
+    }
+
+    #[test]
+    fn scrolling_down_prefetches_ten_ahead_and_three_behind() {
+        let plan = plan_pages(50..52, 100, ScrollMotion::Down);
+        assert_eq!(visible(&plan), vec![50, 51]);
+        assert_eq!(
+            prefetched(&plan),
+            vec![52, 49, 53, 48, 54, 47, 55, 56, 57, 58, 59, 60, 61]
+        );
+    }
+
+    #[test]
+    fn scrolling_up_prefetches_ten_above_and_three_below() {
+        let plan = plan_pages(50..52, 100, ScrollMotion::Up);
+        assert_eq!(
+            prefetched(&plan),
+            vec![49, 52, 48, 53, 47, 54, 46, 45, 44, 43, 42, 41, 40]
         );
     }
 
     #[test]
     fn plan_requests_stay_inside_the_document() {
         assert_eq!(
-            plan_pages(0..1, 2),
-            vec![(0, Priority::Visible), (1, Priority::Prefetch)]
-        );
-        assert_eq!(
-            plan_pages(9..10, 10),
+            plan_pages(0..1, 3, ScrollMotion::Still),
             vec![
-                (9, Priority::Visible),
-                (8, Priority::Prefetch),
-                (7, Priority::Prefetch)
+                (0, Priority::Visible),
+                (1, Priority::Prefetch),
+                (2, Priority::Prefetch)
             ]
         );
-        assert!(plan_pages(0..0, 0).is_empty());
+        let at_end = plan_pages(9..10, 10, ScrollMotion::Down);
+        assert_eq!(visible(&at_end), vec![9]);
+        assert_eq!(prefetched(&at_end), vec![8, 7, 6]);
+        let at_start = plan_pages(0..2, 100, ScrollMotion::Up);
+        assert_eq!(prefetched(&at_start), vec![2, 3, 4]);
+        assert!(plan_pages(0..0, 0, ScrollMotion::Still).is_empty());
         // Only a gap visible: the neighbors are still prefetched.
+        let gap = plan_pages(3..3, 10, ScrollMotion::Still);
+        assert!(visible(&gap).is_empty());
+        assert_eq!(prefetched(&gap), vec![3, 2, 4, 1, 5, 0, 6, 7, 8]);
+        // A visible range past the end is cut to the document.
         assert_eq!(
-            plan_pages(3..3, 10)
-                .iter()
-                .filter(|(_, p)| *p == Priority::Visible)
-                .count(),
-            0
+            visible(&plan_pages(8..20, 10, ScrollMotion::Still)),
+            vec![8, 9]
         );
-        assert_eq!(plan_pages(3..3, 10).len(), 4);
+    }
+
+    #[test]
+    fn scroll_tracker_reports_the_direction_until_scrolling_settles() {
+        let mut t = ScrollTracker::default();
+        t.note(100.0, 1.0);
+        assert_eq!(
+            t.motion(1.0),
+            ScrollMotion::Still,
+            "a first value is no motion"
+        );
+        t.note(150.0, 1.1);
+        assert_eq!(t.motion(1.1), ScrollMotion::Down);
+        assert_eq!(t.motion(1.39), ScrollMotion::Down);
+        assert!(t.remaining(1.39).is_some());
+        // Standing still for the settle time.
+        t.note(150.0, 1.2);
+        assert_eq!(t.motion(1.41), ScrollMotion::Still);
+        assert_eq!(t.remaining(1.41), None);
+        t.note(120.0, 2.0);
+        assert_eq!(t.motion(2.0), ScrollMotion::Up);
     }
 
     #[test]
     fn frame_requests_skip_pages_with_an_exact_texture() {
         let (s, _, _) = synced(10, ZoomMode::Custom(1.0));
         let all = s.frame_requests(0, pixels(), 10.0, |_| false);
-        let visible: Vec<u32> = all
-            .iter()
-            .filter(|(_, p)| *p == Priority::Visible)
-            .map(|(k, _)| k.page)
-            .collect();
-        assert_eq!(visible, vec![0]);
-        assert_eq!(all.len(), 3, "page 0 visible, 1 and 2 prefetched");
+        let pages: Vec<(u32, Priority)> = all.iter().map(|(k, p)| (k.page, *p)).collect();
+        assert_eq!(visible(&pages), vec![0]);
+        assert_eq!(prefetched(&pages), vec![1, 2, 3, 4, 5, 6]);
         assert!(all.iter().all(|(k, _)| k.scale_milli == 1333));
 
         let without_first = s.frame_requests(0, pixels(), 10.0, |k| k.page == 0);
         assert!(without_first.iter().all(|(k, _)| k.page != 0));
-        assert_eq!(without_first.len(), 2);
+        assert_eq!(without_first.len(), 6);
     }
 
     #[test]
@@ -1148,6 +1294,7 @@ mod widget_tests {
     use crate::action::{OpenTarget, dispatch, dispatch_queued};
     use crate::panels::status_bar;
     use crate::state::{AppState, Tab};
+    use crate::views::preload;
     use crate::views::test_support::{Repaints, TIMEOUT, watch_repaints};
     use crate::views::textures::collect_rendered;
     use refdesk_core::testutil::{PdfBuilder, TempPdf};
@@ -1193,6 +1340,7 @@ mod widget_tests {
                 ..Default::default()
             };
             collect_rendered(&self.ctx, &self.state.docs, &mut self.state.textures);
+            preload::step(&self.ctx, &mut self.state);
             let state = &mut self.state;
             let mut queue = Vec::new();
             self.ctx
@@ -1208,7 +1356,7 @@ mod widget_tests {
         }
 
         /// Runs frames until `check` holds, waiting for a repaint request between frames.
-        fn frames_until(&mut self, what: &str, check: impl Fn(&Harness) -> bool) {
+        fn frames_until(&mut self, what: &str, mut check: impl FnMut(&Harness) -> bool) {
             let deadline = Instant::now() + TIMEOUT;
             loop {
                 self.frame(Vec::new());
@@ -1246,6 +1394,18 @@ mod widget_tests {
             let doc = self.tab(tab).doc;
             let keys = self.wanted_keys(tab);
             !keys.is_empty() && keys.iter().all(|k| self.state.textures.contains(doc, *k))
+        }
+
+        /// Whether every page of the document of `tab` has its preview texture.
+        fn all_previews(&self, tab: TabId) -> bool {
+            let doc = self.tab(tab).doc;
+            let count = self
+                .state
+                .docs
+                .get(doc)
+                .and_then(|d| d.info())
+                .map_or(0, |i| i.page_sizes.len());
+            count > 0 && self.state.textures.preview_count(doc) == count
         }
 
         /// Every visible page has some texture (exact or another scale) to draw.
@@ -1392,6 +1552,123 @@ mod widget_tests {
         assert!(pdf.ui.effective_zoom.expect("zoom") > before_zoom);
         // After the gesture the new scale arrives.
         h.frames_until("the new scale", |h| h.all_visible_rendered(tab));
+    }
+
+    #[test]
+    fn every_page_gets_a_preview_without_scrolling_and_the_last_page_is_never_blank() {
+        let pdf = document(40, "view-preload");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("all 40 previews", |h| h.all_previews(tab));
+        let doc = h.tab(tab).doc;
+        assert_eq!(h.tab(tab).view.anchor.page, 0, "nothing scrolled");
+        assert_eq!(h.state.textures.preview_count(doc), 40);
+        assert!(h.state.textures.preview_bytes() > 0);
+        // Finished: the status bar has nothing to show.
+        assert_eq!(h.state.preload.progress(doc), None);
+
+        // Jump to the end: in that very first frame the page already has a texture.
+        let press = egui::Event::Key {
+            key: Key::End,
+            physical_key: Some(Key::End),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![press]);
+        assert_eq!(h.tab(tab).ui.visible_pages().end, 40);
+        assert!(h.no_blank_pages(tab));
+        assert!(!h.wanted_keys(tab).is_empty());
+    }
+
+    #[test]
+    fn previews_fill_for_a_document_that_is_not_shown_and_go_when_it_closes() {
+        let hidden_pdf = document(12, "view-preload-hidden");
+        let shown_pdf = document(5, "view-preload-shown");
+        let mut h = Harness::new();
+        let hidden = h.open(hidden_pdf.path());
+        let shown = h.open(shown_pdf.path());
+        assert_eq!(h.state.main_window().dock.focused_tab(), Some(shown));
+        h.frames_until("the hidden document's previews", |h| {
+            h.all_previews(hidden) && h.all_previews(shown)
+        });
+        let hidden_doc = h.tab(hidden).doc;
+        assert_eq!(h.state.textures.preview_count(hidden_doc), 12);
+        // The hidden tab was never drawn.
+        assert!(h.tab(hidden).ui.layout().is_none());
+
+        let before = h.state.textures.preview_bytes();
+        h.state.actions.push(Action::CloseTab(hidden));
+        let ctx = h.ctx.clone();
+        dispatch_queued(&mut h.state, &ctx);
+        h.frame(Vec::new());
+        assert_eq!(h.state.textures.preview_count(hidden_doc), 0);
+        assert!(h.state.textures.preview_bytes() < before);
+        assert_eq!(h.state.preload.progress(hidden_doc), None);
+        let shown_doc = h.tab(shown).doc;
+        assert_eq!(h.state.textures.preview_count(shown_doc), 5);
+    }
+
+    #[test]
+    fn pages_that_come_into_view_while_zooming_out_are_not_blank() {
+        // Small pages, so that zooming out brings many of them into view.
+        let mut b = PdfBuilder::new();
+        for i in 0..40 {
+            b = b.page(100.0, 140.0, |p| {
+                p.text(10.0, 30.0, 12.0, &format!("P{}", i + 1));
+            });
+        }
+        let pdf = b.write_temp("view-preload-zoom-out");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("all previews", |h| h.all_previews(tab));
+        let before = h.tab(tab).ui.visible_pages();
+        // Zoom out in one gesture: many more pages become visible, none rendered sharp yet.
+        for _ in 0..10 {
+            h.frame(wheel(
+                vec2(0.0, -150.0),
+                pos2(400.0, 300.0),
+                Modifiers::CTRL,
+            ));
+            assert!(h.no_blank_pages(tab));
+            if h.tab(tab).ui.visible_pages().end > 1 + PREFETCH_STILL {
+                break;
+            }
+        }
+        // Still within the gesture: no sharp render at the new scale was asked for yet.
+        assert!(h.tab(tab).ui.zoom_gesture.in_progress(h.time));
+        let after = h.tab(tab).ui.visible_pages();
+        // Past the sharp pages rendered ahead around the first screen (0..=6): only previews
+        // can cover these.
+        assert!(after.end > 1 + PREFETCH_STILL, "{after:?}");
+        assert!(
+            after.len() > before.len() + 2,
+            "{before:?} -> {after:?}: more pages are visible"
+        );
+    }
+
+    #[test]
+    fn preload_progress_is_reported_while_it_runs() {
+        let pdf = document(30, "view-preload-progress");
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the document", |h| h.tab(tab).ui.layout().is_some());
+        let doc = h.tab(tab).doc;
+        // Progress only counts up and ends at 30 / 30, then disappears. It is seen at least
+        // once: 30 previews take several frames to upload.
+        let mut last = 0;
+        let mut seen = false;
+        h.frames_until("the preload", |h| match h.state.preload.progress(doc) {
+            Some(p) => {
+                assert_eq!(p.total, 30);
+                assert!(p.done >= last && p.done < 30);
+                last = p.done;
+                seen = true;
+                false
+            }
+            None => h.all_previews(tab),
+        });
+        assert!(seen, "the progress was reported");
     }
 
     #[test]

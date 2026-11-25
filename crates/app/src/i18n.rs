@@ -146,6 +146,17 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "Page {page} of {count}",
     ),
     ("status.goto", "이동할 쪽:", "Go to page:"),
+    (
+        "status.preloading",
+        "미리 불러오는 중 {done} / {total}",
+        "Preloading {done} / {total}",
+    ),
+    ("status.zoom_choose", "배율 고르기", "Choose the zoom"),
+    (
+        "status.zoom_hint",
+        "Ctrl+휠로도 확대·축소할 수 있습니다",
+        "Ctrl+wheel zooms too",
+    ),
     ("doc.password_submit", "열기", "Open"),
     (
         "doc.password_wrong",

@@ -185,6 +185,7 @@ impl DocumentHandle {
     // UI 스레드용. 절대 블록하지 않는다.
     pub fn request_render(&self, key: RenderKey, prio: Priority);
     pub fn poll_rendered(&self) -> Vec<RenderedPage>;                 // 완료된 것을 꺼내 감
+    pub fn render_failed(&self, key: RenderKey) -> bool;              // 이 세대에서 그 키의 렌더가 실패했는가(다시 시도되지 않음)
     pub fn page_text(&self, page: u32) -> Option<Arc<PageText>>;      // 없으면 요청을 걸어 두고 None
     pub fn page_links(&self, page: u32) -> Option<Arc<[Link]>>;
 
@@ -610,8 +611,9 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 1. `doc.info()` 가 없으면 상태(`Loading`/`Failed`/`NeedsPassword`)를 그리고 끝.
 2. `PageLayout::new` 로 배치 계산. 스크롤 위치는 `content_pos(view.anchor)`.
 3. 입력 처리: 스크롤, Ctrl+휠 줌(커서 아래 지점 고정), 드래그 선택, 링크 호버·클릭. 결과로 `view.anchor` 를 갱신하거나 `Action` 을 낸다.
-4. 보이는 쪽(+ 앞뒤 2쪽은 `Prefetch`)마다: 정확한 배율의 텍스처가 있으면 그린다. 없으면 `request_render` 하고,
-   같은 쪽의 다른 배율 텍스처가 있으면 늘려서, 없으면 흰 사각형을 그린다(VIEW-3).
+4. 보이는 쪽(+ 주변 쪽은 `Prefetch`: 멈춰 있으면 앞뒤 6쪽, 스크롤 중이면 진행 방향 10쪽·반대쪽 3쪽, 가까운 쪽부터)마다:
+   정확한 배율의 텍스처가 있으면 그린다. 없으면 `request_render` 하고,
+   같은 쪽의 다른 배율 텍스처(최소한 미리보기, §5.6)가 있으면 늘려서, 없으면 흰 사각형을 그린다(VIEW-3).
 5. 겹쳐 그리기: 검색 강조, 선택, 링크 호버, 도착 지점 강조, (비교 뷰에서) 변경 표시.
 
 줌 동작이 이어지는 동안은 새 배율로 렌더를 요청하지 않고 기존 텍스처를 늘려 그리다가, 80ms 멈추면 요청한다.
@@ -635,6 +637,15 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 - 어느 쪽이든 화면에 들어오면 미리보기가 이미 있으므로 빈 쪽이 보이지 않는다. 선명한 그림이 도착하면 바꿔 그린다.
 - 미리보기 배율은 문서마다 정한다: 미리보기 예산을 쪽수로 나눠 쪽 폭을 240 ~ 900 픽셀 사이에서 고른다(쪽이 적은 문서는 거의 읽을 수 있는 해상도, 수천 쪽 문서는 윤곽이 보이는 해상도).
 - 미리보기 요청은 엔진에 `Priority::Background` 로, 지금 보는 쪽에서 가까운 쪽부터 묶음으로 낸다(엔진은 다시 요청되지 않은 대기 요청을 버리므로 매 프레임 다음 묶음을 갱신한다).
+
+구현 메모(WP-17)
+- 미리보기 배율: 문서당 예산 `min(1GB, 3GB / 열린 문서 수)`, 가장 넓은 쪽의 폭 `W = clamp(sqrt(예산 / (쪽수 × 4 × 평균 세로/가로)), 240, 900)`,
+  배율 = `W / 가장 넓은 쪽의 폭(pt)`, 어느 쪽의 긴 변도 `max_texture_side` 를 넘지 않게 낮춘다. `views/preload.rs` 의 순수 함수.
+- 캐시는 그 문서의 미리보기 배율과 같은 키를 미리보기 층에 넣는다. 배율이 바뀌면(열린 문서 수 변화) 옛 미리보기는 같은 쪽의 새 것이 올 때까지 남는다.
+- 렌더에 실패한 미리보기 쪽은 `render_failed` 로 알아내 "끝난 것"으로 친다. 실패는 notifier 를 부르지 않으므로,
+  미리 그리기가 남아 있는 동안은 100ms 마다 프레임을 돌린다.
+- 같은 우선순위 안에서는 가장 최근 요청이 먼저 처리되므로, 요청은 중요한 것이 마지막에 오게 거꾸로 낸다.
+- 텍스처 올리기는 프레임당 16MB 까지(선명한 그림 먼저). 남은 것은 다음 프레임으로 넘기고 다시 그리기를 요청한다.
 
 
 키 `(DocId, RenderKey)`, 값은 텍스처 핸들과 바이트 수. 예산(기본 2GB)을 넘으면 가장 오래 안 쓴 것부터 버린다.

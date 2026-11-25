@@ -234,6 +234,12 @@ impl DocumentHandle {
         self.shared().wake();
     }
 
+    /// Whether rendering `key` failed in the current generation. Such a key is never rendered
+    /// again (requests for it are ignored), so a caller waiting for it can stop. Never blocks.
+    pub fn render_failed(&self, key: RenderKey) -> bool {
+        self.shared().lock().failed_renders.contains(&key)
+    }
+
     /// Takes the pages rendered since the last call. Never blocks.
     pub fn poll_rendered(&self) -> Vec<RenderedPage> {
         let mut st = self.shared().lock();
