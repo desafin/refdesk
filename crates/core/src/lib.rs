@@ -20,6 +20,9 @@ pub mod store;
 pub mod testutil;
 pub mod text;
 
+pub use diff::{
+    Change, ChangeKind, DiffJob, DiffLimits, DiffOptions, DiffResult, Mark, MarkKind, Side, Span,
+};
 pub use engine::{
     DocStatus, DocumentHandle, DocumentInfo, EngineError, EngineOptions, Notifier, Priority,
     RenderKey, RenderedImage, RenderedPage,

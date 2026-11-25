@@ -9,13 +9,30 @@
 //! 3. and produces normalised words and paragraphs ([`DocTokens`]) that still point at the
 //!    original characters, so a result can be drawn back onto the pages.
 //!
-//! Aligning two flows and building the result is a later step.
+//! Two flows are then compared ([`diff_tokens`]):
+//!
+//! 4. the paragraphs are aligned by their keys (`align`),
+//! 5. misaligned regions are compared word by word, so that text whose paragraph boundaries
+//!    differ is not a change (`refine`),
+//! 6. and the outcome becomes changes, marks on the pages and synchronisation points
+//!    ([`DiffResult`]).
+//!
+//! [`DiffJob`] runs all of it on a background thread for two open documents.
 
+mod align;
 pub mod extract;
+mod job;
 pub mod noise;
+mod refine;
+mod result;
 
 pub use extract::{
     DocTokens, ExtractOptions, PageSource, Paragraph, RemovedLine, Word, extract, normalize_key,
+};
+pub use job::DiffJob;
+pub use result::{
+    Change, ChangeKind, DiffInput, DiffLimits, DiffOptions, DiffResult, Mark, MarkKind, Side, Span,
+    diff_tokens,
 };
 
 /// Hand-made page texts for the unit tests of this module.
