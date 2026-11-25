@@ -379,30 +379,46 @@ impl SearchJob {
 
 ```rust
 pub struct DiffOptions { pub skip_repeated_lines: bool, pub ignore_case: bool }   // 단어 단위 비교라 공백은 원래 무시된다
+pub struct DiffLimits { pub paragraph_timeout: Duration, pub word_timeout: Duration, pub total_word_timeout: Duration }
+pub struct DiffInput { pub tokens: DocTokens, pub page_sizes: Vec<Size> }
+pub fn diff_tokens(left: &DiffInput, right: &DiffInput, limits: &DiffLimits) -> DiffResult;   // 순수 로직
+
 pub enum ChangeKind { Added, Removed, Modified }
 pub struct Span { pub start: TextPos, pub end: TextPos }
 pub struct Change { pub kind: ChangeKind, pub left: Option<Span>, pub right: Option<Span>,
-                    pub left_text: String, pub right_text: String,      // 목록 표시용 일부
+                    pub left_text: String, pub right_text: String,      // 목록 표시용 일부(200자 이내)
                     pub anchor: (Location, Location) }                  // 양쪽에서 이 변경이 놓인 자리
 pub enum MarkKind { Removed, Added, ModifiedBlock, ModifiedWord }
 pub struct Mark { pub rect: Rect, pub kind: MarkKind, pub change: u32 } // change: changes 의 색인
+pub enum Side { Left, Right }
 
 pub struct DiffResult {
     pub changes: Vec<Change>,                  // 문서 순서
-    pub left_marks: Vec<Vec<Mark>>,            // 쪽별
+    pub left_marks: Vec<Vec<Mark>>,            // 쪽별. ModifiedBlock 이 ModifiedWord 보다 앞(순서대로 그리면 단어가 위)
     pub right_marks: Vec<Vec<Mark>>,
-    pub sync: Vec<(Location, Location)>,       // 양쪽에서 대응하는 점. 양쪽 모두 단조 증가
+    pub sync: Vec<(Location, Location)>,       // 양쪽에서 대응하는 점. 양쪽 모두 엄격히 증가
     pub added: u32, pub removed: u32, pub modified: u32,
+    pub left_page_sizes: Vec<Size>, pub right_page_sizes: Vec<Size>,
+    pub approximate: bool,                     // 시간 제한에 걸린 구간이 있었다(그 구간은 통째로 삭제 + 추가)
+    pub generations: (u32, u32),               // 계산에 쓴 양쪽 문서 세대 (R-7)
+}
+impl DiffResult {
+    pub fn marks(&self, side: Side, page: u32) -> &[Mark];
+    pub fn map_location(&self, from: Side, loc: Location) -> Location;   // 동기 스크롤: 한쪽 위치 → 다른 쪽 위치
 }
 
 impl DiffJob {
     pub fn start(left: DocumentHandle, right: DocumentHandle, opts: DiffOptions, notifier: Notifier) -> DiffJob;
-    pub fn progress(&self) -> f32;                       // 0.0 ..= 1.0
+    pub fn progress(&self) -> f32;                       // 0.0 ..= 1.0, 줄지 않는다
     pub fn result(&self) -> Option<Result<Arc<DiffResult>, String>>;
-}   // drop 하면 취소
+}   // drop 하면 취소 (기다리지 않는다)
 ```
 
-- `sync` 는 동기 스크롤의 근거다. 한쪽 위치를 `sync` 의 이웃한 두 점 사이에서 보간해 다른 쪽 위치를 구하는 함수도 여기 둔다.
+- `sync` 는 동기 스크롤의 근거다. `map_location` 이 한쪽 위치를 `sync` 의 이웃한 두 점 사이에서 보간해 다른 쪽 위치를 준다.
+- `Modified` 로 묶는 기준: 두 문단이 공유하는 단어가 짧은 쪽 단어 수의 50% 이상. 그보다 적으면 삭제 + 추가다.
+- 단어 비교에서 하이픈은 빼고 본다(줄 끝에서 끊긴 복합어가 변경으로 나오지 않게). 하이픈만 달라진 변경은 보이지 않는다.
+- 알려진 한계: 옮겨진 문단은 삭제 + 추가로 나온다. 표·다단에서 읽기 순서가 버전마다 다르면 큰 변경으로 나온다.
+  `Modified` 의 자리는 묶음의 첫 문단이라, 긴 문단의 뒷부분이 바뀌면 목록에서 눌렀을 때 문단 처음으로 간다.
 - 입력은 `diff::extract` 가 만든 `DocTokens`(문단과 단어의 흐름, 반복되는 머리글·바닥글 제거됨)다. 정의는 `crates/core/src/diff/extract.rs`.
 - 반복 줄 판정(`diff/noise.rs`): 쪽 위·아래 15% 띠의 줄 가운데, 숫자를 가린 모양과 글자 크기가 같은 것이 전체 쪽의 절반 이상,
   또는 짝수 쪽(홀수 쪽)의 절반 이상, 또는 3쪽 이상 이어져 나타나면 잡음으로 본다.
