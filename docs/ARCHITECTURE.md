@@ -555,10 +555,14 @@ pub trait TranslateBackend: Send + Sync {                          // app 의 �
                  on_text: &mut dyn FnMut(&str)) -> Result<(), TranslateError>;
     /// 모델을 메모리에 올린다(없으면 ModelMissing, 서버가 없으면 Unreachable).
     fn warm_up(&self, cancel: &AtomicBool) -> Result<(), TranslateError>;
+    /// 서버가 가진 모델의 이름들(TR-12).
+    fn models(&self, cancel: &AtomicBool) -> Result<Vec<String>, TranslateError>;
     /// 캐시 열쇠에 들어갈 이름(모델과 대상 언어).
     fn identity(&self) -> String;
 }
-pub struct OllamaBackend;  impl OllamaBackend { pub fn new(config: &TranslateConfig) -> OllamaBackend }
+pub struct OllamaBackend;   // Ollama 고유 API: /api/chat, /api/generate(올리기), /api/tags(목록)
+pub struct OpenAiBackend;   // OpenAI 호환 API: /v1/chat/completions(SSE), /v1/models(목록)
+pub fn backend_from_config(config: &TranslateConfig) -> Arc<dyn TranslateBackend>;   // [translate] backend 로 고른다
 
 pub struct TranslateSnapshot { pub text: String, pub state: TranslateState }   // Running | Done | Failed(TranslateError)
 impl TranslateJob {
@@ -574,7 +578,8 @@ impl TranslationCache { pub fn get(&mut self, identity: &str, req: &TranslateReq
 ```
 
 - `OllamaBackend` 는 Ollama 의 HTTP API 를 쓴다(`POST /api/chat`, `stream: true`, 줄마다 JSON 하나). HTTP 는 `ureq`(블로킹)이고 **항상 작업 스레드에서만** 부른다(R-1). 연결 제한 시간은 짧게(2초), 응답은 조각마다 `cancel` 을 본다.
-- 주소와 모델은 `Config.translate`(`config.toml` 의 `[translate]`): `endpoint`(기본 `http://127.0.0.1:11434`), `model`(기본 `translategemma:4b`), `target`(기본 `ko`), `keep_alive_minutes`(기본 30), `word_with_sentence`(기본 true). 기본 주소는 이 머신이다. 다른 주소를 넣으면 글이 그 주소로 간다 — 설정 파일의 주석에 적는다.
+- **백엔드는 갈아 끼운다**(TR-11): app 은 `TranslateBackend` 만 안다. 지금 둘 — `ollama`(기본)와 `openai`(llama.cpp `llama-server`, LM Studio, vLLM 등 OpenAI 호환 서버). 추론 엔진을 앱에 내장하는 세 번째 백엔드(TR-14)도 이 트레이트의 구현 하나로 들어온다.
+- 주소와 모델은 `Config.translate`(`config.toml` 의 `[translate]`): `backend`(`ollama` | `openai`, 기본 `ollama`), `endpoint`(기본은 백엔드에 따라 `http://127.0.0.1:11434` / `http://127.0.0.1:8080`), `model`(기본 `translategemma:4b`), `target`(기본 `ko`), `keep_alive_minutes`(기본 30, Ollama 에만), `word_with_sentence`(기본 true), `passage_prompt`·`word_prompt`(없으면 내장 지시문. 자리 표시 `{text}` `{word}` `{sentence}` `{target}`). 앱에서 고른 모델(`Prefs.translate_model`)이 있으면 설정 파일의 `model` 보다 우선한다(TR-12). 기본 주소는 이 머신이다. 다른 주소를 넣으면 글이 그 주소로 간다 — 설정 파일의 주석에 적는다.
 - 프롬프트는 순수 함수다(`translate/prompt.rs`). 모델 이름이 `translategemma` 로 시작하면 그 모델이 요구하는 정해진 틀을, 아니면 일반 지시문을 쓴다. 단어는 "이 문장에서 이 단어의 뜻을 한국어 낱말 하나나 둘로"를 묻는다. 식별자·숫자·단위는 그대로 두라고 지시한다(TR-8). 출력은 다듬는다(앞뒤 공백·따옴표, 단어는 첫 줄만).
 - 실측(2026-11-26, RTX 4070 Laptop 8GB, `translategemma:4b`, 100% GPU): 모델 올리기 17초, 단어 0.05 ~ 0.1초, 한 줄 0.35 ~ 0.6초, 85 토큰/초.
 - 테스트는 실제 Ollama 를 쓰지 않는다. 테스트가 직접 띄운 가짜 서버(`127.0.0.1:0`)에만 붙는다.
@@ -784,6 +789,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 ### 5.12 번역 (WP-81, TR-1 ~ 4, 7)
 
 - 상태는 앱 전체에 하나다: `AppState.translate`(`overlays/translate.rs`) — 번역 모드(환경 설정 `prefs.json` 에 기억), 백엔드(`Arc<dyn TranslateBackend>`), 캐시, 준비 상태(`Off | Loading | Ready | Failed(이유)`), 모델 올리기 작업.
+- 모델 바꾸기(TR-12): "보기 ▸ 번역 모델" 은 `backend.models()` 를 작업 스레드에서 받아 온 목록을 보인다. 고르면 `SetTranslateModel` 이 환경 설정에 저장하고 백엔드를 새로 만들고 모델 올리기를 다시 시작한다. 캐시의 열쇠에 모델 이름이 들어 있어 모델이 바뀌면 예전 번역이 섞이지 않는다.
 - 번역 모드를 켜면 모델 올리기(`TranslateJob::warm_up`)를 시작하고, 끝나기 전의 요청은 그대로 보낸다(Ollama 가 줄 세운다). 실패한 이유는 상태 표시줄 단추와 팝업에 보인다.
 - 팝업은 뷰마다 하나다(`PdfViewUiState.translate`): 무엇을 번역 중인지(단어 + 문장, 또는 선택), 작업, 뜨고 닫히는 시각. 단어 팝업은 포인터가 0.5초 머문 뒤 뜨고, 벗어나면 0.2초 뒤 닫힌다. 선택 팝업은 선택이 풀리거나 Esc 까지 남는다. 뜨고 닫히는 판단, 자리와 크기, 어떤 단어를 대상으로 삼는지(글자가 둘 이상, 라틴 글자가 있어야 함), 문장 잘라내기는 순수 함수다(R-10).
 - 링크 위에서는 링크 미리보기(§5.5)가 우선이고 단어 팝업은 뜨지 않는다. 끄는 중, 메뉴·검색 입력·명령 팔레트가 열려 있을 때도 뜨지 않는다.
