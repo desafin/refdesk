@@ -1346,7 +1346,7 @@ mod widget_tests {
             self.ctx
                 .run_ui(input, |ui| {
                     egui::Panel::bottom("status").show(ui, |ui| {
-                        status_bar::show(ui, state, &mut queue);
+                        status_bar::show(ui, state, state.focus, &mut queue);
                     });
                     egui::CentralPanel::default().show(ui, |ui| draw_active(ui, state, &mut queue));
                 })

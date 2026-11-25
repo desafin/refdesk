@@ -10,11 +10,10 @@ use refdesk_core::{DocumentHandle, Location, Notifier, Place, ViewState, ZoomMod
 
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::panels::status_bar::GotoInput;
-use crate::state::{
-    AppState, ClosedTab, DocId, MAX_CLOSED_TABS, PdfTab, Tab, TabId, normalize_path,
-};
+use crate::state::{AppState, ClosedTab, DocId, PdfTab, Tab, TabId, WindowId, normalize_path};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::windows::dock::SplitDir;
+use crate::windows::{self, transfer};
 pub use refdesk_core::OpenTarget;
 
 /// Something the user (or the outside world) asked for.
@@ -71,6 +70,21 @@ pub enum Action {
         /// Zero-based page.
         page: u32,
     },
+    /// Open a new window that shows the start page (WIN-4).
+    NewWindow,
+    /// Move a PDF tab into a new window of its own (WIN-1).
+    DetachTab(TabId),
+    /// Move a PDF tab into the focused pane of another window (WIN-2).
+    MoveTab {
+        /// The tab to move.
+        tab: TabId,
+        /// The window it goes to.
+        to: WindowId,
+    },
+    /// Move every tab of the other windows into the main window and close them (WIN-2).
+    MergeAllWindows,
+    /// Close a window and its tabs. For the main window this quits the application (WIN-5).
+    CloseWindow(WindowId),
     /// Close the application.
     Quit,
 }
@@ -120,8 +134,32 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             }
         }
         Action::GoToPage { tab, page } => go_to_page(state, tab, page),
-        Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        Action::NewWindow => {
+            transfer::new_window(state);
+        }
+        Action::DetachTab(tab) => {
+            transfer::detach_tab(state, tab);
+        }
+        Action::MoveTab { tab, to } => {
+            if transfer::move_tab(state, tab, to) {
+                windows::raise(ctx, state, to);
+            }
+        }
+        Action::MergeAllWindows => transfer::merge_all(state),
+        Action::CloseWindow(id) => {
+            if id == state.main_window().id {
+                quit(ctx);
+            } else {
+                transfer::close_window(state, id);
+            }
+        }
+        Action::Quit => quit(ctx),
     }
+}
+
+/// Closes the main window, which ends the application (the state is saved on the way out).
+fn quit(ctx: &egui::Context) {
+    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
 }
 
 /// Dispatches everything in `state.actions`, in order.
@@ -147,17 +185,7 @@ fn place_new_tab(state: &mut AppState, tab: TabId, near: Option<TabId>) {
     let w = near
         .and_then(|t| state.window_of(t))
         .unwrap_or_else(|| state.focused_window_index());
-    let start_tabs: Vec<TabId> = state.windows[w].dock.tabs();
-    let only_start = start_tabs
-        .iter()
-        .all(|t| matches!(state.tabs.get(*t), Some(Tab::Start)));
-    if only_start {
-        for t in start_tabs {
-            state.windows[w].dock.remove_tab(t);
-            state.tabs.remove(t);
-        }
-    }
-    state.windows[w].dock.add_tab(tab, near);
+    transfer::put_tab(state, tab, w, near);
     focus_tab(state, tab);
 }
 
@@ -170,7 +198,12 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
             if let Some(page) = target.page {
                 jump_to_page(state, tab, page);
             }
+            let from = state.focused_window_index();
             focus_tab(state, tab);
+            // The tab may be in another window: bring that window forward.
+            if let Some(w) = state.window_of(tab).filter(|w| *w != from) {
+                windows::raise(ctx, state, state.windows[w].id);
+            }
             return;
         }
         // A document without a tab should not exist (closing the last tab drops it). Recover by
@@ -267,13 +300,11 @@ fn close_tab(state: &mut AppState, tab: TabId) {
     state.windows[w].dock.remove_tab(tab);
     if let Some(Tab::Pdf(pdf)) = state.tabs.remove(tab) {
         if let Some(doc) = state.docs.get(pdf.doc) {
-            remember_closed(
-                state,
-                ClosedTab {
-                    path: doc.path().to_path_buf(),
-                    view: pdf.view,
-                },
-            );
+            let path = doc.path().to_path_buf();
+            state.remember_closed(ClosedTab {
+                path,
+                view: pdf.view,
+            });
         }
         if !state.tabs.doc_in_use(pdf.doc) {
             state.docs.remove(pdf.doc);
@@ -285,15 +316,6 @@ fn close_tab(state: &mut AppState, tab: TabId) {
     }
     if focus_here {
         state.focus = state.windows[w].dock.focused_tab();
-    }
-}
-
-/// Adds a closed tab to the reopen list, dropping the oldest beyond [`MAX_CLOSED_TABS`].
-fn remember_closed(state: &mut AppState, closed: ClosedTab) {
-    state.closed_tabs.push(closed);
-    if state.closed_tabs.len() > MAX_CLOSED_TABS {
-        let excess = state.closed_tabs.len() - MAX_CLOSED_TABS;
-        state.closed_tabs.drain(..excess);
     }
 }
 
@@ -382,6 +404,7 @@ fn focus_next_pane(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::MAX_CLOSED_TABS;
     use std::path::Path;
 
     fn open(state: &mut AppState, ctx: &egui::Context, path: &str) {

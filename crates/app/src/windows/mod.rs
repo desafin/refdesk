@@ -1,25 +1,190 @@
-//! Windows: drawing the content of one window (its panes, tabs and status bar).
+//! Windows: drawing every application window and the content of each.
 //!
-//! `show_window` takes only what one window needs, so the root window and the child windows of
-//! later work packages draw the same way. The tab layout itself lives in [`dock`].
+//! `windows[0]` is the main window, drawn into eframe's root viewport. Every other window is an
+//! immediate child viewport, drawn from inside the root's frame (`docs/ARCHITECTURE.md` §5.2,
+//! §6). Each window has its own menu bar (GNOME has no global menu), dock area and status bar.
+//! Moving tabs between windows lives in [`transfer`]; the tab layout itself in [`dock`].
+//!
+//! Window-specific assumptions that M0 may still change (who quits when the main window
+//! closes, whether textures are shared, the order of `logic` and child windows) are kept inside
+//! this module.
 
 pub mod dock;
+pub mod transfer;
 
 use std::collections::HashMap;
 
-use egui::{CentralPanel, Id, Panel, Ui};
+use egui::{
+    CentralPanel, Id, Panel, Ui, ViewportBuilder, ViewportClass, ViewportCommand, ViewportId,
+};
 use refdesk_core::DocumentHandle;
 
 use crate::action::Action;
-use crate::commands::{self, TAB_MENU};
+use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
 use crate::panels::status_bar;
-use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore};
+use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore, WindowId};
 use crate::views::pdf_view::{self, ViewContext};
 use crate::views::textures::TextureCache;
 use dock::DockHost;
 
-/// Draws window `window_index` of `state`: its status bar and its panes. Widgets only queue
+/// The app id every window carries, so GNOME groups them under one application.
+const APP_ID: &str = "refdesk";
+
+/// The size a new window opens with. Its position is up to the compositor (Wayland).
+const NEW_WINDOW_SIZE: [f32; 2] = [1100.0, 800.0];
+
+/// The viewport that shows window `id`: the root viewport for the main window.
+pub fn viewport_id(state: &AppState, id: WindowId) -> ViewportId {
+    if id == state.main_window().id {
+        ViewportId::ROOT
+    } else {
+        ViewportId::from_hash_of(("refdesk-window", id))
+    }
+}
+
+/// Asks for window `id` to come to the front. Wayland compositors may refuse; then the window
+/// stays where it is.
+pub fn raise(ctx: &egui::Context, state: &AppState, id: WindowId) {
+    if state.window_index(id).is_some() {
+        ctx.send_viewport_cmd_to(viewport_id(state, id), ViewportCommand::Focus);
+    }
+}
+
+/// Draws every window: the main window into `ui` (the root viewport), the others as child
+/// viewports. Call it once per frame from the root's `ui()`. Widgets only queue actions.
+///
+/// Shortcuts are handled once per frame, by the window that has the keyboard, with that
+/// window's input. When the backend cannot open more windows (headless tests), the child
+/// windows are drawn as egui windows inside the root; they then share the root's input, so
+/// they neither take shortcuts nor follow the keyboard focus.
+pub fn show_all(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
+    let ctx = ui.ctx().clone();
+    let mut keys_taken = false;
+    draw_window(ui, state, 0, queue, true, &mut keys_taken);
+    set_root_title(&ctx, window_title(state, 0));
+
+    // `dispatch` runs after every window is drawn, so the window list is fixed here.
+    for index in 1..state.windows.len() {
+        let id = state.windows[index].id;
+        let builder = ViewportBuilder::default()
+            .with_title(window_title(state, index))
+            .with_app_id(APP_ID)
+            .with_inner_size(NEW_WINDOW_SIZE);
+        ctx.show_viewport_immediate(viewport_id(state, id), builder, |ui, class| {
+            let own_window = class != ViewportClass::EmbeddedWindow;
+            if own_window && ui.ctx().input(|i| i.viewport().close_requested()) {
+                // Not drawing the viewport next frame is what closes it.
+                queue.push(Action::CloseWindow(id));
+            }
+            draw_window(ui, state, index, queue, own_window, &mut keys_taken);
+        });
+    }
+}
+
+/// Draws one whole window: menu bar, then [`show_window`]. `own_window` is false for a child
+/// window drawn inside the root (see [`show_all`]). `keys_taken` is set once a window has
+/// handled this frame's shortcuts.
+fn draw_window(
+    ui: &mut Ui,
+    state: &mut AppState,
+    index: usize,
+    queue: &mut Vec<Action>,
+    own_window: bool,
+    keys_taken: &mut bool,
+) {
+    let Some(id) = state.windows.get(index).map(|w| w.id) else {
+        return;
+    };
+    let ctx = ui.ctx().clone();
+    // In a child viewport's callback, `ctx.input` is that window's input.
+    if own_window && ctx.input(|i| i.focused) {
+        state.follow_window_focus(index);
+        if !*keys_taken {
+            *keys_taken = true;
+            queue.extend(commands::handle_shortcuts(&ctx, state));
+        }
+    }
+    Panel::top(Id::unique(("menu_bar", id))).show(ui, |ui| menu_bar(ui, state, index, queue));
+    show_window(ui, state, index, queue);
+}
+
+/// Sets the title of the root viewport, only when it changed (child viewports get theirs from
+/// their builder, which egui compares itself).
+fn set_root_title(ctx: &egui::Context, title: String) {
+    let key = Id::unique("refdesk-root-title");
+    let changed = ctx.data_mut(|d| {
+        let last = d.get_temp_mut_or_default::<String>(key);
+        if *last == title {
+            false
+        } else {
+            last.clone_from(&title);
+            true
+        }
+    });
+    if changed {
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Title(title));
+    }
+}
+
+/// The title of window `index`: "active tab — refdesk", or "refdesk" while it shows no
+/// document.
+pub fn window_title(state: &AppState, index: usize) -> String {
+    let active = state
+        .windows
+        .get(index)
+        .and_then(|w| w.dock.focused_tab())
+        .filter(|t| state.tabs.pdf(*t).is_some());
+    match active {
+        Some(tab) => tr("window.title").replace("{title}", &tab_title(state, tab)),
+        None => APP_ID.to_owned(),
+    }
+}
+
+/// How window `index` is named in window lists: "Window 2 — active tab".
+pub fn window_name(state: &AppState, index: usize) -> String {
+    let active = state
+        .windows
+        .get(index)
+        .and_then(|w| w.dock.focused_tab())
+        .map(|t| tab_title(state, t))
+        .unwrap_or_default();
+    tr("window.name")
+        .replace("{n}", &(index + 1).to_string())
+        .replace("{title}", &active)
+}
+
+/// The menu bar of window `index`. Its entries are the rows of the command table; the Window
+/// menu also lists the open windows.
+fn menu_bar(ui: &mut Ui, state: &AppState, index: usize, queue: &mut Vec<Action>) {
+    egui::MenuBar::new().ui(ui, |ui| {
+        for group in MenuGroup::ALL {
+            ui.menu_button(tr(group.name_key()), |ui| {
+                for command in commands::in_menu(group) {
+                    let mut button = egui::Button::new(tr(command.name_key));
+                    if let Some(shortcut) = command.shortcut {
+                        button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
+                    }
+                    let enabled = (command.enabled)(state);
+                    if ui.add_enabled(enabled, button).clicked() {
+                        queue.extend(command.run(state));
+                    }
+                }
+                if group == MenuGroup::Window {
+                    ui.separator();
+                    for (i, window) in state.windows.iter().enumerate() {
+                        let button = egui::Button::selectable(i == index, window_name(state, i));
+                        if ui.add(button).clicked() {
+                            raise(ui.ctx(), state, window.id);
+                        }
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// Draws the content of window `window_index`: its status bar and its panes. Widgets only queue
 /// actions; nothing structural changes here (rule R-6), except tab drags inside the dock area
 /// (see [`dock::DockLayout::show`]).
 pub fn show_window(
@@ -47,12 +212,8 @@ pub fn show_window(
         .collect();
 
     Panel::bottom(Id::unique(("status_bar", window_id))).show(ui, |ui| {
-        // The status bar describes the focused tab of this window. It reads `state.focus`, so
-        // that is pointed at this window's tab while it draws and restored right after.
-        let saved = state.focus;
-        state.focus = window_focus;
-        status_bar::show(ui, state, queue);
-        state.focus = saved;
+        // The status bar describes the focused tab of this window.
+        status_bar::show(ui, state, window_focus, queue);
     });
 
     let AppState {
@@ -82,27 +243,74 @@ pub fn show_window(
     });
 }
 
-/// One entry of a tab's right-click menu, ready to draw.
-struct MenuItem {
-    label: &'static str,
+/// One clickable entry of a tab's right-click menu, ready to draw.
+struct MenuEntry {
+    label: String,
     shortcut: Option<String>,
     enabled: bool,
     action: Action,
 }
 
-/// The right-click menu of a tab, from [`TAB_MENU`].
+/// One row of a tab's right-click menu.
+enum MenuItem {
+    /// A plain entry.
+    Entry(MenuEntry),
+    /// A submenu ("Move to Window ▸").
+    Submenu {
+        label: &'static str,
+        entries: Vec<MenuEntry>,
+    },
+}
+
+/// The right-click menu of a tab: the rows of [`TAB_MENU`], then "Move to Window" with the
+/// other windows (hidden when there is no other window).
 fn tab_menu(ctx: &egui::Context, state: &AppState, tab: TabId) -> Vec<MenuItem> {
-    TAB_MENU
+    let mut items: Vec<MenuItem> = TAB_MENU
         .iter()
-        .map(|entry| MenuItem {
-            label: tr(entry.name_key),
-            shortcut: entry
-                .command_id
-                .and_then(|id| commands::shortcut_text(ctx, id)),
-            enabled: (entry.enabled)(state, tab),
-            action: (entry.action)(tab),
+        .map(|entry| {
+            MenuItem::Entry(MenuEntry {
+                label: tr(entry.name_key).to_owned(),
+                shortcut: entry
+                    .command_id
+                    .and_then(|id| commands::shortcut_text(ctx, id)),
+                enabled: (entry.enabled)(state, tab),
+                action: (entry.action)(tab),
+            })
         })
-        .collect()
+        .collect();
+    let own = state.window_of(tab);
+    let movable = state.tabs.pdf(tab).is_some();
+    let targets: Vec<MenuEntry> = state
+        .windows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != own)
+        .map(|(i, w)| MenuEntry {
+            label: window_name(state, i),
+            shortcut: None,
+            enabled: movable,
+            action: Action::MoveTab { tab, to: w.id },
+        })
+        .collect();
+    if !targets.is_empty() {
+        items.push(MenuItem::Submenu {
+            label: tr("window.move_to"),
+            entries: targets,
+        });
+    }
+    items
+}
+
+/// Draws one menu entry; a click queues its action and closes the menu.
+fn menu_entry(ui: &mut Ui, entry: &MenuEntry, queue: &mut Vec<Action>) {
+    let mut button = egui::Button::new(entry.label.as_str());
+    if let Some(keys) = &entry.shortcut {
+        button = button.shortcut_text(keys.as_str());
+    }
+    if ui.add_enabled(entry.enabled, button).clicked() {
+        queue.push(entry.action.clone());
+        ui.close();
+    }
 }
 
 /// The file name of the document a tab shows. When several tabs show the same document, the
@@ -190,14 +398,17 @@ impl DockHost for WindowHost<'_> {
         let Some(items) = self.menus.get(&tab) else {
             return;
         };
+        let queue = &mut *self.queue;
         for item in items {
-            let mut button = egui::Button::new(item.label);
-            if let Some(keys) = &item.shortcut {
-                button = button.shortcut_text(keys.as_str());
-            }
-            if ui.add_enabled(item.enabled, button).clicked() {
-                self.queue.push(item.action.clone());
-                ui.close();
+            match item {
+                MenuItem::Entry(entry) => menu_entry(ui, entry, queue),
+                MenuItem::Submenu { label, entries } => {
+                    ui.menu_button(*label, |ui| {
+                        for entry in entries {
+                            menu_entry(ui, entry, queue);
+                        }
+                    });
+                }
             }
         }
     }
@@ -362,7 +573,10 @@ mod tests {
         assert_eq!(tab_tooltip(&state, start), None);
         let menu = tab_menu(&ctx, &state, start);
         assert_eq!(menu.len(), TAB_MENU.len());
-        assert!(menu.iter().all(|m| !m.enabled));
+        assert!(
+            menu.iter()
+                .all(|m| matches!(m, MenuItem::Entry(e) if !e.enabled))
+        );
     }
 
     #[test]
@@ -435,5 +649,277 @@ mod tests {
         assert_eq!(state.focus, Some(a));
         assert_ne!(state.focus, Some(b));
         assert_eq!(state.main_window().dock.focused_tab(), Some(a));
+    }
+
+    /// Runs one headless frame of every window with these input events. `focused` says whether
+    /// the root window has the keyboard. Returns the queued actions and the root's viewport
+    /// commands.
+    fn frame_all(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+        focused: bool,
+    ) -> (Vec<Action>, Vec<ViewportCommand>) {
+        let mut queue = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 1000.0))),
+            focused,
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| show_all(ui, state, &mut queue));
+        let commands = output
+            .viewport_output
+            .get(&ViewportId::ROOT)
+            .map(|v| v.commands.clone())
+            .unwrap_or_default();
+        output.drop_without_applying_deltas();
+        (queue, commands)
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// The main window shows a.pdf, a second window b.pdf, which has the focus.
+    fn two_windows(ctx: &egui::Context) -> (AppState, TabId, TabId) {
+        let mut state = AppState::new();
+        let a = open(&mut state, ctx, "/refdesk-test/a.pdf");
+        let b = open(&mut state, ctx, "/refdesk-test/b.pdf");
+        dispatch(&mut state, Action::DetachTab(b), ctx);
+        (state, a, b)
+    }
+
+    #[test]
+    fn window_titles_follow_the_active_tab() {
+        let ctx = egui::Context::default();
+        assert_eq!(window_title(&AppState::new(), 0), "refdesk");
+        let (mut state, _, _) = two_windows(&ctx);
+        let template = lookup(current_lang(), "window.title").expect("key");
+        assert_eq!(
+            window_title(&state, 0),
+            template.replace("{title}", "a.pdf")
+        );
+        assert_eq!(
+            window_title(&state, 1),
+            template.replace("{title}", "b.pdf")
+        );
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        assert_eq!(window_title(&state, 2), "refdesk");
+        // Out of range: no panic.
+        assert_eq!(window_title(&state, 9), "refdesk");
+    }
+
+    #[test]
+    fn window_names_number_the_windows_and_name_their_active_tab() {
+        let ctx = egui::Context::default();
+        let (state, _, _) = two_windows(&ctx);
+        let template = lookup(current_lang(), "window.name").expect("key");
+        assert_eq!(
+            window_name(&state, 0),
+            template.replace("{n}", "1").replace("{title}", "a.pdf")
+        );
+        assert_eq!(
+            window_name(&state, 1),
+            template.replace("{n}", "2").replace("{title}", "b.pdf")
+        );
+    }
+
+    fn move_targets(menu: &[MenuItem]) -> Option<Vec<(String, Action, bool)>> {
+        menu.iter().find_map(|item| match item {
+            MenuItem::Submenu { label, entries } => {
+                assert_eq!(*label, tr("window.move_to"));
+                Some(
+                    entries
+                        .iter()
+                        .map(|e| (e.label.clone(), e.action.clone(), e.enabled))
+                        .collect(),
+                )
+            }
+            MenuItem::Entry(_) => None,
+        })
+    }
+
+    #[test]
+    fn the_move_to_window_submenu_lists_the_other_windows() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let a = open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        // One window: no submenu.
+        assert!(move_targets(&tab_menu(&ctx, &state, a)).is_none());
+
+        let b = open(&mut state, &ctx, "/refdesk-test/b.pdf");
+        dispatch(&mut state, Action::DetachTab(b), &ctx);
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        let (w2, w3) = (state.windows[1].id, state.windows[2].id);
+        let main = state.main_window().id;
+
+        let targets = move_targets(&tab_menu(&ctx, &state, a)).expect("submenu");
+        assert_eq!(
+            targets,
+            vec![
+                (
+                    window_name(&state, 1),
+                    Action::MoveTab { tab: a, to: w2 },
+                    true
+                ),
+                (
+                    window_name(&state, 2),
+                    Action::MoveTab { tab: a, to: w3 },
+                    true
+                ),
+            ]
+        );
+        // The tab's own window is left out.
+        let targets = move_targets(&tab_menu(&ctx, &state, b)).expect("submenu");
+        assert_eq!(
+            targets
+                .iter()
+                .map(|(_, action, _)| action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Action::MoveTab { tab: b, to: main },
+                Action::MoveTab { tab: b, to: w3 }
+            ]
+        );
+        // The detach entry is in the tab menu.
+        let menu = tab_menu(&ctx, &state, a);
+        assert!(menu.iter().any(|item| matches!(
+            item,
+            MenuItem::Entry(e) if e.action == Action::DetachTab(a) && e.enabled
+        )));
+        // A start page cannot move.
+        let start = state.windows[2].dock.tabs()[0];
+        let targets = move_targets(&tab_menu(&ctx, &state, start)).expect("submenu");
+        assert!(targets.iter().all(|(_, _, enabled)| !enabled));
+    }
+
+    #[test]
+    fn drawing_three_windows_draws_the_children_without_panicking() {
+        let ctx = egui::Context::default();
+        let (mut state, _, _) = two_windows(&ctx);
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        for _ in 0..3 {
+            let (queue, _) = frame_all(&ctx, &mut state, Vec::new(), true);
+            assert!(queue.is_empty(), "nothing was clicked: {queue:?}");
+        }
+        // Headless, the children are egui windows inside the root, but they were laid out.
+        for w in 0..3 {
+            let rects = state.windows[w].dock.pane_rects();
+            assert_eq!(rects.len(), 1);
+            assert!(rects[0].0.is_positive(), "window {w}: {rects:?}");
+        }
+    }
+
+    #[test]
+    fn a_shortcut_applies_to_the_focused_tab_of_the_window_that_has_the_keyboard() {
+        let ctx = egui::Context::default();
+        let (mut state, a, b) = two_windows(&ctx);
+        assert_eq!(state.focus, Some(b), "detaching focused the moved tab");
+
+        // The root window has the keyboard: Ctrl+W closes its tab, not the one in window 2.
+        let (queue, _) = frame_all(
+            &ctx,
+            &mut state,
+            vec![key(egui::Key::W, egui::Modifiers::CTRL)],
+            true,
+        );
+        assert_eq!(queue, vec![Action::CloseTab(a)]);
+        assert_eq!(state.focus, Some(a));
+    }
+
+    #[test]
+    fn no_window_with_the_keyboard_takes_no_shortcut() {
+        let ctx = egui::Context::default();
+        let (mut state, _, b) = two_windows(&ctx);
+        let (queue, _) = frame_all(
+            &ctx,
+            &mut state,
+            vec![key(egui::Key::W, egui::Modifiers::CTRL)],
+            false,
+        );
+        assert!(queue.is_empty(), "{queue:?}");
+        assert_eq!(state.focus, Some(b));
+    }
+
+    #[test]
+    fn a_shortcut_is_taken_once_per_frame() {
+        let ctx = egui::Context::default();
+        let (mut state, _, _) = two_windows(&ctx);
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        // Embedded children share the root's input; still only one action comes out.
+        let (queue, _) = frame_all(
+            &ctx,
+            &mut state,
+            vec![key(
+                egui::Key::N,
+                egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            )],
+            true,
+        );
+        assert_eq!(queue, vec![Action::NewWindow]);
+    }
+
+    #[test]
+    fn the_root_title_is_sent_only_when_it_changes() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let titles = |commands: Vec<ViewportCommand>| -> Vec<String> {
+            commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    ViewportCommand::Title(t) => Some(t),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (_, first) = frame_all(&ctx, &mut state, Vec::new(), true);
+        assert_eq!(titles(first), vec!["refdesk".to_owned()]);
+        let (_, again) = frame_all(&ctx, &mut state, Vec::new(), true);
+        assert!(titles(again).is_empty());
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (_, changed) = frame_all(&ctx, &mut state, Vec::new(), true);
+        assert_eq!(titles(changed), vec![window_title(&state, 0)]);
+    }
+
+    #[test]
+    fn viewports_are_the_root_for_the_main_window_and_distinct_for_others() {
+        let ctx = egui::Context::default();
+        let (mut state, _, _) = two_windows(&ctx);
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        let ids: Vec<ViewportId> = state
+            .windows
+            .iter()
+            .map(|w| viewport_id(&state, w.id))
+            .collect();
+        assert_eq!(ids[0], ViewportId::ROOT);
+        assert!(ids[1] != ViewportId::ROOT && ids[2] != ViewportId::ROOT);
+        assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn moving_a_tab_asks_its_new_window_to_come_forward() {
+        // Headless, only the root viewport keeps commands (child viewports are never really
+        // opened), so this moves a tab into the main window.
+        let ctx = egui::Context::default();
+        let (mut state, _, b) = two_windows(&ctx);
+        let main = state.main_window().id;
+        let output = ctx.run_ui(egui::RawInput::default(), |_ui| {
+            dispatch(&mut state, Action::MoveTab { tab: b, to: main }, &ctx);
+        });
+        let commands = output
+            .viewport_output
+            .get(&ViewportId::ROOT)
+            .map(|v| v.commands.clone())
+            .unwrap_or_default();
+        output.drop_without_applying_deltas();
+        assert!(commands.contains(&ViewportCommand::Focus), "{commands:?}");
+        assert_eq!(state.windows.len(), 1, "the emptied window closed");
     }
 }

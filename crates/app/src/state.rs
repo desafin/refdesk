@@ -37,9 +37,14 @@ impl TabId {
     }
 }
 
-/// Identifies one application window. Issued by [`AppState`].
+/// Identifies one application window. Issued by [`AppState`]; never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WindowId(u64);
+
+impl WindowId {
+    /// The id of the main window (the first one, which lives as long as the app).
+    pub const MAIN: WindowId = WindowId(0);
+}
 
 /// Makes `path` absolute and free of `.`, `..` and symlinks, so two spellings of one file compare
 /// equal. A file that does not exist (yet) is cleaned lexically instead.
@@ -206,6 +211,16 @@ pub struct WindowState {
     pub dock: DockLayout,
 }
 
+impl WindowState {
+    /// A window without tabs.
+    pub fn new(id: WindowId) -> WindowState {
+        WindowState {
+            id,
+            dock: DockLayout::new(),
+        }
+    }
+}
+
 /// A closed PDF tab, remembered so it can be reopened (TAB-4). Only the path is kept, not the
 /// document handle, so a closed document is really closed.
 #[derive(Clone, Debug, PartialEq)]
@@ -240,7 +255,6 @@ pub struct AppState {
     pub file_dialog_requested: bool,
     /// Recently closed PDF tabs, oldest first, at most [`MAX_CLOSED_TABS`].
     pub closed_tabs: Vec<ClosedTab>,
-    #[allow(dead_code)] // used by `new_window_id` (WP-21)
     next_window: u64,
 }
 
@@ -255,12 +269,8 @@ impl AppState {
     pub fn new() -> AppState {
         let mut tabs = TabStore::new();
         let start = tabs.insert(Tab::Start);
-        let mut dock = DockLayout::new();
-        dock.add_tab(start, None);
-        let window = WindowState {
-            id: WindowId(0),
-            dock,
-        };
+        let mut window = WindowState::new(WindowId::MAIN);
+        window.dock.add_tab(start, None);
         AppState {
             docs: DocStore::new(),
             tabs,
@@ -275,19 +285,60 @@ impl AppState {
         }
     }
 
-    /// Issues an unused window id (for the windows added by later work packages).
-    #[allow(dead_code)]
+    /// Issues a window id that was never used before, even by a window that is closed now.
     pub fn new_window_id(&mut self) -> WindowId {
         let id = WindowId(self.next_window);
         self.next_window += 1;
         id
     }
 
+    /// Adds a window without tabs at the end of the window list and returns its id.
+    pub fn add_window(&mut self) -> WindowId {
+        let id = self.new_window_id();
+        self.windows.push(WindowState::new(id));
+        id
+    }
+
+    /// Removes a window from the list. The main window is never removed. Its tabs are left
+    /// alone; the caller moves or closes them first.
+    pub fn remove_window(&mut self, id: WindowId) {
+        if id != self.main_window().id {
+            self.windows.retain(|w| w.id != id);
+        }
+    }
+
+    /// The index in `windows` of the window with this id.
+    pub fn window_index(&self, id: WindowId) -> Option<usize> {
+        self.windows.iter().position(|w| w.id == id)
+    }
+
     /// The main window.
-    #[allow(dead_code)] // used by tests; windows are told apart from WP-21 on
     pub fn main_window(&self) -> &WindowState {
-        // `new` creates window 0 and nothing removes it.
+        // `new` creates window 0 and `remove_window` never removes it.
         &self.windows[0]
+    }
+
+    /// Follows the window that has the keyboard: when the focused tab is not in window
+    /// `index`, the focus moves to that window's focused tab, so commands apply there (WIN-6).
+    pub fn follow_window_focus(&mut self, index: usize) {
+        let Some(window) = self.windows.get(index) else {
+            return;
+        };
+        if self.focus.is_some_and(|t| window.dock.contains(t)) {
+            return;
+        }
+        if let Some(tab) = window.dock.focused_tab() {
+            self.focus = Some(tab);
+        }
+    }
+
+    /// Adds a closed tab to the reopen list, dropping the oldest beyond [`MAX_CLOSED_TABS`].
+    pub fn remember_closed(&mut self, closed: ClosedTab) {
+        self.closed_tabs.push(closed);
+        if self.closed_tabs.len() > MAX_CLOSED_TABS {
+            let excess = self.closed_tabs.len() - MAX_CLOSED_TABS;
+            self.closed_tabs.drain(..excess);
+        }
     }
 
     /// The index in `windows` of the window that holds `tab`.

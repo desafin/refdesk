@@ -176,9 +176,9 @@ fn command_hint(ctx: &egui::Context, command: &Command) -> String {
     }
 }
 
-/// Draws the status bar for the focused tab.
-pub fn show(ui: &mut Ui, state: &mut AppState, queue: &mut Vec<Action>) {
-    let Some(tab_id) = state.focus else {
+/// Draws the status bar for `tab` (the focused tab of the window it belongs to).
+pub fn show(ui: &mut Ui, state: &mut AppState, tab: Option<TabId>, queue: &mut Vec<Action>) {
+    let Some(tab_id) = tab else {
         return;
     };
     let Some(Tab::Pdf(tab)) = state.tabs.get(tab_id) else {

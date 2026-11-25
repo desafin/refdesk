@@ -21,11 +21,18 @@ pub enum MenuGroup {
     View,
     /// The "Tab" menu.
     Tab,
+    /// The "Window" menu. It also lists the open windows (see `windows::menu_bar`).
+    Window,
 }
 
 impl MenuGroup {
     /// The menus in the order they appear in the menu bar.
-    pub const ALL: [MenuGroup; 3] = [MenuGroup::File, MenuGroup::View, MenuGroup::Tab];
+    pub const ALL: [MenuGroup; 4] = [
+        MenuGroup::File,
+        MenuGroup::View,
+        MenuGroup::Tab,
+        MenuGroup::Window,
+    ];
 
     /// The i18n key of the menu title.
     pub fn name_key(self) -> &'static str {
@@ -33,6 +40,7 @@ impl MenuGroup {
             MenuGroup::File => "menu.file",
             MenuGroup::View => "menu.view",
             MenuGroup::Tab => "menu.tab",
+            MenuGroup::Window => "menu.window",
         }
     }
 }
@@ -77,6 +85,7 @@ impl Command {
 
 const CTRL: Modifiers = Modifiers::CTRL;
 const CTRL_SHIFT: Modifiers = Modifiers::CTRL.plus(Modifiers::SHIFT);
+const CTRL_ALT: Modifiers = Modifiers::CTRL.plus(Modifiers::ALT);
 
 fn always(_: &AppState) -> bool {
     true
@@ -100,6 +109,10 @@ fn has_several_panes(state: &AppState) -> bool {
 
 fn has_closed_tabs(state: &AppState) -> bool {
     !state.closed_tabs.is_empty()
+}
+
+fn has_several_windows(state: &AppState) -> bool {
+    state.windows.len() > 1
 }
 
 fn split_focused(state: &AppState, dir: SplitDir) -> Option<Action> {
@@ -278,6 +291,42 @@ pub static COMMANDS: &[Command] = &[
         enabled: has_closed_tabs,
         action: |_| Some(Action::ReopenClosedTab),
     },
+    Command {
+        id: "window.new",
+        name_key: "cmd.window.new",
+        menu: MenuGroup::Window,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::N)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::NewWindow),
+    },
+    Command {
+        id: "window.detach_tab",
+        name_key: "cmd.window.detach_tab",
+        menu: MenuGroup::Window,
+        shortcut: Some(KeyboardShortcut::new(CTRL_ALT, Key::N)),
+        aliases: &[],
+        enabled: has_pdf_focus,
+        action: |s| s.focus.map(Action::DetachTab),
+    },
+    Command {
+        id: "window.merge_all",
+        name_key: "cmd.window.merge_all",
+        menu: MenuGroup::Window,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_several_windows,
+        action: |_| Some(Action::MergeAllWindows),
+    },
+    Command {
+        id: "window.close",
+        name_key: "cmd.window.close",
+        menu: MenuGroup::Window,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::W)),
+        aliases: &[],
+        enabled: always,
+        action: |s| Some(Action::CloseWindow(s.focused_window().id)),
+    },
 ];
 
 /// One entry of the menu shown on a right click on a tab. Unlike [`Command`] it acts on the
@@ -303,7 +352,8 @@ fn has_pane_siblings(state: &AppState, tab: TabId) -> bool {
         .is_some_and(|w| state.windows[w].dock.pane_tabs(tab).len() > 1)
 }
 
-/// The tab menu, in display order. Later work adds rows here (for example "Move to New Window").
+/// The tab menu, in display order. `windows::tab_menu` adds the dynamic "Move to Window" list
+/// after these rows.
 pub static TAB_MENU: &[TabMenuEntry] = &[
     TabMenuEntry {
         name_key: "cmd.tab.close",
@@ -340,6 +390,12 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
             tab,
             dir: SplitDir::Down,
         },
+    },
+    TabMenuEntry {
+        name_key: "cmd.window.detach_tab",
+        command_id: Some("window.detach_tab"),
+        enabled: is_pdf_tab,
+        action: Action::DetachTab,
     },
 ];
 
@@ -539,6 +595,7 @@ mod tests {
                 "cmd.tab.duplicate",
                 "cmd.tab.split_right",
                 "cmd.tab.split_down",
+                "cmd.window.detach_tab",
             ]
         );
         for e in TAB_MENU {
@@ -564,7 +621,7 @@ mod tests {
         );
         let (a, _) = state.focused_pdf().expect("pdf tab");
         let enabled: Vec<bool> = TAB_MENU.iter().map(|e| (e.enabled)(&state, a)).collect();
-        assert_eq!(enabled, vec![true, false, true, true, true]);
+        assert_eq!(enabled, vec![true, false, true, true, true, true]);
         assert_eq!((TAB_MENU[0].action)(a), Action::CloseTab(a));
         dispatch(&mut state, Action::DuplicateTab(a), &ctx);
         assert!((TAB_MENU[1].enabled)(&state, a));
@@ -622,6 +679,95 @@ mod tests {
         assert_eq!(
             find("tab.reopen_closed").run(&state),
             Some(Action::ReopenClosedTab)
+        );
+    }
+
+    #[test]
+    fn window_commands_are_in_the_window_menu_with_their_shortcuts() {
+        let menu: Vec<&str> = in_menu(MenuGroup::Window).map(|c| c.id).collect();
+        assert_eq!(
+            menu,
+            vec![
+                "window.new",
+                "window.detach_tab",
+                "window.merge_all",
+                "window.close"
+            ]
+        );
+        let find = |id: &str| COMMANDS.iter().find(|c| c.id == id).expect("command");
+        assert_eq!(
+            find("window.new").shortcut,
+            Some(KeyboardShortcut::new(CTRL_SHIFT, Key::N))
+        );
+        assert_eq!(
+            find("window.detach_tab").shortcut,
+            Some(KeyboardShortcut::new(CTRL_ALT, Key::N))
+        );
+        assert_eq!(find("window.merge_all").shortcut, None);
+        assert_eq!(
+            find("window.close").shortcut,
+            Some(KeyboardShortcut::new(CTRL_SHIFT, Key::W))
+        );
+    }
+
+    #[test]
+    fn window_command_availability_and_actions() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let find = |id: &str| COMMANDS.iter().find(|c| c.id == id).expect("command");
+        let main = state.main_window().id;
+        assert_eq!(find("window.new").run(&state), Some(Action::NewWindow));
+        assert_eq!(find("window.detach_tab").run(&state), None);
+        assert_eq!(find("window.merge_all").run(&state), None);
+        assert_eq!(
+            find("window.close").run(&state),
+            Some(Action::CloseWindow(main))
+        );
+
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/a.pdf")]),
+            &ctx,
+        );
+        let (a, _) = state.focused_pdf().expect("pdf tab");
+        assert_eq!(
+            find("window.detach_tab").run(&state),
+            Some(Action::DetachTab(a))
+        );
+        dispatch(&mut state, Action::DetachTab(a), &ctx);
+        let second = state.windows[1].id;
+        assert_eq!(
+            find("window.merge_all").run(&state),
+            Some(Action::MergeAllWindows)
+        );
+        // Close Window acts on the window of the focused tab.
+        assert_eq!(
+            find("window.close").run(&state),
+            Some(Action::CloseWindow(second))
+        );
+    }
+
+    #[test]
+    fn window_shortcuts_are_told_apart_from_tab_shortcuts() {
+        let ctx = egui::Context::default();
+        let state = state_with_tabs(&ctx, 2);
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        let main = state.main_window().id;
+        assert_eq!(
+            press(&ctx, &state, CTRL_SHIFT, Key::W),
+            Some(Action::CloseWindow(main))
+        );
+        assert_eq!(
+            press(&ctx, &state, Modifiers::CTRL, Key::W),
+            Some(Action::CloseTab(tab))
+        );
+        assert_eq!(
+            press(&ctx, &state, CTRL_SHIFT, Key::N),
+            Some(Action::NewWindow)
+        );
+        assert_eq!(
+            press(&ctx, &state, CTRL_ALT, Key::N),
+            Some(Action::DetachTab(tab))
         );
     }
 

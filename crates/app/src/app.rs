@@ -2,17 +2,16 @@
 //!
 //! One frame:
 //! 1. `logic()` turns outside events (the file chooser's result) into actions.
-//! 2. `ui()` draws; widgets only push actions onto the queue.
+//! 2. `ui()` draws every window (`windows::show_all`); widgets only push actions onto the queue.
 //! 3. The end of `ui()` dispatches the queue. Structure changes happen only there (rule R-6).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use egui::{Panel, Ui};
+use egui::Ui;
 use refdesk_core::{IpcListener, IpcRequest};
 
 use crate::action::{Action, OpenTarget, dispatch_queued};
-use crate::commands::{self, MenuGroup};
 use crate::i18n::tr;
 use crate::state::AppState;
 use crate::theme;
@@ -71,10 +70,8 @@ impl eframe::App for RefdeskApp {
         let ctx = ui.ctx().clone();
         let mut queue = std::mem::take(&mut self.state.actions);
 
-        queue.extend(commands::handle_shortcuts(&ctx, &self.state));
-
-        Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &self.state, &mut queue));
-        windows::show_window(ui, &mut self.state, 0, &mut queue);
+        // Every window, with its menu bar; shortcuts go to the window that has the keyboard.
+        windows::show_all(ui, &mut self.state, &mut queue);
 
         self.state.actions.append(&mut queue);
         dispatch_queued(&mut self.state, &ctx);
@@ -157,31 +154,11 @@ fn poll_file_dialog(dialog: &mut Option<Receiver<Vec<PathBuf>>>, actions: &mut V
     }
 }
 
-/// The menu bar. Its entries are the rows of the command table.
-fn menu_bar(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
-    egui::MenuBar::new().ui(ui, |ui| {
-        for group in MenuGroup::ALL {
-            ui.menu_button(tr(group.name_key()), |ui| {
-                for command in commands::in_menu(group) {
-                    let mut button = egui::Button::new(tr(command.name_key));
-                    if let Some(shortcut) = command.shortcut {
-                        button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
-                    }
-                    let enabled = (command.enabled)(state);
-                    if ui.add_enabled(enabled, button).clicked() {
-                        queue.extend(command.run(state));
-                    }
-                }
-            });
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Draws every widget of the main window for a few frames without a window; nothing may panic
+    /// Draws every widget of every window for a few frames without a window; nothing may panic
     /// and the widgets must not change the structure themselves.
     #[test]
     fn widgets_draw_for_start_page_and_pdf_tabs() {
@@ -191,8 +168,7 @@ mod tests {
             for _ in 0..3 {
                 let mut queue = Vec::new();
                 ctx.run_ui(egui::RawInput::default(), |ui| {
-                    Panel::top("menu_bar").show(ui, |ui| menu_bar(ui, &state, &mut queue));
-                    windows::show_window(ui, &mut state, 0, &mut queue);
+                    windows::show_all(ui, &mut state, &mut queue);
                 })
                 .drop_without_applying_deltas();
                 assert!(queue.is_empty(), "nothing was clicked");
@@ -203,9 +179,18 @@ mod tests {
                     Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/missing.pdf")]),
                     &ctx,
                 );
+                crate::action::dispatch(&mut state, Action::NewWindow, &ctx);
             }
         }
-        assert!(state.focused_pdf().is_some());
+        assert_eq!(state.windows.len(), 2);
+        assert!(
+            state
+                .main_window()
+                .dock
+                .tabs()
+                .iter()
+                .any(|t| state.tabs.pdf(*t).is_some())
+        );
     }
 
     #[test]
