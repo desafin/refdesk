@@ -75,6 +75,9 @@ egui·eframe·egui_dock·mupdf 의 현재 API 는 모델이 기억하는 것과 
 - egui_dock 0.22: `TabViewer::context_menu(ui, tab, path: NodePath)`, `is_closeable(&self, &Tab)`, `allowed_in_windows(&self, &mut Tab)`.
   `find_tab_from` / `remove_tab` 은 `TabPath` 를 쓴다. 드래그 상태는 비공개이고, 끄는 탭의 `Response` 는 따로 만들어지므로
   `on_tab_button` 에서 `response.dragged()` 로는 끌기를 알 수 없다(`spikes/m0/src/main.rs` 의 감지 방법 참고).
+- egui_dock 0.22(이어서): `OnCloseResponse` 는 `egui_dock::tab_viewer::OnCloseResponse` 에 있다. 내장 탭 메뉴는 자기 영어 항목(Close, Eject)을 덧붙이므로
+  끄고 `on_tab_button` 의 `response.context_menu(..)` 로 직접 그린다. `Node::Horizontal` 이 좌우, `Vertical` 이 상하 분할이다.
+  `Tree::split` 은 비율이 0..=1 밖이면 panic 한다. `DockState::new(vec![])` 는 빈 트리가 아니라 탭 없는 패인 하나다. 탭 내용은 `ScrollArea` 로 감싸지므로 `scroll_bars` 를 꺼야 한다.
 - mupdf 0.8: `Pixmap::samples()` 는 `stride()` 에 패딩이 있을 수 있다. `Document` 는 `Send` 가 아니다.
 - eframe: 창이 여러 개여도 painter 가 하나라 텍스처는 공유된다. 자식 창의 이벤트는 부모 창을 다시 그리는 것으로 처리된다.
 
@@ -592,6 +595,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 
 - 창마다 `DockLayout` 하나. 탭의 내용은 `TabId` 로 `TabStore` 에서 찾아 그린다.
 - `dock.rs` 가 제공하는 것: 탭 추가·제거·활성화, 분할, 패인 사이 이동, 탭 우클릭 메뉴 연결, `LayoutNode` 와의 상호 변환, 각 패인의 화면 사각형.
+  정확한 API 는 `crates/app/src/windows/dock.rs` 의 `DockLayout`, `DockHost`.
+- 탭을 한 창에서 다른 창으로 옮기기: `windows[from].dock.remove_tab(tab)` → `windows[to].dock.add_tab(tab, None)` → `state.focus = Some(tab)`. 탭과 `ViewState` 는 그대로다.
+- 탭 우클릭 메뉴는 `commands::TAB_MENU` 표에서 만든다. 창 목록처럼 동적인 항목은 `windows/mod.rs` 의 `tab_menu()` 에서 덧붙인다.
+- 창 하나의 내용은 `windows::show_window(ui, state, window_index, queue)` 가 그린다.
 - `transfer.rs`: 분리(`DetachTab` → 새 창을 만들고 탭을 옮김), 결합(`MoveTab`), 모두 합치기.
   끌어 놓기에 의한 분리·결합은 M0 결과에 따라 여기에 구현한다(§6).
 - 빈 창이 되면(마지막 탭이 떠나면) 그 창은 닫는다. 주 창은 시작 화면 탭을 보여 준다.
