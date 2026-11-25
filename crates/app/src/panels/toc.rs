@@ -472,7 +472,8 @@ enum RowEvent {
     CollapseAll,
 }
 
-/// Draws the panel for the focused tab `tab` of a window. Anything but a PDF tab gets a hint.
+/// Draws the table of contents section of the sidebar for the focused tab `tab` of a window.
+/// Anything but a PDF tab gets a hint.
 pub fn show(
     ui: &mut Ui,
     tabs: &mut TabStore,
@@ -480,8 +481,7 @@ pub fn show(
     tab: Option<TabId>,
     queue: &mut Vec<Action>,
 ) {
-    ui.label(RichText::new(tr("toc.title")).strong());
-    ui.separator();
+    // The section header with the title is drawn by the sidebar (`panels/sidebar.rs`).
     let Some((tab_id, Tab::Pdf(pdf))) = tab.and_then(|id| tabs.get_mut(id).map(|t| (id, t))) else {
         hint(ui, tr("toc.no_document"));
         return;
@@ -714,7 +714,7 @@ fn show_row(
 }
 
 /// The fold triangle inside `rect`: pointing down when open, right when folded.
-fn triangle(rect: Rect, open: bool, color: egui::Color32) -> Shape {
+pub(crate) fn triangle(rect: Rect, open: bool, color: egui::Color32) -> Shape {
     let c = rect.center();
     let r = 4.0;
     let points = if open {
@@ -734,7 +734,7 @@ fn triangle(rect: Rect, open: bool, color: egui::Color32) -> Shape {
 }
 
 /// A one-line text with the `matches` ranges highlighted, shortened with "…" past `max_width`.
-fn title_job(
+pub(crate) fn title_job(
     title: &str,
     matches: &[Range<usize>],
     font: egui::FontId,

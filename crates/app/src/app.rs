@@ -16,6 +16,7 @@ use refdesk_core::{IpcListener, IpcRequest, Prefs, Theme};
 
 use crate::action::{Action, OpenTarget, apply_scroll_speed, dispatch_queued};
 use crate::i18n::tr;
+use crate::panels::explorer;
 use crate::session::{self, Saver, Startup};
 use crate::state::AppState;
 use crate::theme;
@@ -27,6 +28,8 @@ pub struct RefdeskApp {
     state: AppState,
     /// Receives the files chosen in the dialog. `Some` while a dialog is open.
     dialog: Option<Receiver<Vec<PathBuf>>>,
+    /// Receives the folder chosen in the folder dialog. `Some` while it is open (WS-1).
+    folder_dialog: Option<Receiver<Option<PathBuf>>>,
     /// Requests from other `refdesk` processes (`refdesk_core::ipc`).
     remote: Receiver<IpcRequest>,
     /// Keeps the socket open for as long as the app lives.
@@ -53,6 +56,7 @@ impl RefdeskApp {
         RefdeskApp {
             state,
             dialog: None,
+            folder_dialog: None,
             remote,
             _listener: listener,
             saver,
@@ -105,6 +109,12 @@ impl eframe::App for RefdeskApp {
             self.dialog = Some(spawn_file_dialog(ctx));
         }
         poll_file_dialog(&mut self.dialog, &mut self.state.actions);
+        if std::mem::take(&mut self.state.folder_dialog_requested) && self.folder_dialog.is_none() {
+            self.folder_dialog = Some(spawn_folder_dialog(ctx));
+        }
+        poll_folder_dialog(&mut self.folder_dialog, &mut self.state.actions);
+        // WP-71: the workspace watcher saw a change; scan again.
+        explorer::poll_workspace(&self.state);
         if poll_remote_requests(&self.remote, &mut self.state.actions) {
             bring_to_front(ctx);
         }
@@ -137,11 +147,24 @@ impl eframe::App for RefdeskApp {
     }
 }
 
-/// What a request asks the application to do.
+/// What a request asks the application to do. A target that is a folder opens as the workspace
+/// (WS-1), before the files, so the files get the focus. Telling a folder from a file is one
+/// look at the disk per target, done here, by the instance that handles the request.
 fn actions_for_request(request: IpcRequest) -> Vec<Action> {
     match request {
-        IpcRequest::Open { targets } if targets.is_empty() => Vec::new(),
-        IpcRequest::Open { targets } => vec![Action::OpenFiles(targets)],
+        IpcRequest::Open { targets } => {
+            let (folders, files): (Vec<OpenTarget>, Vec<OpenTarget>) = targets
+                .into_iter()
+                .partition(|t| t.page.is_none() && t.path.is_dir());
+            let mut actions: Vec<Action> = folders
+                .into_iter()
+                .map(|t| Action::OpenFolder(t.path))
+                .collect();
+            if !files.is_empty() {
+                actions.push(Action::OpenFiles(files));
+            }
+            actions
+        }
         IpcRequest::Diff { left, right } => vec![Action::StartDiff { left, right }],
     }
 }
@@ -206,6 +229,44 @@ fn poll_file_dialog(dialog: &mut Option<Receiver<Vec<PathBuf>>>, actions: &mut V
                     .map(|path| OpenTarget { path, page: None })
                     .collect();
                 actions.push(Action::OpenFiles(targets));
+            }
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => *dialog = None,
+    }
+}
+
+/// Opens the folder chooser on its own thread (rule R-1), like [`spawn_file_dialog`].
+fn spawn_folder_dialog(ctx: &egui::Context) -> Receiver<Option<PathBuf>> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new()
+        .name("folder-dialog".into())
+        .spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title(tr("dialog.folder_title"))
+                .pick_folder();
+            // The receiver is gone only when the app is shutting down.
+            let _ = tx.send(picked);
+            ctx.request_repaint();
+        });
+    if let Err(err) = spawned {
+        log::error!("could not start the folder dialog thread: {err}");
+    }
+    rx
+}
+
+/// Checks (without blocking) whether the folder dialog has finished and queues `OpenFolder` for
+/// its result. Clears `dialog` once it is finished or its thread is gone.
+fn poll_folder_dialog(dialog: &mut Option<Receiver<Option<PathBuf>>>, actions: &mut Vec<Action>) {
+    let Some(rx) = dialog else {
+        return;
+    };
+    match rx.try_recv() {
+        Ok(picked) => {
+            *dialog = None;
+            if let Some(path) = picked {
+                actions.push(Action::OpenFolder(path));
             }
         }
         Err(TryRecvError::Empty) => {}
@@ -475,6 +536,125 @@ mod tests {
             }),
             vec![Action::OpenFiles(targets)]
         );
+    }
+
+    /// A fresh folder under the temporary directory with an empty `inside.pdf`.
+    fn temp_folder(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("refdesk-wp71-app-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("inside.pdf"), b"").expect("write file");
+        dir
+    }
+
+    #[test]
+    fn a_folder_in_an_open_request_opens_as_the_workspace_before_the_files() {
+        let dir = temp_folder("request");
+        let file = dir.join("inside.pdf");
+        let request = IpcRequest::Open {
+            targets: vec![
+                OpenTarget {
+                    path: file.clone(),
+                    page: Some(2),
+                },
+                OpenTarget {
+                    path: dir.clone(),
+                    page: None,
+                },
+            ],
+        };
+        assert_eq!(
+            actions_for_request(request),
+            vec![
+                Action::OpenFolder(dir.clone()),
+                Action::OpenFiles(vec![OpenTarget {
+                    path: file,
+                    page: Some(2)
+                }])
+            ]
+        );
+        // A folder alone.
+        assert_eq!(
+            actions_for_request(IpcRequest::Open {
+                targets: vec![OpenTarget {
+                    path: dir.clone(),
+                    page: None
+                }]
+            }),
+            vec![Action::OpenFolder(dir.clone())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_sent_by_another_instance_opens_as_the_workspace() {
+        let dir = temp_folder("remote");
+        let (tx, rx) = mpsc::channel();
+        let mut actions = Vec::new();
+        tx.send(IpcRequest::Open {
+            targets: vec![OpenTarget {
+                path: dir.clone(),
+                page: None,
+            }],
+        })
+        .expect("receiver alive");
+        assert!(poll_remote_requests(&rx, &mut actions));
+        assert_eq!(actions, vec![Action::OpenFolder(dir.clone())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_on_the_command_line_is_open_after_start() {
+        let dir = temp_folder("cli");
+        let ctx = egui::Context::default();
+        let (mut state, _saver) = initial_state(
+            Startup::empty(),
+            IpcRequest::Open {
+                targets: vec![OpenTarget {
+                    path: dir.clone(),
+                    page: None,
+                }],
+            },
+            &ctx,
+        );
+        dispatch_queued(&mut state, &ctx);
+        let ws = state
+            .workspace
+            .as_ref()
+            .expect("the folder is the workspace");
+        assert_eq!(ws.root, crate::state::normalize_path(&dir));
+        assert!(state.main_window().toc_open && state.main_window().explorer_open);
+        drop(state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_finished_folder_dialog_becomes_an_open_folder_action() {
+        let (tx, rx) = mpsc::channel();
+        let mut dialog = Some(rx);
+        let mut actions = Vec::new();
+        poll_folder_dialog(&mut dialog, &mut actions);
+        assert!(dialog.is_some() && actions.is_empty());
+        tx.send(Some(PathBuf::from("/refdesk-test/folder")))
+            .expect("receiver alive");
+        poll_folder_dialog(&mut dialog, &mut actions);
+        assert!(dialog.is_none());
+        assert_eq!(
+            actions,
+            vec![Action::OpenFolder(PathBuf::from("/refdesk-test/folder"))]
+        );
+        // Cancelled, and a dead thread.
+        let (tx, rx) = mpsc::channel();
+        let mut dialog = Some(rx);
+        tx.send(None).expect("receiver alive");
+        poll_folder_dialog(&mut dialog, &mut actions);
+        assert!(dialog.is_none() && actions.len() == 1);
+        let (tx, rx) = mpsc::channel::<Option<PathBuf>>();
+        drop(tx);
+        let mut dialog = Some(rx);
+        poll_folder_dialog(&mut dialog, &mut actions);
+        assert!(dialog.is_none() && actions.len() == 1);
     }
 
     #[test]

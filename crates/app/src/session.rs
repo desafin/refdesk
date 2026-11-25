@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use refdesk_core::{
     Config, DocRecord, DocStateDb, DocStatus, DocumentHandle, FileStamp, History, Outline, Paths,
-    Place, Session, SessionTab, SessionWindow, ViewState, fingerprint_file,
+    Place, Session, SessionTab, SessionWindow, SessionWorkspace, ViewState, fingerprint_file,
 };
 
 use crate::action::notifier;
@@ -39,6 +39,9 @@ pub const SAVE_DELAY: Duration = Duration::from_secs(2);
 /// How many recent documents the start page and quick open list.
 pub const RECENT_COUNT: usize = 20;
 
+/// How many recent workspace folders the start page lists.
+pub const RECENT_FOLDER_COUNT: usize = 5;
+
 /// A view counts as untouched while it stays on its first page within this many points of where
 /// it started (the first frame moves the anchor a little when it lays the page out).
 const UNTOUCHED_TOLERANCE_PT: f32 = 24.0;
@@ -50,6 +53,7 @@ const MAX_WINDOW_SIZE: f32 = 16384.0;
 /// The commands whose shortcuts the start page shows, if the command table has them.
 const START_PAGE_COMMANDS: &[&str] = &[
     "file.open",
+    "file.open_folder",
     "palette.quick_open",
     "palette.commands",
     "view.toggle_toc",
@@ -339,9 +343,16 @@ pub fn to_session(state: &AppState) -> Session {
                 .to_layout(|t| keys.get(&t).cloned().unwrap_or_default()),
             toc_open: window.toc_open,
             toc_width: window.toc_width,
-            ..SessionWindow::default()
+            explorer_open: window.explorer_open,
+            outline_open: window.outline_open,
+            sidebar_split: window.sidebar_split,
         });
     }
+    // The expanded folders of the main window stand for every window (WS-8).
+    session.workspace = state.workspace.as_ref().map(|ws| SessionWorkspace {
+        root: ws.root.clone(),
+        expanded: state.main_window().explorer.expanded_paths(),
+    });
     // Drops the start pages from the layouts.
     session.normalized()
 }
@@ -410,6 +421,7 @@ pub fn restore(state: &mut AppState, session: &Session, ctx: &egui::Context) {
             state.memory.set_initial_geometry(id, geom);
             state.windows[0].toc_open = saved.toc_open;
             state.windows[0].toc_width = toc_width;
+            restore_sidebar(&mut state.windows[0], saved);
             if !dock.is_empty() {
                 for old in state.windows[0].dock.tabs() {
                     state.tabs.remove(old);
@@ -422,10 +434,13 @@ pub fn restore(state: &mut AppState, session: &Session, ctx: &egui::Context) {
             window.dock = dock;
             window.toc_open = saved.toc_open;
             window.toc_width = toc_width;
+            restore_sidebar(&mut window, saved);
             state.windows.push(window);
             state.memory.set_initial_geometry(id, geom);
         }
     }
+
+    restore_workspace(state, session.workspace.as_ref(), ctx);
 
     // Focus order: the lowest rank is the focused tab, so it is noted last.
     let mut ranked: Vec<(u64, TabId)> = restored
@@ -446,6 +461,41 @@ pub fn restore(state: &mut AppState, session: &Session, ctx: &egui::Context) {
         state.focus = Some(*focus);
         state.memory.last_focus = Some(*focus);
     }
+}
+
+/// The sections of a window's sidebar (WS-8). The split is already within range
+/// (`Session::normalized`).
+fn restore_sidebar(window: &mut WindowState, saved: &SessionWindow) {
+    window.explorer_open = saved.explorer_open;
+    window.outline_open = saved.outline_open;
+    window.sidebar_split = crate::panels::sidebar::clamp_split(saved.sidebar_split);
+}
+
+/// Opens the saved workspace folder again (the scan runs in the background) and gives every
+/// window its expanded folders. A folder that is gone is skipped without a word (WS-8).
+fn restore_workspace(state: &mut AppState, saved: Option<&SessionWorkspace>, ctx: &egui::Context) {
+    let Some(saved) = saved else {
+        return;
+    };
+    // One look at the disk, like the check of a command-line argument.
+    if !saved.root.is_dir() {
+        log::info!(
+            "the workspace folder {} is gone; starting without it",
+            saved.root.display()
+        );
+        return;
+    }
+    crate::panels::explorer::start_workspace(state, normalize_path(&saved.root), ctx);
+    for window in &mut state.windows {
+        window.explorer.set_expanded_paths(saved.expanded.clone());
+    }
+}
+
+/// Remembers that `root` was opened as the workspace, for the start page's recent folders.
+pub fn record_folder(state: &mut AppState, root: &Path) {
+    let now = state.memory.now();
+    state.doc_db.record_folder(root, now);
+    state.memory.db_dirty = true;
 }
 
 /// Creates the tab for one saved tab; `None` for kinds that are not restored.
@@ -860,6 +910,12 @@ pub fn start_page(state: &mut AppState, ctx: &egui::Context) -> StartPage {
         .collect();
     StartPage {
         recent: recent_entries(state),
+        recent_folders: state
+            .doc_db
+            .recent_folders(RECENT_FOLDER_COUNT)
+            .into_iter()
+            .map(|f| f.path.clone())
+            .collect(),
         shortcuts,
         now: state.memory.now(),
     }
@@ -2052,6 +2108,7 @@ mod tests {
             ]),
             shortcuts: vec![("Open".to_owned(), "Ctrl+O".to_owned())],
             now: NOW,
+            ..StartPage::default()
         };
         let mut harness = egui_kittest::Harness::new_ui_state(
             |ui, queue: &mut Vec<Action>| {
@@ -2068,6 +2125,194 @@ mod tests {
                 path: PathBuf::from("/refdesk-test/second.pdf"),
                 page: None,
             }])]
+        );
+    }
+
+    // --- the workspace and the sidebar (WP-71) -------------------------------------------
+
+    fn empty_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create folders");
+        }
+        std::fs::write(path, b"").expect("write file");
+    }
+
+    fn workspace_index(state: &AppState) -> Option<Arc<refdesk_core::WorkspaceIndex>> {
+        state.workspace.as_ref().and_then(|w| w.scan.index())
+    }
+
+    #[test]
+    fn the_workspace_its_open_folders_and_the_sidebar_round_trip() {
+        let dir = TempDir::new("workspace");
+        let ws = dir.join("ws");
+        empty_file(&ws.join("specs/net/tcp.pdf"));
+        empty_file(&ws.join("guides/a.pdf"));
+        empty_file(&ws.join("top.pdf"));
+        let ctx = egui::Context::default();
+        let repaints = watch_repaints(&ctx);
+        let mut state = new_state();
+        dispatch(&mut state, Action::OpenFolder(ws.clone()), &ctx);
+        wait(&ctx, &repaints, "the scan", || {
+            workspace_index(&state).is_some()
+        });
+        let index = workspace_index(&state).expect("index");
+        state.windows[0].explorer.prepare(&index, None);
+        for folder in ["specs", "specs/net"] {
+            let idx = index.find(Path::new(folder)).expect("folder");
+            state.windows[0].explorer.toggle(idx);
+        }
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        {
+            let w = &mut state.windows[0];
+            w.toc_open = true;
+            w.toc_width = 320.0;
+            w.explorer_open = false;
+            w.outline_open = true;
+            w.sidebar_split = 0.3;
+            let w = &mut state.windows[1];
+            w.toc_open = true;
+            w.explorer_open = true;
+            w.outline_open = false;
+            w.sidebar_split = 0.7;
+        }
+        // A tab, so that the second window is saved.
+        let pdf_path = dir.join("doc.pdf");
+        write_pdf(&pdf_path, 1, "doc");
+        open(&mut state, &ctx, &pdf_path);
+
+        let session = to_session(&state);
+        let saved = session.workspace.clone().expect("the workspace is saved");
+        assert_eq!(saved.root, normalize_path(&ws));
+        assert_eq!(
+            saved.expanded,
+            [PathBuf::from("specs"), PathBuf::from("specs/net")]
+        );
+        let paths = Paths::under(&dir.join("state"));
+        session.save(&paths.session_file()).expect("save");
+        let loaded = Session::load(&paths.session_file());
+        assert_eq!(loaded, session);
+
+        let mut restored = new_state();
+        restore(&mut restored, &loaded, &ctx);
+        assert_eq!(
+            restored.workspace.as_ref().expect("reopened").root,
+            normalize_path(&ws)
+        );
+        let w = &restored.windows[0];
+        assert_eq!(
+            (
+                w.toc_open,
+                w.toc_width,
+                w.explorer_open,
+                w.outline_open,
+                w.sidebar_split
+            ),
+            (true, 320.0, false, true, 0.3)
+        );
+        wait(&ctx, &repaints, "the scan of the restored folder", || {
+            workspace_index(&restored).is_some()
+        });
+        let index = workspace_index(&restored).expect("index");
+        // Every window gets the folding of the saved explorer.
+        for window in &mut restored.windows {
+            window.explorer.prepare(&index, None);
+            assert_eq!(window.explorer.expanded_paths(), saved.expanded);
+        }
+        let w = restored.windows.get(1).expect("the second window");
+        assert_eq!(
+            (w.explorer_open, w.outline_open, w.sidebar_split),
+            (true, false, 0.7)
+        );
+        // Saving the restored state gives the same workspace.
+        assert_eq!(to_session(&restored).workspace, Some(saved));
+    }
+
+    #[test]
+    fn a_workspace_folder_that_is_gone_is_skipped_and_the_tabs_still_restore() {
+        let mut session = one_tab_session(
+            Path::new("/refdesk-test/wp71-tab.pdf"),
+            ViewState::new(PathBuf::from("/refdesk-test/wp71-tab.pdf")),
+        );
+        session.workspace = Some(SessionWorkspace {
+            root: PathBuf::from("/refdesk-test/wp71-gone-folder"),
+            expanded: vec![PathBuf::from("a")],
+        });
+        let ctx = egui::Context::default();
+        let mut state = new_state();
+        restore(&mut state, &session, &ctx);
+        assert!(state.workspace.is_none());
+        assert!(
+            state.focused_pdf().is_some(),
+            "the tab is restored as usual"
+        );
+        assert_eq!(to_session(&state).workspace, None);
+    }
+
+    #[test]
+    fn no_restore_starts_without_the_workspace() {
+        let dir = TempDir::new("ws-no-restore");
+        let ws = dir.join("ws");
+        empty_file(&ws.join("a.pdf"));
+        let paths = Paths::under(&dir.join("state"));
+        let session = Session {
+            workspace: Some(SessionWorkspace {
+                root: ws.clone(),
+                expanded: Vec::new(),
+            }),
+            ..Session::default()
+        };
+        session.save(&paths.session_file()).expect("save");
+        let ctx = egui::Context::default();
+        let with = |restore: bool| {
+            let mut state = new_state();
+            let _saver = start(
+                &mut state,
+                Startup::load(paths.clone(), Config::default(), restore),
+                &ctx,
+            );
+            state.workspace.map(|w| w.root)
+        };
+        assert_eq!(with(true), Some(normalize_path(&ws)));
+        assert_eq!(with(false), None, "--no-restore");
+    }
+
+    #[test]
+    fn the_start_page_lists_the_recent_folders_and_opens_one() {
+        use egui_kittest::kittest::Queryable;
+        let ctx = egui::Context::default();
+        let mut state = new_state();
+        record_folder(&mut state, Path::new("/refdesk-test/older/specs"));
+        record_folder(&mut state, Path::new("/refdesk-test/newer/guides"));
+        let page = start_page(&mut state, &ctx);
+        assert_eq!(
+            page.recent_folders,
+            [
+                PathBuf::from("/refdesk-test/newer/guides"),
+                PathBuf::from("/refdesk-test/older/specs")
+            ]
+        );
+        assert!(
+            page.shortcuts
+                .iter()
+                .any(|(name, _)| name == tr("cmd.file.open_folder"))
+        );
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, queue: &mut Vec<Action>| {
+                crate::views::start_page::show(ui, &page, queue);
+            },
+            Vec::new(),
+        );
+        harness.run();
+        harness.get_by_label("specs").click();
+        harness.run();
+        harness.get_by_label(tr("start.open_folder_button")).click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &vec![
+                Action::OpenFolder(PathBuf::from("/refdesk-test/older/specs")),
+                Action::OpenFolderDialog
+            ]
         );
     }
 }

@@ -2,7 +2,7 @@
 //! environment and touches no files, so the tests need no window.
 //!
 //! ```text
-//! refdesk [--no-restore] [--no-single-instance] [file[#page=N]]...
+//! refdesk [--no-restore] [--no-single-instance] [folder] [file[#page=N]]...
 //! refdesk --diff old.pdf new.pdf
 //! ```
 //!
@@ -336,6 +336,22 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].path, PathBuf::from(raw));
         assert_eq!(targets[0].page, None);
+    }
+
+    #[test]
+    fn a_folder_argument_stays_a_target_for_the_handling_instance_to_tell() {
+        // Whether a path is a folder is decided where the request is handled (it may be sent
+        // to a running instance), so parsing keeps it as it was typed.
+        assert_eq!(
+            parse_strs(&["specs/", "specs/a.pdf#page=3"]),
+            Cli::Run {
+                request: IpcRequest::Open {
+                    targets: vec![target("specs/", None), target("specs/a.pdf", Some(2))]
+                },
+                single_instance: true,
+                restore: true,
+            }
+        );
     }
 
     #[test]

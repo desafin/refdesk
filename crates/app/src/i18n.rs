@@ -41,6 +41,8 @@ pub const TABLE: &[Row] = &[
     ("window.name", "창 {n} — {title}", "Window {n} — {title}"),
     ("window.title", "{title} — refdesk", "{title} — refdesk"),
     ("cmd.file.open", "파일 열기…", "Open File…"),
+    ("cmd.file.open_folder", "폴더 열기…", "Open Folder…"),
+    ("cmd.file.close_folder", "폴더 닫기", "Close Folder"),
     ("cmd.tab.close", "탭 닫기", "Close Tab"),
     ("cmd.tab.next", "다음 탭", "Next Tab"),
     ("cmd.tab.prev", "이전 탭", "Previous Tab"),
@@ -197,7 +199,27 @@ pub const TABLE: &[Row] = &[
     ),
     ("status.scroll_speed", "스크롤 속도 {}", "Scroll speed {}"),
     ("cmd.app.quit", "종료", "Quit"),
-    ("cmd.view.toggle_toc", "목차 패널", "Table of Contents"),
+    (
+        "cmd.view.toggle_toc",
+        "사이드바 켜기/끄기",
+        "Toggle Sidebar",
+    ),
+    ("cmd.view.show_explorer", "탐색기 보기", "Show Explorer"),
+    (
+        "cmd.view.toggle_explorer_section",
+        "탐색기 구역 켜기/끄기",
+        "Toggle Explorer Section",
+    ),
+    (
+        "cmd.view.toggle_outline_section",
+        "목차 구역 켜기/끄기",
+        "Toggle Contents Section",
+    ),
+    (
+        "cmd.view.refresh_explorer",
+        "탐색기 새로 고침",
+        "Refresh Explorer",
+    ),
     (
         "cmd.view.toggle_breadcrumb",
         "절 경로 표시 켜기/끄기",
@@ -229,10 +251,57 @@ pub const TABLE: &[Row] = &[
     ("toc.copy_title", "제목 복사", "Copy Title"),
     ("toc.expand_all", "모두 펼치기", "Expand All"),
     ("toc.collapse_all", "모두 접기", "Collapse All"),
+    ("explorer.title", "탐색기", "Explorer"),
+    (
+        "explorer.no_folder",
+        "열린 폴더가 없습니다",
+        "No folder is open",
+    ),
+    ("explorer.open_folder", "폴더 열기", "Open Folder"),
+    (
+        "explorer.filter_hint",
+        "파일 이름 거르기",
+        "Filter file names",
+    ),
+    (
+        "explorer.scanning",
+        "폴더를 읽는 중…",
+        "Reading the folder…",
+    ),
+    (
+        "explorer.empty",
+        "이 폴더에는 PDF 파일이 없습니다",
+        "This folder has no PDF files",
+    ),
+    (
+        "explorer.truncated",
+        "항목이 너무 많아 일부만 보입니다",
+        "Too many entries: only some are shown",
+    ),
+    (
+        "explorer.failed",
+        "폴더를 읽을 수 없습니다: {}",
+        "Cannot read the folder: {}",
+    ),
+    ("explorer.retry", "다시 시도", "Try Again"),
+    (
+        "explorer.no_match",
+        "일치하는 파일이 없습니다",
+        "No matching files",
+    ),
+    ("explorer.refresh", "새로 고침", "Refresh"),
+    (
+        "explorer.refresh_manual",
+        "새로 고침 (이 폴더는 자동으로 갱신되지 않습니다)",
+        "Refresh (this folder is not updated automatically)",
+    ),
+    ("explorer.collapse_all", "모두 접기", "Collapse All"),
     ("tab.start", "시작", "Start"),
     ("tab.unknown", "(알 수 없음)", "(unknown)"),
     ("start.open_button", "파일 열기", "Open a file"),
+    ("start.open_folder_button", "폴더 열기", "Open a folder"),
     ("start.recent", "최근 문서", "Recent documents"),
+    ("start.recent_folders", "최근 폴더", "Recent folders"),
     (
         "start.no_recent",
         "최근에 연 문서가 없습니다",
@@ -263,10 +332,11 @@ pub const TABLE: &[Row] = &[
     ("doc.retry", "다시 시도", "Try Again"),
     ("dialog.title", "PDF 파일 열기", "Open PDF files"),
     ("dialog.filter", "PDF 문서", "PDF documents"),
+    ("dialog.folder_title", "폴더 열기", "Open a folder"),
     (
         "cli.help",
         "사용법:
-  refdesk [옵션] [파일[#page=N]]...
+  refdesk [옵션] [폴더] [파일[#page=N]]...
   refdesk --diff 이전.pdf 이후.pdf
 
 옵션:
@@ -277,9 +347,10 @@ pub const TABLE: &[Row] = &[
   -V, --version          버전을 보인다
   --                     이 뒤의 인자는 모두 파일로 본다
 
+폴더를 주면 그 폴더를 작업 폴더로 열어 왼쪽 탐색기에 보인다.
 이미 실행 중이면 새 창을 띄우지 않고 그 창에 탭으로 연다.",
         "Usage:
-  refdesk [options] [file[#page=N]]...
+  refdesk [options] [folder] [file[#page=N]]...
   refdesk --diff old.pdf new.pdf
 
 Options:
@@ -290,6 +361,7 @@ Options:
   -V, --version          show the version
   --                     treat everything after it as a file
 
+A folder opens as the workspace and is shown in the explorer on the left.
 If refdesk is already running, the files open as tabs in its window instead of a new one.",
     ),
     (

@@ -4,13 +4,18 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use refdesk_core::{Config, DocStateDb, DocumentHandle, Paths, Prefs, ViewState};
+use refdesk_core::{
+    Config, DocStateDb, DocumentHandle, Paths, Prefs, ViewState, WorkspaceScan, WorkspaceWatcher,
+};
 
 use crate::action::Action;
 use crate::overlays::capture::Clipboard;
 use crate::overlays::palette::PaletteState;
+use crate::panels::explorer::ExplorerState;
+use crate::panels::sidebar::DEFAULT_SPLIT;
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
 use crate::session::Memory;
 use crate::views::diff_view::{DiffDialog, DiffTab};
@@ -233,10 +238,19 @@ pub struct WindowState {
     pub id: WindowId,
     /// The panes and tabs of the window.
     pub dock: DockLayout,
-    /// The table of contents panel is shown (TOC-3).
+    /// The sidebar (explorer above, table of contents below) is shown (TOC-3, WS-7). The name
+    /// is kept from the time the sidebar held only the table of contents.
     pub toc_open: bool,
-    /// Width of the table of contents panel in logical pixels.
+    /// Width of the sidebar in logical pixels.
     pub toc_width: f32,
+    /// The explorer section of the sidebar is expanded (WS-7).
+    pub explorer_open: bool,
+    /// The table of contents section of the sidebar is expanded (WS-7).
+    pub outline_open: bool,
+    /// Share of the sidebar's height the explorer section takes while both sections are open.
+    pub sidebar_split: f32,
+    /// Folding, filter and scroll of this window's explorer; the index is shared (WS-2).
+    pub explorer: ExplorerState,
 }
 
 impl WindowState {
@@ -247,6 +261,54 @@ impl WindowState {
             dock: DockLayout::new(),
             toc_open: false,
             toc_width: DEFAULT_TOC_WIDTH,
+            explorer_open: true,
+            outline_open: true,
+            sidebar_split: DEFAULT_SPLIT,
+            explorer: ExplorerState::default(),
+        }
+    }
+}
+
+/// Whether the folder watcher of the workspace is running.
+#[derive(Debug, Default)]
+pub enum WatchState {
+    /// It is being set up on its own thread.
+    #[default]
+    Starting,
+    /// It watches the folder. Only held: dropping the watcher ends the watch.
+    Watching(#[allow(dead_code)] WorkspaceWatcher),
+    /// It could not be set up; the explorer is refreshed by hand.
+    Failed(String),
+}
+
+/// The folder opened as the workspace (WS-1, `docs/ARCHITECTURE.md` §4.13). One for the whole
+/// application; every window's explorer shows its index.
+pub struct Workspace {
+    /// The folder, normalized.
+    pub root: PathBuf,
+    /// The scan of the folder, running on its own thread.
+    pub scan: WorkspaceScan,
+    /// The watcher, filled in by the thread that sets it up.
+    pub watch: Arc<Mutex<WatchState>>,
+    /// Set by the watcher when the folder changed; the app scans again and clears it.
+    pub changed: Arc<AtomicBool>,
+}
+
+impl Workspace {
+    /// Whether the watcher is running.
+    #[cfg(test)]
+    pub fn watching(&self) -> bool {
+        matches!(
+            *self.watch.lock().unwrap_or_else(PoisonError::into_inner),
+            WatchState::Watching(_)
+        )
+    }
+
+    /// Why the watcher could not be set up, if it could not.
+    pub fn watch_error(&self) -> Option<String> {
+        match &*self.watch.lock().unwrap_or_else(PoisonError::into_inner) {
+            WatchState::Failed(e) => Some(e.clone()),
+            _ => None,
         }
     }
 }
@@ -292,6 +354,10 @@ pub struct AppState {
     /// Set by `dispatch` when the file dialog should be opened; the app starts it on the next
     /// frame and clears the flag.
     pub file_dialog_requested: bool,
+    /// Like `file_dialog_requested`, for the folder chooser (WS-1).
+    pub folder_dialog_requested: bool,
+    /// The folder opened as the workspace, if any (WS-1).
+    pub workspace: Option<Workspace>,
     /// The dialog for choosing two documents to compare, while it is open (WP-62).
     pub diff_dialog: Option<DiffDialog>,
     /// Recently closed PDF tabs, oldest first, at most [`MAX_CLOSED_TABS`].
@@ -340,6 +406,8 @@ impl AppState {
             preload: Preloader::default(),
             actions: Vec::new(),
             file_dialog_requested: false,
+            folder_dialog_requested: false,
+            workspace: None,
             diff_dialog: None,
             closed_tabs: Vec::new(),
             palette: PaletteState::default(),

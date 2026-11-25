@@ -24,6 +24,7 @@ use crate::commands::{self, MenuGroup, TAB_MENU};
 use crate::i18n::tr;
 use crate::panels::breadcrumb;
 use crate::panels::search;
+use crate::panels::sidebar;
 use crate::panels::status_bar;
 use crate::panels::toc;
 use crate::session;
@@ -316,13 +317,13 @@ pub fn show_window(
     show_status_notice(ui, state, bar.response.rect);
 
     if toc_open {
-        // The panel shows the contents of this window's focused tab; the width the user
-        // dragged it to is remembered per window.
+        // The sidebar: the explorer above, the contents of this window's focused tab below
+        // (WS-7); the width the user dragged it to is remembered per window.
         let shown = Panel::left(Id::unique(("toc", window_id)))
             .default_size(toc_width)
             .size_range(toc::TOC_WIDTH_RANGE.0..=toc::TOC_WIDTH_RANGE.1)
             .show(ui, |ui| {
-                toc::show(ui, &mut state.tabs, &state.docs, window_focus, queue);
+                sidebar::show(ui, state, window_index, window_focus, queue);
             });
         if let Some(window) = state.windows.get_mut(window_index) {
             window.toc_width = shown.response.rect.width();

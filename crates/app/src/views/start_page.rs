@@ -55,6 +55,8 @@ impl RecentEntry {
 pub struct StartPage {
     /// Recent documents, newest first.
     pub recent: Arc<Vec<RecentEntry>>,
+    /// Recent workspace folders, newest first (WS-1).
+    pub recent_folders: Vec<PathBuf>,
     /// Command name and shortcut text of a few common commands.
     pub shortcuts: Vec<(String, String)>,
     /// Unix seconds now, for the "3 days ago" texts.
@@ -103,9 +105,17 @@ pub fn show(ui: &mut Ui, page: &StartPage, queue: &mut Vec<Action>) {
                 ui.heading("refdesk");
                 ui.label(tr("start.hint"));
                 ui.add_space(8.0);
-                if ui.button(tr("start.open_button")).clicked() {
-                    queue.push(Action::OpenFileDialog);
-                }
+                // Two buttons side by side, centred.
+                let width = ui.available_width();
+                ui.horizontal(|ui| {
+                    ui.add_space((width / 2.0 - 110.0).max(0.0));
+                    if ui.button(tr("start.open_button")).clicked() {
+                        queue.push(Action::OpenFileDialog);
+                    }
+                    if ui.button(tr("start.open_folder_button")).clicked() {
+                        queue.push(Action::OpenFolderDialog);
+                    }
+                });
             });
             ui.add_space(24.0);
             let width = ui.available_width();
@@ -114,6 +124,10 @@ pub fn show(ui: &mut Ui, page: &StartPage, queue: &mut Vec<Action>) {
                 ui.add_space((width - column) / 2.0);
                 ui.vertical(|ui| {
                     ui.set_width(column);
+                    if !page.recent_folders.is_empty() {
+                        folder_list(ui, &page.recent_folders, queue);
+                        ui.add_space(16.0);
+                    }
                     recent_list(ui, page, queue);
                     if !page.shortcuts.is_empty() {
                         ui.add_space(24.0);
@@ -132,6 +146,36 @@ pub fn show(ui: &mut Ui, page: &StartPage, queue: &mut Vec<Action>) {
                 });
             });
         });
+}
+
+/// The name and the parent folder a recent folder is listed with.
+fn folder_label(path: &Path) -> (String, String) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let parent = path
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    (name, parent)
+}
+
+fn folder_list(ui: &mut Ui, folders: &[PathBuf], queue: &mut Vec<Action>) {
+    ui.strong(tr("start.recent_folders"));
+    ui.add_space(4.0);
+    for folder in folders {
+        let (name, parent) = folder_label(folder);
+        let clicked = ui
+            .add(egui::Button::new(RichText::new(name)).frame(false))
+            .on_hover_text(folder.display().to_string())
+            .clicked();
+        ui.label(RichText::new(parent).small().weak());
+        ui.add_space(4.0);
+        if clicked {
+            queue.push(Action::OpenFolder(folder.clone()));
+        }
+    }
 }
 
 fn recent_list(ui: &mut Ui, page: &StartPage, queue: &mut Vec<Action>) {

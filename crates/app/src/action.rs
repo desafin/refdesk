@@ -11,7 +11,9 @@ use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, Rect,
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::overlays::capture;
 use crate::overlays::palette::{self, PaletteMode};
+use crate::panels::explorer;
 use crate::panels::search;
+use crate::panels::sidebar::SidebarSection;
 use crate::panels::status_bar::GotoInput;
 use crate::panels::toc::TocState;
 use crate::session;
@@ -31,6 +33,22 @@ pub enum Action {
     OpenFiles(Vec<OpenTarget>),
     /// Ask for the file chooser.
     OpenFileDialog,
+    /// Make this folder the workspace and show it in the explorer (WS-1).
+    OpenFolder(PathBuf),
+    /// Ask for the folder chooser (WS-1).
+    OpenFolderDialog,
+    /// Close the workspace folder. Open tabs stay.
+    CloseFolder,
+    /// Scan the workspace folder again (WS-11).
+    RefreshWorkspace,
+    /// Open a file clicked in the explorer of a window, in that window; an open document gets
+    /// the focus instead (WS-3). The one action every explorer click that opens a file makes.
+    OpenFromExplorer {
+        /// The file.
+        path: PathBuf,
+        /// The window whose explorer was clicked.
+        window: WindowId,
+    },
     /// Close a tab.
     CloseTab(TabId),
     /// Close every other tab of the pane that holds this tab.
@@ -177,8 +195,20 @@ pub enum Action {
     Back(TabId),
     /// Move a PDF tab one step forward in its history, mirroring `Back`.
     Forward(TabId),
-    /// Show or hide the table of contents panel of the focused window (TOC-3).
+    /// Show or hide the sidebar (explorer and table of contents) of the focused window (TOC-3,
+    /// WS-7).
     ToggleToc,
+    /// Show the explorer of the focused window: open the sidebar and its explorer section and
+    /// put the keyboard in the filter box (WS-7).
+    ShowExplorer,
+    /// Fold or unfold one section of a window's sidebar. A hidden sidebar is shown with the
+    /// section open (WS-7).
+    ToggleSidebarSection {
+        /// The window.
+        window: WindowId,
+        /// The section.
+        section: SidebarSection,
+    },
     /// Show or hide the section path line above PDF views (TOC-6).
     ToggleBreadcrumb,
     /// Close the application.
@@ -240,6 +270,20 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::OpenFileDialog => {
             state.file_dialog_requested = true;
             ctx.request_repaint();
+        }
+        Action::OpenFolder(path) => explorer::open_folder(state, &path, ctx),
+        Action::OpenFolderDialog => {
+            state.folder_dialog_requested = true;
+            ctx.request_repaint();
+        }
+        Action::CloseFolder => explorer::close_folder(state),
+        Action::RefreshWorkspace => explorer::refresh(state),
+        Action::OpenFromExplorer { path, window } => {
+            // The file opens in the window whose explorer was clicked.
+            if let Some(w) = state.window_index(window) {
+                state.follow_window_focus(w);
+            }
+            open_file(state, OpenTarget { path, page: None }, ctx);
         }
         Action::CloseTab(tab) => close_tab(state, tab),
         Action::CloseOtherTabs(tab) => close_other_tabs(state, tab),
@@ -384,6 +428,32 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             let w = state.focused_window_index();
             if let Some(window) = state.windows.get_mut(w) {
                 window.toc_open = !window.toc_open;
+            }
+        }
+        Action::ShowExplorer => {
+            let w = state.focused_window_index();
+            if let Some(window) = state.windows.get_mut(w) {
+                window.toc_open = true;
+                window.explorer_open = true;
+                window.explorer.focus_filter = true;
+            }
+            ctx.request_repaint();
+        }
+        Action::ToggleSidebarSection { window, section } => {
+            if let Some(window) = state
+                .window_index(window)
+                .and_then(|w| state.windows.get_mut(w))
+            {
+                let open = match section {
+                    SidebarSection::Explorer => &mut window.explorer_open,
+                    SidebarSection::Outline => &mut window.outline_open,
+                };
+                if window.toc_open {
+                    *open = !*open;
+                } else {
+                    *open = true;
+                    window.toc_open = true;
+                }
             }
         }
         Action::ToggleBreadcrumb => {
@@ -1948,10 +2018,10 @@ mod tests {
         let mut dock = DockLayout::new();
         dock.add_tab(second_tab, None);
         state.windows.push(WindowState {
-            id,
             dock,
             toc_open: false,
             toc_width: DEFAULT_TOC_WIDTH,
+            ..WindowState::new(id)
         });
         let open_flags =
             |state: &AppState| -> Vec<bool> { state.windows.iter().map(|w| w.toc_open).collect() };

@@ -10,6 +10,7 @@ use refdesk_core::ZoomMode;
 
 use crate::action::Action;
 use crate::overlays::palette::PaletteMode;
+use crate::panels::sidebar::SidebarSection;
 use crate::state::{AppState, PdfTab, Tab, TabId};
 use crate::windows::dock::SplitDir;
 
@@ -98,6 +99,19 @@ const CTRL_ALT: Modifiers = Modifiers::CTRL.plus(Modifiers::ALT);
 
 fn always(_: &AppState) -> bool {
     true
+}
+
+/// A folder is open as the workspace (WS-1).
+fn has_workspace(state: &AppState) -> bool {
+    state.workspace.is_some()
+}
+
+/// Folds or unfolds a sidebar section of the focused window (WS-7).
+fn toggle_section(state: &AppState, section: SidebarSection) -> Option<Action> {
+    Some(Action::ToggleSidebarSection {
+        window: state.focused_window().id,
+        section,
+    })
 }
 
 fn has_pdf_focus(state: &AppState) -> bool {
@@ -223,6 +237,24 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::OpenFileDialog),
+    },
+    Command {
+        id: "file.open_folder",
+        name_key: "cmd.file.open_folder",
+        menu: MenuGroup::File,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::O)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::OpenFolderDialog),
+    },
+    Command {
+        id: "file.close_folder",
+        name_key: "cmd.file.close_folder",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_workspace,
+        action: |_| Some(Action::CloseFolder),
     },
     Command {
         id: "tab.close",
@@ -394,6 +426,42 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::ToggleToc),
+    },
+    Command {
+        id: "view.show_explorer",
+        name_key: "cmd.view.show_explorer",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::E)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ShowExplorer),
+    },
+    Command {
+        id: "view.toggle_explorer_section",
+        name_key: "cmd.view.toggle_explorer_section",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |s| toggle_section(s, SidebarSection::Explorer),
+    },
+    Command {
+        id: "view.toggle_outline_section",
+        name_key: "cmd.view.toggle_outline_section",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |s| toggle_section(s, SidebarSection::Outline),
+    },
+    Command {
+        id: "view.refresh_explorer",
+        name_key: "cmd.view.refresh_explorer",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_workspace,
+        action: |_| Some(Action::RefreshWorkspace),
     },
     Command {
         id: "view.toggle_breadcrumb",
@@ -1199,6 +1267,104 @@ mod tests {
     fn every_command_is_in_a_menu_and_menus_cover_the_table() {
         let listed: usize = MenuGroup::ALL.iter().map(|g| in_menu(*g).count()).sum();
         assert_eq!(listed, COMMANDS.len());
+    }
+
+    #[test]
+    fn workspace_and_sidebar_commands_are_in_their_menus_with_their_shortcuts() {
+        let file: Vec<&str> = in_menu(MenuGroup::File).map(|c| c.id).collect();
+        let view: Vec<&str> = in_menu(MenuGroup::View).map(|c| c.id).collect();
+        // Next to the commands they belong with.
+        assert_eq!(
+            file[..3],
+            ["file.open", "file.open_folder", "file.close_folder"]
+        );
+        let toc = view
+            .iter()
+            .position(|id| *id == "view.toggle_toc")
+            .expect("toggle_toc");
+        assert_eq!(
+            view[toc..toc + 5],
+            [
+                "view.toggle_toc",
+                "view.show_explorer",
+                "view.toggle_explorer_section",
+                "view.toggle_outline_section",
+                "view.refresh_explorer",
+            ]
+        );
+        let shortcut = |id: &str| command(id).and_then(|c| c.shortcut);
+        assert_eq!(
+            shortcut("file.open_folder"),
+            Some(KeyboardShortcut::new(CTRL_SHIFT, Key::O))
+        );
+        assert_eq!(
+            shortcut("view.show_explorer"),
+            Some(KeyboardShortcut::new(CTRL_SHIFT, Key::E))
+        );
+        assert_eq!(
+            shortcut("view.toggle_toc"),
+            Some(KeyboardShortcut::new(Modifiers::NONE, Key::F9))
+        );
+    }
+
+    #[test]
+    fn workspace_commands_need_a_workspace_and_section_commands_name_the_focused_window() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let run = |state: &AppState, id: &str| command(id).and_then(|c| c.run(state));
+        assert_eq!(run(&state, "file.close_folder"), None);
+        assert_eq!(run(&state, "view.refresh_explorer"), None);
+        assert_eq!(
+            run(&state, "file.open_folder"),
+            Some(Action::OpenFolderDialog)
+        );
+        assert_eq!(
+            run(&state, "view.show_explorer"),
+            Some(Action::ShowExplorer)
+        );
+        assert_eq!(
+            run(&state, "view.toggle_outline_section"),
+            Some(Action::ToggleSidebarSection {
+                window: state.main_window().id,
+                section: SidebarSection::Outline
+            })
+        );
+        dispatch(&mut state, Action::NewWindow, &ctx);
+        assert_eq!(
+            run(&state, "view.toggle_explorer_section"),
+            Some(Action::ToggleSidebarSection {
+                window: state.windows[1].id,
+                section: SidebarSection::Explorer
+            })
+        );
+        dispatch(
+            &mut state,
+            Action::OpenFolder(std::path::PathBuf::from("/refdesk-test/wp71-folder")),
+            &ctx,
+        );
+        assert_eq!(run(&state, "file.close_folder"), Some(Action::CloseFolder));
+        assert_eq!(
+            run(&state, "view.refresh_explorer"),
+            Some(Action::RefreshWorkspace)
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_o_opens_a_folder_and_ctrl_o_a_file() {
+        let ctx = egui::Context::default();
+        let state = AppState::new();
+        assert_eq!(
+            press(&ctx, &state, CTRL_SHIFT, Key::O),
+            Some(Action::OpenFolderDialog)
+        );
+        assert_eq!(
+            press(&ctx, &state, Modifiers::CTRL, Key::O),
+            Some(Action::OpenFileDialog)
+        );
+        assert_eq!(
+            press(&ctx, &state, CTRL_SHIFT, Key::E),
+            Some(Action::ShowExplorer)
+        );
     }
 
     #[test]
