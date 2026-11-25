@@ -161,6 +161,7 @@ pub fn show(
         docs,
         workspace,
         global_search,
+        search_history,
         ..
     } = state;
     let Some(window) = windows.get_mut(window_index) else {
@@ -182,7 +183,15 @@ pub fn show(
     if window.sidebar_view == SidebarView::Search {
         let any_docs = tabs.iter().any(|(_, t)| matches!(t, Tab::Pdf(_)));
         let mut body = body_ui(ui, full, "search_body");
-        global_search::show_view(&mut body, global_search, docs, any_docs, window_id, queue);
+        global_search::show_view(
+            &mut body,
+            global_search,
+            docs,
+            any_docs,
+            window_id,
+            search_history,
+            queue,
+        );
         ui.allocate_rect(whole, Sense::hover());
         return;
     }

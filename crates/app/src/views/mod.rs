@@ -49,6 +49,8 @@ pub mod test_support {
         /// Blocks until the next repaint request. Panics at `deadline`.
         pub fn wait_one(&self, what: &str, deadline: Instant) {
             let left = deadline.saturating_duration_since(Instant::now());
+            // Repaint requests that keep coming must not keep a wait alive past its deadline.
+            assert!(!left.is_zero(), "timed out waiting for {what}");
             match self.0.recv_timeout(left) {
                 Ok(()) => {}
                 Err(RecvTimeoutError::Timeout) => panic!("timed out waiting for {what}"),

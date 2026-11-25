@@ -23,8 +23,8 @@ use egui::{
     WidgetInfo, vec2,
 };
 use refdesk_core::{
-    LayoutNode, Notifier, PageLayout, Place, Point, Rect as PageRect, SearchError, SearchJob,
-    SearchMatch, SearchQuery, SearchSnapshot, Size, natural_cmp,
+    LayoutNode, Notifier, PageLayout, Place, Point, Rect as PageRect, SearchError, SearchHistory,
+    SearchJob, SearchMatch, SearchQuery, SearchSnapshot, Size, natural_cmp,
 };
 
 use crate::action::Action;
@@ -33,6 +33,7 @@ use crate::panels::search::{
     self, MatchKey, MatchRect, PageIndex, find_key, line_job, match_job, match_key, match_rects,
     row_text,
 };
+use crate::panels::search_history::{self, HistoryEvent, Recall, Settle, SettleStep};
 use crate::panels::sidebar::SidebarView;
 use crate::panels::toc::{scroll_target, triangle};
 use crate::state::{
@@ -524,6 +525,10 @@ pub struct GlobalSearch {
     /// The last time the user was taken to have used the query (tests; see
     /// [`GlobalSearch::note_used`]).
     pub last_use: Option<QueryUse>,
+    /// ↑ / ↓ in the input field walk through the search history (FIND-13).
+    pub recall: Recall,
+    /// Records the query when it has stayed for a while with results (FIND-14).
+    pub settle: Settle,
     /// The query the jobs run; `None` while nothing is searched.
     running: Option<SearchQuery>,
     due: Option<Due>,
@@ -570,11 +575,29 @@ impl GlobalSearch {
         self.due = Some(Due::Now);
     }
 
-    /// The query was used (see [`QueryUse`]). The search history (WP-56) records the query here.
+    /// The query was used (see [`QueryUse`]): remembers how. [`used`] calls this and writes the
+    /// query to the search history.
     pub fn note_used(&mut self, how: QueryUse) {
         if self.has_query() {
             self.last_use = Some(how);
         }
+    }
+
+    /// The search for the query shown has results: what [`Settle`] waits for.
+    fn has_current_matches(&self) -> bool {
+        self.running.as_ref() == Some(&self.query)
+            && self
+                .docs
+                .iter()
+                .any(|d| d.live && !d.snapshot.matches.is_empty())
+    }
+
+    /// Puts a query from the history into the field of `window` and searches for it at once.
+    /// The field gets the keyboard with all its text selected.
+    fn use_query(&mut self, query: SearchQuery, window: WindowId) {
+        self.query = query;
+        self.focus_input = Some(window);
+        self.search_now();
     }
 
     /// Drops every job and everything they found; the query stays.
@@ -587,6 +610,8 @@ impl GlobalSearch {
 
     /// Clears the search: the query, the jobs, the results and the highlights. The options stay.
     pub fn clear(&mut self) {
+        self.recall.reset();
+        self.settle.reset();
         self.clear_results();
         self.query.text.clear();
         self.due = None;
@@ -953,19 +978,38 @@ pub fn show(state: &mut AppState, ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
+/// The user used the query (see [`QueryUse`]): it goes to the search history unless it is the
+/// newest entry already, and settling does not record it again (FIND-14). Nothing for an empty
+/// query.
+fn used(state: &mut AppState, how: QueryUse) {
+    if !state.global_search.has_query() {
+        return;
+    }
+    state.global_search.note_used(how);
+    let query = state.global_search.query.clone();
+    state.global_search.settle.used(&query);
+    search_history::record(state, &query, None);
+}
+
 /// `Action::GlobalSearchFor` (`--find`): searches all documents for `text` and shows the search
-/// view in the sidebar of the focused window.
+/// view in the sidebar of the focused window. A text asked for by name is a used query.
 pub fn search_for(state: &mut AppState, text: String, ctx: &egui::Context) {
     open_view(state);
     let search = &mut state.global_search;
+    search.recall.reset();
     search.query.text = text;
     search.search_now();
+    let query = search.query.clone();
+    search.settle.used(&query);
+    search_history::record(state, &query, None);
     ctx.request_repaint();
 }
 
-/// `Action::ClearGlobalSearch`.
+/// `Action::ClearGlobalSearch`. A query that was searched is remembered before it goes.
 pub fn clear(state: &mut AppState) {
-    state.global_search.note_used(QueryUse::Cleared);
+    if state.global_search.searched() {
+        used(state, QueryUse::Cleared);
+    }
     state.global_search.clear();
 }
 
@@ -1024,7 +1068,7 @@ pub fn go_to_clicked(
     window: WindowId,
     ctx: &egui::Context,
 ) {
-    state.global_search.note_used(QueryUse::ResultClicked);
+    used(state, QueryUse::ResultClicked);
     go_to_result(state, doc, index, Some(window), ctx);
 }
 
@@ -1052,7 +1096,7 @@ pub fn step(state: &mut AppState, forward: bool, ctx: &egui::Context) {
     let Some((doc, index)) = step_target(&search.counts(), from, forward) else {
         return;
     };
-    state.global_search.note_used(QueryUse::Step);
+    used(state, QueryUse::Step);
     let window = state.focused_window().id;
     go_to_result(state, doc, index, Some(window), ctx);
 }
@@ -1074,10 +1118,11 @@ pub fn show_view(
     docs: &DocStore,
     any_docs: bool,
     window: WindowId,
+    history: &SearchHistory,
     queue: &mut Vec<Action>,
 ) {
     ui.add_space(2.0);
-    show_input(ui, search, window, queue);
+    show_input(ui, search, window, history, queue);
     if let Some(message) = search.error() {
         ui.colored_label(
             ui.visuals().error_fg_color,
@@ -1099,25 +1144,57 @@ pub fn show_view(
     show_results(ui, search, docs, window, queue);
 }
 
-/// The input field of the search view and its option and clear buttons, with their keys. This
-/// is where the query is typed; the moments it counts as used are marked
-/// ([`GlobalSearch::note_used`] is called for them from `dispatch`: Enter and F4 queue
-/// `GlobalSearchStep`, the clear button `ClearGlobalSearch`, a result row `GlobalSearchGoTo`).
+/// The input field of the search view and its history, option and clear buttons, with their
+/// keys. This is where the query is typed; the moments it counts as used are marked ([`used`]
+/// is called for them from `dispatch`: Enter and F4 queue `GlobalSearchStep`, the clear button
+/// `ClearGlobalSearch`, a result row `GlobalSearchGoTo`).
+///
+/// `history` is the search history, shared with the search bars of the views: ↑ / ↓ in the
+/// field walk through it, the history button lists it, and a query that stays for a while with
+/// results is recorded (FIND-13, FIND-14).
 pub fn show_input(
     ui: &mut Ui,
     search: &mut GlobalSearch,
     window: WindowId,
+    history: &SearchHistory,
     queue: &mut Vec<Action>,
 ) {
     let ctx = ui.ctx().clone();
     let now = ui.input(|i| i.time);
     let id = input_id(window);
+    let history_id = id.with("history");
     let in_field = ui.memory(|m| m.has_focus(id));
+    // An open history list has Esc and Enter.
+    let list_open = search_history::is_list_open(&ctx, history_id);
+
+    // ↑ / ↓ walk through the history. A one-line field would move its cursor with them, so they
+    // are taken before it sees them; with Shift they stay the field's (they select).
+    if in_field && !list_open {
+        let (older, newer) = ui.input_mut(|i| {
+            let walk = !i.modifiers.shift;
+            (
+                walk && i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                walk && i.consume_key(Modifiers::NONE, Key::ArrowDown),
+            )
+        });
+        if older || newer {
+            let current = search.query.clone();
+            let recalled = if older {
+                search.recall.older(history, &current)
+            } else {
+                search.recall.newer(history, &current)
+            };
+            if let Some(query) = recalled {
+                search.use_query(query, window);
+                ctx.request_repaint();
+            }
+        }
+    }
 
     // The keys of the field, taken before the field sees them. The shortcut table does not see
     // keys while a text field has the keyboard, so F4 is handled here too. Shift is compared
     // loosely, so the variants with Shift are asked first.
-    if in_field {
+    if in_field && !list_open {
         let (escape, prev, next, select) = ui.input_mut(|i| {
             let escape = i.consume_key(Modifiers::NONE, Key::Escape);
             let prev = i.consume_key(Modifiers::SHIFT, Key::Enter)
@@ -1153,12 +1230,13 @@ pub fn show_input(
     let mut edited = false;
     let mut options_changed = false;
     let mut clear = false;
+    let mut history_event = None;
     let error = search.error().is_some();
     let no_result =
         search.searched() && search.totals() == Totals::default() && !search.query.text.is_empty();
     let dark = ui.visuals().dark_mode;
     ui.horizontal_wrapped(|ui| {
-        let buttons = 4.0 * 30.0;
+        let buttons = 5.0 * 30.0;
         let mut field = TextEdit::singleline(&mut search.query.text)
             .id(id)
             .hint_text(tr("gsearch.hint"))
@@ -1171,10 +1249,9 @@ pub fn show_input(
             });
         }
         if ui.add(field).changed() {
-            // WP-56: the search history's `Settle` ("unchanged for two seconds with results")
-            // watches the text from here.
             edited = true;
         }
+        history_event = search_history::history_button(ui, history_id, history);
         let toggles = [
             ("Aa", &mut search.query.case_sensitive, "find.case"),
             (
@@ -1196,12 +1273,26 @@ pub fn show_input(
             }
         }
         if !search.query.text.is_empty()
-            && ui.button("✕").on_hover_text(tr("gsearch.clear")).clicked()
+            && ui.button("×").on_hover_text(tr("gsearch.clear")).clicked()
         {
             clear = true;
         }
     });
 
+    match history_event {
+        Some(HistoryEvent::Pick(query)) => {
+            search.recall.reset();
+            search.use_query(query, window);
+            ctx.request_repaint();
+        }
+        Some(HistoryEvent::Remove(index)) => queue.push(Action::RemoveSearchHistory(index)),
+        Some(HistoryEvent::Clear) => queue.push(Action::ClearSearchHistory),
+        None => {}
+    }
+    if edited || options_changed {
+        // What is in the field is the user's own again: ↑ starts from the newest entry.
+        search.recall.reset();
+    }
     if edited {
         search.edited(now);
         // The search starts when the delay is over; wake up then.
@@ -1214,6 +1305,17 @@ pub fn show_input(
     if clear {
         // Used: the clear button (FIND-14); `dispatch` notes it before the query goes.
         queue.push(Action::ClearGlobalSearch);
+        return;
+    }
+
+    // Settling: a query with results that stays for a while is recorded (FIND-14).
+    let has_matches = search.has_current_matches();
+    match search.settle.observe(&search.query, has_matches, now) {
+        SettleStep::Idle => {}
+        SettleStep::Wait(left) => ctx.request_repaint_after(left),
+        SettleStep::Record { query, replaces } => {
+            queue.push(Action::RecordSearch { query, replaces });
+        }
     }
 }
 
@@ -1831,6 +1933,9 @@ mod tests {
         repaints: Repaints,
         state: AppState,
         time: f64,
+        /// How far the clock goes with every frame. Tests of the two-second settling set it to
+        /// 0 and move `time` themselves: frames run as often as the searches ask for them.
+        step: f64,
     }
 
     impl Rig {
@@ -1842,6 +1947,7 @@ mod tests {
                 repaints,
                 state: AppState::new(),
                 time: 0.0,
+                step: 1.0 / 60.0,
             }
         }
 
@@ -1867,7 +1973,7 @@ mod tests {
         }
 
         fn input(&mut self, events: Vec<egui::Event>) -> egui::RawInput {
-            self.time += 1.0 / 60.0;
+            self.time += self.step;
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0))),
                 time: Some(self.time),
@@ -2617,5 +2723,174 @@ mod tests {
             })
             .drop_without_applying_deltas();
         assert_eq!(action, Some(Action::GlobalSearchStep { forward: false }));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The search history (WP-57: FIND-13, FIND-14 for this input field)
+    // -----------------------------------------------------------------------------------------
+
+    fn history_texts(rig: &Rig) -> Vec<String> {
+        let entries = rig.state.search_history.entries();
+        entries.iter().map(|e| e.text.clone()).collect()
+    }
+
+    fn plain(text: &str) -> SearchQuery {
+        SearchQuery {
+            text: text.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn press(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// Types `text` into the focused field, lets the input delay pass and waits for the
+    /// searches. The clock stands still otherwise (see `Rig::step`).
+    fn type_text(rig: &mut Rig, text: &str) {
+        rig.step = 0.0;
+        rig.frame(vec![egui::Event::Text(text.into())]);
+        rig.time += search::INPUT_DELAY_SECS + 0.05;
+        // `tick` reads the clock of the frame before it: one frame to move the clock on, one
+        // in which the search that is due starts.
+        rig.frame(Vec::new());
+        rig.frame(Vec::new());
+        rig.settle();
+    }
+
+    /// Shows the search view, types `text` into its field and waits for the searches.
+    fn type_query(rig: &mut Rig, text: &str) {
+        dispatch(&mut rig.state, Action::ShowGlobalSearch, &rig.ctx);
+        rig.frame(Vec::new());
+        type_text(rig, text);
+        assert_eq!(rig.state.global_search.query.text, text);
+    }
+
+    #[test]
+    fn stepping_clicking_and_clearing_record_the_query_but_typing_alone_does_not() {
+        let dir = Dir::new("history-used");
+        let mut rig = Rig::new();
+        let a = rig.open(&dir.doc("a.pdf", 3, &[(0, 100.0), (2, 100.0)]));
+        type_query(&mut rig, "hello");
+        assert!(
+            history_texts(&rig).is_empty(),
+            "typing alone records nothing"
+        );
+
+        dispatch(
+            &mut rig.state,
+            Action::GlobalSearchStep { forward: true },
+            &rig.ctx,
+        );
+        assert_eq!(history_texts(&rig), ["hello"]);
+
+        rig.state.search_history.clear();
+        let (doc, window) = (rig.doc(a), rig.state.windows[0].id);
+        let go = Action::GlobalSearchGoTo {
+            doc,
+            index: 1,
+            window,
+        };
+        dispatch(&mut rig.state, go, &rig.ctx);
+        assert_eq!(history_texts(&rig), ["hello"]);
+
+        rig.state.search_history.clear();
+        dispatch(&mut rig.state, Action::ClearGlobalSearch, &rig.ctx);
+        assert_eq!(history_texts(&rig), ["hello"], "remembered before it goes");
+        assert!(!rig.state.global_search.has_query());
+
+        // A text that was never searched is not remembered when it is cleared.
+        rig.state.search_history.clear();
+        rig.state.global_search.query.text = "never".to_owned();
+        dispatch(&mut rig.state, Action::ClearGlobalSearch, &rig.ctx);
+        assert!(history_texts(&rig).is_empty());
+    }
+
+    #[test]
+    fn a_text_asked_for_by_name_is_recorded_at_once() {
+        let dir = Dir::new("history-find");
+        let mut rig = Rig::new();
+        rig.open(&dir.doc("a.pdf", 2, &[(0, 100.0)]));
+        rig.search("hello");
+        assert_eq!(history_texts(&rig), ["hello"]);
+        // Asking again does not make a second entry.
+        rig.search("hello");
+        assert_eq!(history_texts(&rig), ["hello"]);
+    }
+
+    #[test]
+    fn a_query_that_stays_with_results_is_recorded_after_two_seconds() {
+        let dir = Dir::new("history-settle");
+        let mut rig = Rig::new();
+        rig.open(&dir.doc("a.pdf", 2, &[(0, 100.0)]));
+        type_query(&mut rig, "hello");
+        rig.frame(Vec::new());
+        assert!(history_texts(&rig).is_empty(), "not yet");
+        rig.time += search_history::SETTLE_SECS + 0.5;
+        rig.frame(Vec::new());
+        assert_eq!(history_texts(&rig), ["hello"]);
+
+        // A query without results is not recorded however long it stays.
+        type_text(&mut rig, "zz");
+        assert_eq!(rig.state.global_search.query.text, "hellozz");
+        assert_eq!(rig.state.global_search.totals().matches, 0);
+        rig.time += search_history::SETTLE_SECS + 0.5;
+        rig.frame(Vec::new());
+        rig.frame(Vec::new());
+        assert_eq!(history_texts(&rig), ["hello"]);
+    }
+
+    #[test]
+    fn up_and_down_in_the_field_walk_through_the_history_and_search_at_once() {
+        let dir = Dir::new("history-recall");
+        let mut rig = Rig::new();
+        let a = rig.open(&dir.doc("a.pdf", 3, &[(0, 100.0), (2, 100.0)]));
+        rig.state.search_history.record(&plain("heading"), 1);
+        rig.state.search_history.record(&plain("hello"), 2);
+        dispatch(&mut rig.state, Action::ShowGlobalSearch, &rig.ctx);
+        // The field keeps the arrow keys from its second frame with the keyboard on.
+        rig.frame(Vec::new());
+        rig.frame(Vec::new());
+        assert!(rig.ctx.text_edit_focused(), "the field has the keyboard");
+
+        rig.frame(vec![press(Key::ArrowUp)]);
+        assert_eq!(rig.state.global_search.query.text, "hello", "the newest");
+        rig.settle();
+        assert_eq!(rig.counts(), vec![(rig.doc(a), 2)], "searched at once");
+        assert!(rig.ctx.text_edit_focused(), "the field keeps the keyboard");
+
+        rig.frame(vec![press(Key::ArrowUp)]);
+        assert_eq!(rig.state.global_search.query.text, "heading");
+        rig.frame(vec![press(Key::ArrowUp)]);
+        assert_eq!(rig.state.global_search.query.text, "heading", "the oldest");
+        rig.frame(vec![press(Key::ArrowDown)]);
+        assert_eq!(rig.state.global_search.query.text, "hello");
+        rig.frame(vec![press(Key::ArrowDown)]);
+        assert_eq!(
+            rig.state.global_search.query.text, "",
+            "back at what was typed"
+        );
+        // Walking through the history is not using a query.
+        assert_eq!(history_texts(&rig), ["hello", "heading"]);
+    }
+
+    #[test]
+    fn the_history_button_stands_beside_the_field() {
+        let dir = Dir::new("history-button");
+        let mut rig = Rig::new();
+        rig.open(&dir.doc("a.pdf", 2, &[(0, 100.0)]));
+        dispatch(&mut rig.state, Action::ShowGlobalSearch, &rig.ctx);
+        rig.frame(Vec::new());
+        let texts = rig.texts();
+        assert!(
+            texts.iter().any(|t| t == tr("find.history_label")),
+            "no history button in {texts:?}"
+        );
     }
 }

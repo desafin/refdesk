@@ -1348,10 +1348,11 @@ pub fn show_bar(
 }
 
 /// The keys of the search bar: Esc closes it, Enter and Shift+Enter step. While the field has the
-/// keyboard F3, Shift+F3 step too, Ctrl+F selects the text of the field (the shortcut table
-/// does not see keys while a text field has the keyboard), and ↑ / ↓ walk through the search
-/// history (FIND-13). A single-line `TextEdit` would move its cursor on ↑ / ↓, so the keys are
-/// taken here, before the field is drawn.
+/// keyboard F3, Shift+F3 step too, Ctrl+F selects the text of the field, Ctrl+Shift+F and F4,
+/// Shift+F4 go on to the search in all documents (the shortcut table does not see keys while a
+/// text field has the keyboard), and ↑ / ↓ walk through the search history (FIND-13). A
+/// single-line `TextEdit` would move its cursor on ↑ / ↓, so the keys are taken here, before the
+/// field is drawn.
 fn handle_keys(
     ui: &mut Ui,
     pdf: &mut PdfTab,
@@ -1363,7 +1364,7 @@ fn handle_keys(
 ) {
     let ctx = ui.ctx().clone();
     // Shift is compared loosely, so the variant with Shift is asked first.
-    let (escape, prev, next, find, older, newer) = ui.input_mut(|i| {
+    let (escape, prev, next, find, older, newer, all) = ui.input_mut(|i| {
         // Shift+↑ / Shift+↓ are the field's own (selecting), not the history's.
         let walk = in_field && !i.modifiers.shift;
         let older = walk && i.consume_key(Modifiers::NONE, Key::ArrowUp);
@@ -1373,10 +1374,24 @@ fn handle_keys(
             || (in_field && i.consume_key(Modifiers::SHIFT, Key::F3));
         let next = i.consume_key(Modifiers::NONE, Key::Enter)
             || (in_field && i.consume_key(Modifiers::NONE, Key::F3));
+        // The search in all documents (FIND-7, FIND-10), which the shortcut table would start.
+        let all = if !in_field {
+            None
+        } else if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::F) {
+            Some(Action::ShowGlobalSearch)
+        } else if i.consume_key(Modifiers::SHIFT, Key::F4) {
+            Some(Action::GlobalSearchStep { forward: false })
+        } else if i.consume_key(Modifiers::NONE, Key::F4) {
+            Some(Action::GlobalSearchStep { forward: true })
+        } else {
+            None
+        };
         let find = in_field && i.consume_key(Modifiers::CTRL, Key::F);
-        (escape, prev, next, find, older, newer)
+        (escape, prev, next, find, older, newer, all)
     });
-    if escape {
+    if let Some(action) = all {
+        queue.push(action);
+    } else if escape {
         close_and_record(pdf, history, queue);
         ctx.memory_mut(|m| m.surrender_focus(id));
     } else if prev {
@@ -3433,6 +3448,46 @@ mod tests {
         rig.frames(2);
         assert!(rig.pdf(tab).ui.scroll().y > before.y, "the view scrolled");
         assert!(!rig.search(tab).open);
+    }
+
+    #[test]
+    fn the_field_passes_the_keys_of_the_search_in_all_documents_on() {
+        use crate::panels::sidebar::SidebarView;
+        let pdf = needle_doc("wp57-keys", &[(0, 150.0), (1, 150.0)]);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        // Ctrl+Shift+F in the field of the bar is not Ctrl+F: it shows the search view.
+        rig.key(Key::F, Modifiers::CTRL | Modifiers::SHIFT);
+        rig.frames(2);
+        assert_eq!(rig.state.windows[0].sidebar_view, SidebarView::Search);
+        assert!(rig.state.windows[0].toc_open);
+
+        // F4 in the field of the bar steps through the results of the search in all documents.
+        dispatch(
+            &mut rig.state,
+            Action::GlobalSearchFor("needle".to_owned()),
+            &rig.ctx,
+        );
+        // This rig draws frames without the application's logic step, where that search runs.
+        let deadline = Instant::now() + crate::views::test_support::TIMEOUT;
+        while !rig.state.global_search.finished() {
+            assert!(Instant::now() < deadline, "the search in all documents");
+            crate::panels::global_search::tick(&mut rig.state, &rig.ctx);
+            rig.frames(1);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        rig.state.global_search.focus_input = None;
+        rig.open_bar(tab);
+        assert_eq!(rig.state.global_search.current(), None);
+        rig.key(Key::F4, Modifiers::NONE);
+        let first = rig.state.global_search.current().expect("a result");
+        rig.key(Key::F4, Modifiers::NONE);
+        let second = rig.state.global_search.current().expect("a result");
+        assert_ne!(first, second);
+        rig.key(Key::F4, Modifiers::SHIFT);
+        assert_eq!(rig.state.global_search.current(), Some(first));
     }
 
     #[test]
