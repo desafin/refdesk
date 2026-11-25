@@ -737,7 +737,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 ### 5.11 검색 기록 (WP-56, FIND-13 ~ 15)
 
 - core: `store/search_history.rs` 의 `SearchHistory` — 항목은 `SearchQuery` 의 네 값과 마지막으로 쓴 시각. `record`(같은 것은 맨 앞으로, 100개 상한), `remove`, `clear`, `entries`(최근 것 먼저). 파일은 `state_dir/search_history.json`(`Paths::search_history_file()`), 형식 버전·원자적 쓰기·깨지면 `.bad`(R-8).
-- app: `AppState.search_history`. 바꾸는 것은 dispatch 뿐이다(R-6): `RecordSearch(SearchQuery)`, `RemoveSearchHistory(usize)`, `ClearSearchHistory`. 바뀌면 바로 저장한다(`paths` 가 없으면 저장하지 않는다).
+- app: `AppState.search_history`. 바꾸는 것은 dispatch 뿐이다(R-6): `RecordSearch { query, replaces }`(`replaces` 는 머무름으로 기록했던 앞부분 — 있으면 그 항목을 치운다), `RemoveSearchHistory(usize)`, `ClearSearchHistory`. 바뀌면 바로 저장한다(`paths` 가 없으면 저장하지 않는다). 맨 앞 항목과 같은 검색어는 아무것도 바꾸지 않고 저장도 하지 않는다.
 - `panels/search_history.rs` 가 입력란 하나에 붙는 부품을 준다: ↑/↓ 불러오기의 상태(`Recall`: 기록의 몇 번째를 보고 있는지와 불러오기 전에 치던 글), 기록 단추와 목록, "2초 동안 그대로"와 앞부분 대체를 판단하는 `Settle`. 문서 내 검색 막대와 모든 문서 찾기의 입력란이 같은 부품을 쓴다. 판단은 순수 함수다(R-10).
 
 ### 5.8 세션
