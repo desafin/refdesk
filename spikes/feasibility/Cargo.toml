@@ -1,0 +1,18 @@
+[package]
+name = "pdfspike"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+mupdf = { version = "0.8.0", default-features = false, features = ["system-fonts", "base14-fonts"] }
+eframe = "0.37"
+egui_dock = { version = "0.22", features = ["serde"] }
+# eframe(system_fonts)의 fontique가 fontconfig를 dlopen 모드로 켜므로 font-kit도 같은 모드로 맞춘다
+font-kit = { version = "0.14", features = ["source-fontconfig-dlopen"] }
+serde = "1"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# 루트 작업 공간에 편입되지 않는 독립 프로젝트
+[workspace]
