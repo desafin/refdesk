@@ -136,13 +136,24 @@ pub fn summary_text(totals: &Totals, any_docs: bool, searched: bool) -> Option<S
             None => tr("gsearch.none").to_owned(),
         });
     }
-    let found = tr("gsearch.summary")
-        .replace("{docs}", &totals.docs_with_matches.to_string())
-        .replace("{n}", &totals.matches.to_string());
+    let found = found_text(totals.matches, totals.docs_with_matches);
     Some(match searching {
         Some(s) => format!("{found} {s}"),
         None => found,
     })
+}
+
+/// "124 results in 3 documents". English has a singular ("1 result in 1 document"); the Korean
+/// text is the same for every count.
+pub fn found_text(matches: usize, docs: usize) -> String {
+    let key = match (matches, docs) {
+        (1, _) => "gsearch.summary_one",
+        (_, 1) => "gsearch.summary_one_doc",
+        _ => "gsearch.summary",
+    };
+    tr(key)
+        .replace("{docs}", &docs.to_string())
+        .replace("{n}", &matches.to_string())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1396,7 +1407,12 @@ fn show_results(
 
 /// The accessible name of a document's head row: "geotopo.pdf, 34 results".
 pub fn head_label(name: &str, count: usize) -> String {
-    tr("gsearch.head")
+    let key = if count == 1 {
+        "gsearch.head_one"
+    } else {
+        "gsearch.head"
+    };
+    tr(key)
         .replace("{name}", name)
         .replace("{n}", &count.to_string())
 }
@@ -1666,6 +1682,34 @@ mod tests {
     }
 
     // --- rows --------------------------------------------------------------------------------
+
+    #[test]
+    fn one_result_and_one_document_are_singular_in_english() {
+        use crate::i18n::{Lang, lookup};
+        let fill =
+            |key: &str, n: &str, docs: &str| tr(key).replace("{n}", n).replace("{docs}", docs);
+        assert_eq!(found_text(1, 1), fill("gsearch.summary_one", "1", "1"));
+        assert_eq!(found_text(5, 1), fill("gsearch.summary_one_doc", "5", "1"));
+        assert_eq!(found_text(5, 2), fill("gsearch.summary", "5", "2"));
+        assert_eq!(
+            head_label("a.pdf", 1),
+            tr("gsearch.head_one")
+                .replace("{name}", "a.pdf")
+                .replace("{n}", "1")
+        );
+        assert_eq!(
+            lookup(Lang::En, "gsearch.summary_one"),
+            Some("{n} result in {docs} document")
+        );
+        assert_eq!(
+            lookup(Lang::En, "gsearch.summary_one_doc"),
+            Some("{n} results in {docs} document")
+        );
+        assert_eq!(
+            lookup(Lang::En, "gsearch.head_one"),
+            Some("{name}, {n} result")
+        );
+    }
 
     #[test]
     fn rows_are_a_head_per_document_with_matches_followed_by_its_matches() {

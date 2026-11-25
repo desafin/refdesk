@@ -235,6 +235,16 @@ pub const TABLE: &[Row] = &[
         "{n} results in {docs} documents",
     ),
     (
+        "gsearch.summary_one_doc",
+        "문서 {docs}개에서 {n}건",
+        "{n} results in {docs} document",
+    ),
+    (
+        "gsearch.summary_one",
+        "문서 {docs}개에서 {n}건",
+        "{n} result in {docs} document",
+    ),
+    (
         "gsearch.searching",
         "(찾는 중 {percent}%)",
         "(searching {percent}%)",
@@ -256,6 +266,7 @@ pub const TABLE: &[Row] = &[
         "Some documents have too many results; their lists are cut short",
     ),
     ("gsearch.head", "{name}, {n}건", "{name}, {n} results"),
+    ("gsearch.head_one", "{name}, {n}건", "{name}, {n} result"),
     ("sidebar.files", "파일", "Files"),
     ("sidebar.search", "검색", "Search"),
     ("sidebar.search_count", "검색 ({n})", "Search ({n})"),
