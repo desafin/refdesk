@@ -33,4 +33,6 @@ pub use store::{
     CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths,
     Session, SessionTab, SessionWindow, Theme, atomic_write,
 };
-pub use text::{CopyOptions, PageText, Selection, TextBlock, TextChar, TextLine, TextPos};
+pub use text::{
+    CopyOptions, PageText, Selection, TextBlock, TextChar, TextLine, TextPos, selection_text,
+};
