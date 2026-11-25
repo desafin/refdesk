@@ -47,6 +47,7 @@ pub const TABLE: &[Row] = &[
     ("cmd.tab.next", "다음 탭", "Next Tab"),
     ("cmd.tab.prev", "이전 탭", "Previous Tab"),
     ("cmd.tab.duplicate", "탭 복제", "Duplicate Tab"),
+    ("cmd.tab.pin", "탭 고정", "Keep Tab Open"),
     (
         "cmd.tab.close_others",
         "다른 탭 모두 닫기",
@@ -296,6 +297,66 @@ pub const TABLE: &[Row] = &[
         "Refresh (this folder is not updated automatically)",
     ),
     ("explorer.collapse_all", "모두 접기", "Collapse All"),
+    ("explorer.menu.open", "열기", "Open"),
+    (
+        "explorer.menu.open_background",
+        "새 탭에서 열기(뒤에서)",
+        "Open in Background Tab",
+    ),
+    (
+        "explorer.menu.open_split",
+        "옆 분할에서 열기",
+        "Open in Split Beside",
+    ),
+    (
+        "explorer.menu.open_window",
+        "새 창에서 열기",
+        "Open in New Window",
+    ),
+    (
+        "explorer.menu.pick_compare",
+        "비교 대상으로 선택",
+        "Select for Compare",
+    ),
+    (
+        "explorer.menu.compare_picked",
+        "선택한 것과 비교",
+        "Compare with Selected",
+    ),
+    (
+        "explorer.menu.compare_current",
+        "지금 문서와 비교",
+        "Compare with Current Document",
+    ),
+    ("explorer.menu.copy_path", "경로 복사", "Copy Path"),
+    (
+        "explorer.menu.copy_relative",
+        "상대 경로 복사",
+        "Copy Relative Path",
+    ),
+    (
+        "explorer.menu.reveal",
+        "파일 관리자에서 보기",
+        "Show in File Manager",
+    ),
+    ("explorer.menu.expand", "펼치기", "Expand"),
+    ("explorer.menu.collapse", "접기", "Collapse"),
+    (
+        "explorer.menu.expand_all",
+        "하위 모두 펼치기",
+        "Expand All Below",
+    ),
+    (
+        "explorer.picked",
+        "비교 대상으로 선택됨",
+        "Selected for comparison",
+    ),
+    ("explorer.copied", "복사했습니다: {}", "Copied: {}"),
+    (
+        "explorer.reveal_failed",
+        "파일 관리자를 열 수 없습니다: {}",
+        "Cannot open the file manager: {}",
+    ),
     ("tab.start", "시작", "Start"),
     ("tab.unknown", "(알 수 없음)", "(unknown)"),
     ("start.open_button", "파일 열기", "Open a file"),
@@ -516,6 +577,12 @@ If refdesk is already running, the files open as tabs in its window instead of a
     ),
     ("palette.no_match", "일치하는 항목이 없습니다", "No matches"),
     ("palette.recent", "최근 문서", "Recent"),
+    ("palette.folder", "작업 폴더", "Folder"),
+    (
+        "palette.folder_more",
+        "작업 폴더의 파일 {n}개 더 — 이름을 입력하면 나옵니다",
+        "{n} more files in the folder — type to find them",
+    ),
     ("palette.window_n", "창 {n}", "Window {n}"),
     (
         "status.page",

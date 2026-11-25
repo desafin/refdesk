@@ -610,6 +610,14 @@ fn show_row(
 
     let id = ui.make_persistent_id(("toc_row", row.idx));
     let title = ui.interact(title_rect, id.with("title"), Sense::click());
+    // The row as a button with its title (and, for a branch, whether it is open) in the
+    // accessibility tree, so screen checks can read and press it.
+    title.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &item.title));
+    if row.fold != Fold::Leaf {
+        ui.ctx().accesskit_node_builder(title.id, |node| {
+            node.set_expanded(row.fold == Fold::Open);
+        });
+    }
     let foldable = row.fold != Fold::Leaf && !prepared.filtering;
     let fold = foldable.then(|| ui.interact(fold_rect, id.with("fold"), Sense::click()));
     let hovered = title.hovered() || fold.as_ref().is_some_and(|f| f.hovered());

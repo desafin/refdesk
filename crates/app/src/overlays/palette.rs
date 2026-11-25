@@ -8,11 +8,19 @@
 //! calls those.
 //!
 //! The palette runs nothing itself: choosing a command queues what the command table says
-//! ([`Command::run`]), choosing a tab queues `FocusTab`, choosing a recent document queues
-//! `OpenFiles`. Structure changes therefore still happen only in `dispatch` (rule R-6).
+//! ([`Command::run`]), choosing a tab queues `FocusTab`, choosing a file of the workspace or a
+//! recent document queues `OpenFiles`. Structure changes therefore still happen only in
+//! `dispatch` (rule R-6).
+//!
+//! Quick open lists the open tabs, then the files of the workspace folder (WS-6), then the
+//! recent documents. The workspace may hold tens of thousands of files, so its part is not
+//! worked out per frame: the files are prepared once per index and matched once per query
+//! ([`sync_folder`]), and a query that only grew looks at the files that matched before.
 
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
@@ -26,6 +34,7 @@ use crate::i18n::{Lang, current_lang, lookup, tr};
 use crate::overlays::fuzzy::{fuzzy_match, highlight_ranges};
 use crate::state::{AppState, TabId, WindowId};
 use crate::windows::tab_title;
+use refdesk_core::{EntryKind, WorkspaceIndex};
 
 /// Identifier of the command that opens the command palette.
 pub const COMMANDS_COMMAND_ID: &str = "palette.commands";
@@ -36,6 +45,10 @@ pub const QUICK_OPEN_COMMAND_ID: &str = "palette.quick_open";
 pub const MAX_RECENT_COMMANDS: usize = 10;
 /// How many recent documents quick open lists at most.
 pub const MAX_RECENT_DOCS: usize = 100;
+/// How many files of the workspace quick open lists for an empty query; typing finds the rest.
+pub const FOLDER_FIRST_FILES: usize = 50;
+/// How many files of the workspace quick open lists for a query, best first.
+pub const FOLDER_MATCHES: usize = 200;
 /// How many rows PgUp / PgDn move.
 pub const PAGE_ROWS: usize = 8;
 /// How many focused tabs are remembered.
@@ -50,7 +63,7 @@ const NAME_BONUS: i32 = 30;
 pub enum PaletteMode {
     /// All commands of the command table.
     Commands,
-    /// Open tabs and recent documents.
+    /// Open tabs, files of the workspace folder and recent documents.
     QuickOpen,
 }
 
@@ -78,6 +91,8 @@ pub struct PaletteState {
     recent_commands: Vec<&'static str>,
     /// The tabs that had the focus, the latest first. Not saved.
     focus_history: Vec<TabId>,
+    /// The files of the workspace and how they match the query (see [`sync_folder`]).
+    folder: FolderCache,
 }
 
 impl PaletteState {
@@ -287,6 +302,10 @@ pub fn command_items(
 pub enum QuickTarget {
     /// A tab that is open.
     Tab(TabId),
+    /// A file of the workspace folder that is not open; choosing it opens it (WS-6).
+    Folder(PathBuf),
+    /// "N more files in the folder": a line that only says typing finds them.
+    FolderMore(usize),
     /// A document that is not open; choosing it opens it.
     Recent(PathBuf),
 }
@@ -298,9 +317,9 @@ pub struct QuickItem {
     pub target: QuickTarget,
     /// The file name (the tab title for a tab).
     pub name: String,
-    /// The full path.
+    /// The full path; the path relative to the workspace folder for a file of the folder.
     pub path: String,
-    /// Index in `AppState::windows` of the window holding the tab; `None` for a recent document.
+    /// Index in `AppState::windows` of the window holding the tab; `None` for the others.
     pub window: Option<usize>,
     /// Characters of `name` that matched (indices into `name.chars()`).
     pub name_positions: Vec<usize>,
@@ -339,16 +358,15 @@ fn file_name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Scores one row. The file name counts for more than the rest of the path.
-fn quick_item(
-    target: QuickTarget,
-    window: Option<usize>,
-    name: String,
-    path: String,
+/// How well `query` matches a row with this file name and path: the file name counts for more
+/// than the rest of the path. The score and the matched characters of each.
+fn match_name_and_path(
     query: &str,
-) -> Option<QuickItem> {
-    let on_name = fuzzy_match(query, &name);
-    let on_path = fuzzy_match(query, &path);
+    name: &str,
+    path: &str,
+) -> Option<(i32, Vec<usize>, Vec<usize>)> {
+    let on_name = fuzzy_match(query, name);
+    let on_path = fuzzy_match(query, path);
     let score = [
         on_name.as_ref().map(|m| m.score + NAME_BONUS),
         on_path.as_ref().map(|m| m.score),
@@ -356,22 +374,297 @@ fn quick_item(
     .into_iter()
     .flatten()
     .max()?;
+    Some((
+        score,
+        on_name.map(|m| m.positions).unwrap_or_default(),
+        on_path.map(|m| m.positions).unwrap_or_default(),
+    ))
+}
+
+/// Scores one row.
+fn quick_item(
+    target: QuickTarget,
+    window: Option<usize>,
+    name: String,
+    path: String,
+    query: &str,
+) -> Option<QuickItem> {
+    let (score, name_positions, path_positions) = match_name_and_path(query, &name, &path)?;
     Some(QuickItem {
         target,
         name,
         path,
         window,
-        name_positions: on_name.map(|m| m.positions).unwrap_or_default(),
-        path_positions: on_path.map(|m| m.positions).unwrap_or_default(),
+        name_positions,
+        path_positions,
         score,
     })
 }
 
-/// The rows of quick open that match `query`: the open tabs, then the recent documents that are
-/// not open. With an empty query the order is "latest focus first, current tab last" (see
-/// [`tabs_by_recent_focus`]) and `recent` as given; otherwise best score first with equal scores in
-/// that same order. At most [`MAX_RECENT_DOCS`] recent documents are listed.
+// --- the files of the workspace (WS-6) -------------------------------------------------------
+
+/// One PDF file of the workspace, ready for matching.
+#[derive(Debug)]
+struct FolderFile {
+    /// Its entry in the index.
+    entry: u32,
+    abs: PathBuf,
+    name: String,
+    /// The path relative to the workspace folder.
+    rel: String,
+    /// `rel` folded like [`search_key`], for the quick containment test.
+    folded: String,
+}
+
+/// The files of one workspace index, in index order (the order of the tree).
+#[derive(Debug)]
+struct FolderFiles {
+    index: Arc<WorkspaceIndex>,
+    files: Vec<FolderFile>,
+}
+
+impl FolderFiles {
+    fn new(index: &Arc<WorkspaceIndex>) -> FolderFiles {
+        let files = index
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind == EntryKind::Pdf)
+            .map(|(i, e)| {
+                let rel = e.rel_path.display().to_string();
+                FolderFile {
+                    entry: i as u32,
+                    abs: index.abs_path(i as u32),
+                    name: e.name.clone(),
+                    folded: rel.chars().map(fold_char).collect(),
+                    rel,
+                }
+            })
+            .collect();
+        FolderFiles {
+            index: Arc::clone(index),
+            files,
+        }
+    }
+}
+
+/// A file of the workspace that matched a query.
+#[derive(Clone, Debug)]
+struct FolderHit {
+    /// Position in `FolderFiles::files`.
+    file: u32,
+    score: i32,
+    name_positions: Vec<usize>,
+    path_positions: Vec<usize>,
+}
+
+/// The files that matched one query, best first.
+#[derive(Debug)]
+struct FolderSearch {
+    /// The query as [`search_key`] gives it.
+    key: String,
+    hits: Arc<Vec<FolderHit>>,
+}
+
+/// The workspace part of quick open, kept between frames.
+#[derive(Debug, Default)]
+struct FolderCache {
+    files: Option<Arc<FolderFiles>>,
+    search: Option<FolderSearch>,
+}
+
+/// A character compared without regard to case, as the fuzzy matcher compares it.
+fn fold_char(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// The query as the matcher reads it: folded, without white space. Two queries with the same
+/// key match the same files with the same scores.
+fn search_key(query: &str) -> String {
+    query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(fold_char)
+        .collect()
+}
+
+/// Whether the characters of `needle` occur in `hay` in order.
+fn is_subsequence(needle: &str, hay: &str) -> bool {
+    let mut rest = hay.chars();
+    needle.chars().all(|n| rest.any(|h| h == n))
+}
+
+/// Matches `query` (whose [`search_key`] is `key`) against the files at `candidates`, best
+/// first; equal scores keep index order. An empty query matches every candidate with score 0.
+fn search_files(
+    files: &FolderFiles,
+    query: &str,
+    key: &str,
+    candidates: impl Iterator<Item = u32>,
+) -> Vec<FolderHit> {
+    let mut hits: Vec<FolderHit> = candidates
+        .filter_map(|i| {
+            let file = files.files.get(i as usize)?;
+            if key.is_empty() {
+                return Some(FolderHit {
+                    file: i,
+                    score: 0,
+                    name_positions: Vec::new(),
+                    path_positions: Vec::new(),
+                });
+            }
+            // The cheap test first: most files do not contain the query at all.
+            if !is_subsequence(key, &file.folded) {
+                return None;
+            }
+            let (score, name_positions, path_positions) =
+                match_name_and_path(query, &file.name, &file.rel)?;
+            Some(FolderHit {
+                file: i,
+                score,
+                name_positions,
+                path_positions,
+            })
+        })
+        .collect();
+    hits.sort_by_key(|h| (Reverse(h.score), h.file));
+    hits
+}
+
+/// Brings the workspace part of quick open up to date with the workspace `index` and `query`.
+/// The files are prepared again only for another index, and matched again only when the query
+/// changed; a query that extends the previous one only looks at the files that matched it.
+/// Without a workspace the part is empty.
+pub fn sync_folder(palette: &mut PaletteState, index: Option<&Arc<WorkspaceIndex>>, query: &str) {
+    let cache = &mut palette.folder;
+    let Some(index) = index else {
+        *cache = FolderCache::default();
+        return;
+    };
+    let files = match &cache.files {
+        Some(files) if Arc::ptr_eq(&files.index, index) => Arc::clone(files),
+        _ => {
+            let files = Arc::new(FolderFiles::new(index));
+            cache.files = Some(Arc::clone(&files));
+            cache.search = None;
+            files
+        }
+    };
+    let key = search_key(query);
+    if cache.search.as_ref().is_some_and(|s| s.key == key) {
+        return;
+    }
+    let hits = match &cache.search {
+        // Whatever matches the longer query matched the shorter one.
+        Some(prev) if !prev.key.is_empty() && key.starts_with(&prev.key) => {
+            let mut before: Vec<u32> = prev.hits.iter().map(|h| h.file).collect();
+            before.sort_unstable();
+            search_files(&files, query, &key, before.into_iter())
+        }
+        _ => search_files(&files, query, &key, 0..files.files.len() as u32),
+    };
+    cache.search = Some(FolderSearch {
+        key,
+        hits: Arc::new(hits),
+    });
+}
+
+/// The finished index of the workspace, if a folder is open.
+fn workspace_index(state: &AppState) -> Option<Arc<WorkspaceIndex>> {
+    state.workspace.as_ref().and_then(|w| w.scan.index())
+}
+
+/// The rows of the workspace part for `query`, without the documents `open` in tabs: the first
+/// [`FOLDER_FIRST_FILES`] files in tree order and a line for the rest for an empty query, else
+/// the best [`FOLDER_MATCHES`]. Uses what [`sync_folder`] prepared.
+fn folder_items(state: &AppState, query: &str, open: &[&Path]) -> Vec<QuickItem> {
+    let cache = &state.palette.folder;
+    let Some(files) = &cache.files else {
+        return Vec::new();
+    };
+    let key = search_key(query);
+    let computed;
+    let hits: &[FolderHit] = match &cache.search {
+        Some(search) if search.key == key => &search.hits,
+        // Not prepared for this query (only when called out of turn): match now.
+        _ => {
+            computed = search_files(files, query, &key, 0..files.files.len() as u32);
+            &computed
+        }
+    };
+    let root = &files.index.root;
+    let open_entries: HashSet<u32> = open
+        .iter()
+        .filter_map(|p| files.index.find(p.strip_prefix(root).ok()?))
+        .collect();
+    let limit = if key.is_empty() {
+        FOLDER_FIRST_FILES
+    } else {
+        FOLDER_MATCHES
+    };
+    let mut items = Vec::new();
+    let mut more = 0;
+    for hit in hits {
+        let Some(file) = files.files.get(hit.file as usize) else {
+            continue;
+        };
+        if open_entries.contains(&file.entry) {
+            continue;
+        }
+        if items.len() == limit {
+            more += 1;
+            if !key.is_empty() {
+                break;
+            }
+            continue;
+        }
+        items.push(QuickItem {
+            target: QuickTarget::Folder(file.abs.clone()),
+            name: file.name.clone(),
+            path: file.rel.clone(),
+            window: None,
+            name_positions: hit.name_positions.clone(),
+            path_positions: hit.path_positions.clone(),
+            score: hit.score,
+        });
+    }
+    if key.is_empty() && more > 0 {
+        items.push(QuickItem {
+            target: QuickTarget::FolderMore(more),
+            name: tr("palette.folder_more").replace("{n}", &more.to_string()),
+            path: String::new(),
+            window: None,
+            name_positions: Vec::new(),
+            path_positions: Vec::new(),
+            score: 0,
+        });
+    }
+    items
+}
+
+/// Whether `path` is a file of the workspace that [`sync_folder`] prepared.
+fn in_folder(state: &AppState, path: &Path) -> bool {
+    state.palette.folder.files.as_ref().is_some_and(|files| {
+        path.strip_prefix(&files.index.root)
+            .ok()
+            .and_then(|rel| files.index.find(rel))
+            .is_some()
+    })
+}
+
+/// The rows of quick open that match `query`, in three parts: the open tabs, the files of the
+/// workspace folder that are not open ([`folder_items`]), the recent documents that are neither
+/// open nor in the folder. With an empty query the tabs are ordered "latest focus first, current
+/// tab last" (see [`tabs_by_recent_focus`]) and `recent` as given; otherwise each part is best
+/// score first with equal scores in that same order. At most [`MAX_RECENT_DOCS`] recent
+/// documents are listed.
 pub fn quick_items(state: &AppState, query: &str, recent: &[PathBuf]) -> Vec<QuickItem> {
+    let searching = !query.trim().is_empty();
+    let by_score = |items: &mut Vec<QuickItem>| {
+        if searching {
+            items.sort_by_key(|item| Reverse(item.score));
+        }
+    };
     let mut items: Vec<QuickItem> = Vec::new();
     for (window, tab) in tabs_by_recent_focus(state) {
         let path = state
@@ -388,32 +681,34 @@ pub fn quick_items(state: &AppState, query: &str, recent: &[PathBuf]) -> Vec<Qui
             query,
         ));
     }
+    by_score(&mut items);
     let open_paths: Vec<&Path> = state
         .tabs
         .iter()
         .filter_map(|(_, tab)| match tab {
             crate::state::Tab::Pdf(pdf) => state.docs.get(pdf.doc).map(|d| d.path()),
-            // A document that is open only inside a comparison stays in the recent list, so it
+            // A document that is open only inside a comparison stays in the other parts, so it
             // can still be opened as a tab of its own.
             crate::state::Tab::Diff(_) | crate::state::Tab::Start => None,
         })
         .collect();
-    for path in recent
+    items.extend(folder_items(state, query, &open_paths));
+    let mut recents: Vec<QuickItem> = recent
         .iter()
-        .filter(|p| !open_paths.contains(&p.as_path()))
+        .filter(|p| !open_paths.contains(&p.as_path()) && !in_folder(state, p))
         .take(MAX_RECENT_DOCS)
-    {
-        items.extend(quick_item(
-            QuickTarget::Recent(path.clone()),
-            None,
-            file_name_of(path),
-            path.display().to_string(),
-            query,
-        ));
-    }
-    if !query.trim().is_empty() {
-        items.sort_by_key(|item| Reverse(item.score));
-    }
+        .filter_map(|path| {
+            quick_item(
+                QuickTarget::Recent(path.clone()),
+                None,
+                file_name_of(path),
+                path.display().to_string(),
+                query,
+            )
+        })
+        .collect();
+    by_score(&mut recents);
+    items.extend(recents);
     items
 }
 
@@ -432,13 +727,19 @@ impl Items {
     }
 }
 
+/// The rows of the list in `mode` for `query`. For quick open the workspace part is brought up
+/// to date first ([`sync_folder`]).
 fn build_items(
-    state: &AppState,
+    state: &mut AppState,
     lang: Lang,
     mode: PaletteMode,
     query: &str,
     recent: RecentDocuments<'_>,
 ) -> Items {
+    if mode == PaletteMode::QuickOpen {
+        let index = workspace_index(state);
+        sync_folder(&mut state.palette, index.as_ref(), query);
+    }
     match mode {
         PaletteMode::Commands => Items::Commands(command_items(
             state,
@@ -465,10 +766,15 @@ pub fn choose(
     index: usize,
     queue: &mut Vec<Action>,
 ) -> bool {
-    let Some(open) = &state.palette.open else {
+    let Some((mode, query)) = state
+        .palette
+        .open
+        .as_ref()
+        .map(|o| (o.mode, o.query.clone()))
+    else {
         return false;
     };
-    let items = build_items(state, lang, open.mode, &open.query, recent);
+    let items = build_items(state, lang, mode, &query, recent);
     let action = match items {
         Items::Commands(items) => {
             let Some(item) = items.get(index) else {
@@ -481,12 +787,15 @@ pub fn choose(
             item.command.run(state)
         }
         Items::Quick(items) => match items.get(index).map(|item| &item.target) {
-            None => return false,
+            None | Some(QuickTarget::FolderMore(_)) => return false,
             Some(QuickTarget::Tab(tab)) => Some(Action::FocusTab(*tab)),
-            Some(QuickTarget::Recent(path)) => Some(Action::OpenFiles(vec![OpenTarget {
-                path: path.clone(),
-                page: None,
-            }])),
+            // An ordinary tab, not a preview one: quick open is not the explorer.
+            Some(QuickTarget::Folder(path) | QuickTarget::Recent(path)) => {
+                Some(Action::OpenFiles(vec![OpenTarget {
+                    path: path.clone(),
+                    page: None,
+                }]))
+            }
         },
     };
     close(state, ctx);
@@ -588,17 +897,19 @@ fn rows(ctx: &Context, state: &AppState, items: &Items) -> Vec<Row> {
             .map(|item| {
                 let right = match (&item.target, item.window) {
                     (QuickTarget::Recent(_), _) => tr("palette.recent").to_owned(),
+                    (QuickTarget::Folder(_), _) => tr("palette.folder").to_owned(),
                     (QuickTarget::Tab(_), Some(w)) if state.windows.len() > 1 => {
                         tr("palette.window_n").replace("{n}", &(w + 1).to_string())
                     }
                     _ => String::new(),
                 };
+                let more = matches!(item.target, QuickTarget::FolderMore(_));
                 Row {
                     name: item.name.clone(),
                     name_positions: item.name_positions.clone(),
-                    detail: Some((item.path.clone(), item.path_positions.clone())),
+                    detail: (!more).then(|| (item.path.clone(), item.path_positions.clone())),
                     right,
-                    enabled: true,
+                    enabled: !more,
                 }
             })
             .collect(),
@@ -1064,7 +1375,7 @@ mod tests {
     #[test]
     fn recent_documents_come_after_the_open_tabs_and_skip_open_ones() {
         let ctx = Context::default();
-        let (state, _) = state_with(&ctx, &["a", "b"]);
+        let (mut state, _) = state_with(&ctx, &["a", "b"]);
         let recent = vec![
             PathBuf::from("/docs/r1.pdf"),
             PathBuf::from("/refdesk-test/a.pdf"),
@@ -1080,7 +1391,7 @@ mod tests {
         // The source is asked with the state; it decides what is recent.
         let source = |_: &AppState| vec![PathBuf::from("/x/y.pdf")];
         let provider: RecentDocuments<'_> = &source;
-        let built = build_items(&state, Lang::En, PaletteMode::QuickOpen, "", provider);
+        let built = build_items(&mut state, Lang::En, PaletteMode::QuickOpen, "", provider);
         assert_eq!(built.len(), 3);
     }
 
@@ -1559,5 +1870,320 @@ mod tests {
                 frame(&ctx, &mut state, vec![key(Key::PageDown, Modifiers::NONE)]);
             }
         }
+    }
+
+    // ---- the files of the workspace (WS-6) ----
+
+    /// An index of the workspace "/ws" with these files (folders are made from the paths), in
+    /// the order given, which must list a folder's files together.
+    fn folder_index(files: &[String]) -> Arc<WorkspaceIndex> {
+        use refdesk_core::WorkspaceEntry;
+        let mut entries: Vec<WorkspaceEntry> = Vec::new();
+        for file in files {
+            let rel = PathBuf::from(file);
+            let mut parent = None;
+            let mut so_far = PathBuf::new();
+            let components: Vec<_> = rel.components().collect();
+            for (depth, part) in components.iter().enumerate() {
+                so_far.push(part);
+                let is_file = depth + 1 == components.len();
+                let known = entries.iter().position(|e| e.rel_path == so_far);
+                let at = match known {
+                    Some(at) => at,
+                    None => {
+                        entries.push(WorkspaceEntry {
+                            name: part.as_os_str().to_string_lossy().into_owned(),
+                            rel_path: so_far.clone(),
+                            kind: if is_file {
+                                EntryKind::Pdf
+                            } else {
+                                EntryKind::Dir
+                            },
+                            parent,
+                            depth: depth as u16,
+                        });
+                        entries.len() - 1
+                    }
+                };
+                parent = Some(at as u32);
+            }
+        }
+        Arc::new(WorkspaceIndex::new(PathBuf::from("/ws"), entries, false))
+    }
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn quick(
+        state: &mut AppState,
+        index: &Arc<WorkspaceIndex>,
+        query: &str,
+        recent: &[PathBuf],
+    ) -> Vec<QuickItem> {
+        sync_folder(&mut state.palette, Some(index), query);
+        quick_items(state, query, recent)
+    }
+
+    #[test]
+    fn quick_open_lists_tabs_then_folder_files_then_recent_documents_without_repeats() {
+        let ctx = Context::default();
+        let mut state = AppState::new();
+        open_pdf(&mut state, &ctx, "/ws/specs/a.pdf");
+        let index = folder_index(&strings(&["specs/a.pdf", "specs/b.pdf", "c.pdf"]));
+        let recent = vec![
+            PathBuf::from("/ws/c.pdf"),
+            PathBuf::from("/docs/r.pdf"),
+            PathBuf::from("/ws/specs/a.pdf"),
+        ];
+        let items = quick(&mut state, &index, "", &recent);
+        assert_eq!(names(&items), ["a.pdf", "b.pdf", "c.pdf", "r.pdf"]);
+        assert!(matches!(items[0].target, QuickTarget::Tab(_)));
+        assert_eq!(
+            items[1].target,
+            QuickTarget::Folder(PathBuf::from("/ws/specs/b.pdf"))
+        );
+        assert_eq!(
+            items[1].path, "specs/b.pdf",
+            "the path relative to the folder"
+        );
+        assert_eq!(
+            items[2].target,
+            QuickTarget::Folder(PathBuf::from("/ws/c.pdf"))
+        );
+        assert_eq!(
+            items[3].target,
+            QuickTarget::Recent(PathBuf::from("/docs/r.pdf"))
+        );
+        // With a query the parts keep their order.
+        let items = quick(&mut state, &index, "pdf", &recent);
+        let kinds: Vec<&str> = items
+            .iter()
+            .map(|i| match i.target {
+                QuickTarget::Tab(_) => "tab",
+                QuickTarget::Folder(_) => "folder",
+                QuickTarget::FolderMore(_) => "more",
+                QuickTarget::Recent(_) => "recent",
+            })
+            .collect();
+        assert_eq!(kinds, ["tab", "folder", "folder", "recent"]);
+        // Without a workspace there is no folder part, and nothing of the folder is held.
+        sync_folder(&mut state.palette, None, "");
+        assert_eq!(
+            names(&quick_items(&state, "", &recent)),
+            ["a.pdf", "c.pdf", "r.pdf"]
+        );
+    }
+
+    #[test]
+    fn an_empty_query_lists_the_first_fifty_files_and_a_line_for_the_rest() {
+        let ctx = Context::default();
+        let mut state = AppState::new();
+        let files: Vec<String> = (0..120).map(|n| format!("doc{n:03}.pdf")).collect();
+        let index = folder_index(&files);
+        open_pdf(&mut state, &ctx, "/ws/doc000.pdf");
+        let items = quick(&mut state, &index, "", &[]);
+        let folder: Vec<&QuickItem> = items
+            .iter()
+            .filter(|i| matches!(i.target, QuickTarget::Folder(_)))
+            .collect();
+        assert_eq!(folder.len(), FOLDER_FIRST_FILES);
+        assert_eq!(folder[0].name, "doc001.pdf", "the open one is left out");
+        let last = items.last().expect("rows");
+        assert_eq!(
+            last.target,
+            QuickTarget::FolderMore(120 - 1 - FOLDER_FIRST_FILES)
+        );
+        assert!(last.name.contains("69"), "{}", last.name);
+        // The line does nothing when chosen.
+        open_palette(&mut state, PaletteMode::QuickOpen);
+        let mut queue = Vec::new();
+        let source = |_: &AppState| Vec::new();
+        assert!(!choose(
+            &mut state,
+            &ctx,
+            Lang::En,
+            &source,
+            items.len() - 1,
+            &mut queue
+        ));
+        assert!(queue.is_empty());
+        assert!(state.palette.open.is_some());
+    }
+
+    #[test]
+    fn a_query_lists_the_best_matches_first_and_at_most_two_hundred() {
+        let mut state = AppState::new();
+        let mut files: Vec<String> = (0..300).map(|n| format!("misc/file{n:03}.pdf")).collect();
+        files.push("target/notes.pdf".into());
+        files.push("zeta-target.pdf".into());
+        let index = folder_index(&files);
+        let items = quick(&mut state, &index, "target", &[]);
+        assert_eq!(
+            names(&items),
+            ["zeta-target.pdf", "notes.pdf"],
+            "a name match first"
+        );
+        let items = quick(&mut state, &index, "file", &[]);
+        assert_eq!(items.len(), FOLDER_MATCHES);
+        assert!(items.windows(2).all(|w| w[0].score >= w[1].score));
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i.target, QuickTarget::FolderMore(_)))
+        );
+        assert!(quick(&mut state, &index, "zzz", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_growing_query_matches_the_same_as_a_fresh_one() {
+        let files: Vec<String> = (0..500)
+            .map(|n| format!("area{}/Spec {n} Rev{}.pdf", n % 7, n % 3))
+            .collect();
+        let index = folder_index(&files);
+        let mut typed = AppState::new();
+        for query in ["s", "sp", "spe", "spec 1", "spec 1 r"] {
+            sync_folder(&mut typed.palette, Some(&index), query);
+        }
+        let mut fresh = AppState::new();
+        let a = quick_items(&typed, "spec 1 r", &[]);
+        let b = quick(&mut fresh, &index, "spec 1 r", &[]);
+        assert!(!a.is_empty());
+        assert_eq!(names(&a), names(&b));
+        // Going back to a shorter query matches again from all files.
+        sync_folder(&mut typed.palette, Some(&index), "s");
+        assert_eq!(quick_items(&typed, "s", &[]).len(), FOLDER_MATCHES);
+    }
+
+    #[test]
+    fn the_folder_is_matched_again_only_when_the_query_or_the_index_changes() {
+        let index = folder_index(&strings(&["a.pdf", "b.pdf"]));
+        let mut state = AppState::new();
+        sync_folder(&mut state.palette, Some(&index), "a");
+        let hits = |state: &AppState| {
+            Arc::clone(&state.palette.folder.search.as_ref().expect("searched").hits)
+        };
+        let first = hits(&state);
+        sync_folder(&mut state.palette, Some(&index), "a");
+        sync_folder(&mut state.palette, Some(&index), " A ");
+        assert!(Arc::ptr_eq(&first, &hits(&state)), "the same key");
+        sync_folder(&mut state.palette, Some(&index), "b");
+        assert!(!Arc::ptr_eq(&first, &hits(&state)));
+        let other = folder_index(&strings(&["a.pdf"]));
+        sync_folder(&mut state.palette, Some(&other), "b");
+        assert!(hits(&state).is_empty(), "a new index is read again");
+    }
+
+    #[test]
+    fn choosing_a_file_of_the_folder_opens_an_ordinary_tab() {
+        let dir = std::env::temp_dir().join(format!("refdesk-wp72-palette-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("folders");
+        std::fs::write(dir.join("sub/pick.pdf"), b"").expect("file");
+        let dir = crate::state::normalize_path(&dir);
+        let ctx = Context::default();
+        let repaints = crate::views::test_support::watch_repaints(&ctx);
+        let mut state = AppState::new();
+        dispatch(&mut state, Action::OpenFolder(dir.clone()), &ctx);
+        repaints.wait_until("the scan", || {
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
+            workspace_index(&state).is_some_and(|i| i.file_count() == 1)
+        });
+        open_palette(&mut state, PaletteMode::QuickOpen);
+        set_query(&mut state, "pick");
+        let source = |_: &AppState| Vec::new();
+        let mut queue = Vec::new();
+        assert!(choose(&mut state, &ctx, Lang::En, &source, 0, &mut queue));
+        let path = dir.join("sub/pick.pdf");
+        assert_eq!(
+            queue,
+            vec![Action::OpenFiles(vec![OpenTarget {
+                path: path.clone(),
+                page: None
+            }])]
+        );
+        state.actions.append(&mut queue);
+        dispatch_queued(&mut state, &ctx);
+        let (_, pdf) = state.focused_pdf().expect("opened");
+        assert!(!pdf.preview);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fifty_thousand_files_are_matched_quickly_per_typed_character() {
+        use std::time::{Duration, Instant};
+        let files: Vec<String> = (0..50)
+            .flat_map(|t| {
+                (0..10).flat_map(move |s| {
+                    (0..100).map(move |f| {
+                        format!("area{t}/part{s}/Specification {t}-{s}-{f} Revision.pdf")
+                    })
+                })
+            })
+            .collect();
+        let index = {
+            // Built directly: the generic builder above looks folders up linearly.
+            use refdesk_core::WorkspaceEntry;
+            let mut entries = Vec::new();
+            for t in 0..50u32 {
+                let top = entries.len() as u32;
+                entries.push(WorkspaceEntry {
+                    name: format!("area{t}"),
+                    rel_path: PathBuf::from(format!("area{t}")),
+                    kind: EntryKind::Dir,
+                    parent: None,
+                    depth: 0,
+                });
+                for s in 0..10u32 {
+                    let sub = entries.len() as u32;
+                    entries.push(WorkspaceEntry {
+                        name: format!("part{s}"),
+                        rel_path: PathBuf::from(format!("area{t}/part{s}")),
+                        kind: EntryKind::Dir,
+                        parent: Some(top),
+                        depth: 1,
+                    });
+                    for f in 0..100u32 {
+                        let name = format!("Specification {t}-{s}-{f} Revision.pdf");
+                        entries.push(WorkspaceEntry {
+                            rel_path: PathBuf::from(format!("area{t}/part{s}/{name}")),
+                            name,
+                            kind: EntryKind::Pdf,
+                            parent: Some(sub),
+                            depth: 2,
+                        });
+                    }
+                }
+            }
+            Arc::new(WorkspaceIndex::new(PathBuf::from("/ws"), entries, false))
+        };
+        assert_eq!(index.file_count(), files.len());
+        let mut state = AppState::new();
+        let t = Instant::now();
+        sync_folder(&mut state.palette, Some(&index), "");
+        let prepare = t.elapsed();
+        let mut timings = Vec::new();
+        for query in ["s", "sp", "spe", "spec 4", "spec 42", "spec 42-"] {
+            let t = Instant::now();
+            sync_folder(&mut state.palette, Some(&index), query);
+            let items = quick_items(&state, query, &[]);
+            timings.push((query, t.elapsed(), items.len()));
+        }
+        let t = Instant::now();
+        let again = quick_items(&state, "spec 42-", &[]);
+        let frame = t.elapsed();
+        eprintln!(
+            "WP-72 quick open timing for {} files: preparing the files {prepare:?}; per typed \
+             query (match + list): {timings:?}; a frame with the same query {frame:?}",
+            files.len()
+        );
+        assert!(!again.is_empty());
+        // Generous (debug build): nothing per frame, nothing quadratic.
+        assert!(prepare < Duration::from_secs(3));
+        for (query, took, _) in &timings {
+            assert!(*took < Duration::from_secs(3), "{query}: {took:?}");
+        }
+        assert!(frame < Duration::from_millis(100), "{frame:?}");
     }
 }

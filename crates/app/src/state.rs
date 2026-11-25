@@ -142,6 +142,10 @@ pub struct PdfTab {
     /// Filter text and collapsed entries of the table of contents panel; not saved (WP-31).
     /// Boxed so that the `Tab` enum stays small.
     pub toc: Box<TocState>,
+    /// A preview tab (WS-3): opened by a single click in the explorer, replaced by the next one,
+    /// shown with an italic title. Pinned (made an ordinary tab) by a double click, by using it,
+    /// or by the "Keep Tab Open" command.
+    pub preview: bool,
 }
 
 /// The content of a tab.

@@ -184,6 +184,11 @@ fn can_go_forward(state: &AppState) -> bool {
         .is_some_and(|(_, pdf)| pdf.view.history.can_forward())
 }
 
+/// The focused tab is a preview tab (WS-3).
+fn has_preview_focus(state: &AppState) -> bool {
+    state.focus.is_some_and(|tab| is_preview_tab(state, tab))
+}
+
 fn has_closed_tabs(state: &AppState) -> bool {
     !state.closed_tabs.is_empty()
 }
@@ -554,6 +559,15 @@ pub static COMMANDS: &[Command] = &[
         action: |s| s.focus.map(Action::DuplicateTab),
     },
     Command {
+        id: "tab.pin",
+        name_key: "cmd.tab.pin",
+        menu: MenuGroup::Tab,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_preview_focus,
+        action: |s| s.focus.map(Action::PinTab),
+    },
+    Command {
         id: "tab.split_right",
         name_key: "cmd.tab.split_right",
         menu: MenuGroup::Tab,
@@ -650,6 +664,11 @@ fn is_document_tab(state: &AppState, tab: TabId) -> bool {
     matches!(state.tabs.get(tab), Some(Tab::Pdf(_) | Tab::Diff(_)))
 }
 
+/// A preview tab, which the next file opened from the explorer replaces (WS-3).
+fn is_preview_tab(state: &AppState, tab: TabId) -> bool {
+    state.tabs.pdf(tab).is_some_and(|p| p.preview)
+}
+
 fn has_pane_siblings(state: &AppState, tab: TabId) -> bool {
     state
         .window_of(tab)
@@ -676,6 +695,12 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
         command_id: Some("tab.duplicate"),
         enabled: is_pdf_tab,
         action: Action::DuplicateTab,
+    },
+    TabMenuEntry {
+        name_key: "cmd.tab.pin",
+        command_id: Some("tab.pin"),
+        enabled: is_preview_tab,
+        action: Action::PinTab,
     },
     TabMenuEntry {
         name_key: "cmd.tab.split_right",
@@ -983,6 +1008,20 @@ mod tests {
     }
 
     #[test]
+    fn keep_tab_open_is_in_the_tab_menu_the_tab_bar_menu_and_the_palette() {
+        let tab_menu: Vec<&str> = in_menu(MenuGroup::Tab).map(|c| c.id).collect();
+        assert!(tab_menu.contains(&"tab.pin"));
+        let pin = command("tab.pin").expect("command");
+        assert_eq!(pin.shortcut, None);
+        assert!(TAB_MENU.iter().any(|e| e.command_id == Some("tab.pin")));
+        // The palette lists every command of the table.
+        let state = AppState::new();
+        let items = crate::overlays::palette::command_items(&state, Lang::En, "keep tab", &[]);
+        assert_eq!(items.first().map(|i| i.command.id), Some("tab.pin"));
+        assert!(!items[0].enabled, "no preview tab to keep");
+    }
+
+    #[test]
     fn tab_menu_entries_have_texts_and_known_commands() {
         let names: Vec<&str> = TAB_MENU.iter().map(|e| e.name_key).collect();
         assert_eq!(
@@ -991,6 +1030,7 @@ mod tests {
                 "cmd.tab.close",
                 "cmd.tab.close_others",
                 "cmd.tab.duplicate",
+                "cmd.tab.pin",
                 "cmd.tab.split_right",
                 "cmd.tab.split_down",
                 "cmd.window.detach_tab",
@@ -1019,7 +1059,7 @@ mod tests {
         );
         let (a, _) = state.focused_pdf().expect("pdf tab");
         let enabled: Vec<bool> = TAB_MENU.iter().map(|e| (e.enabled)(&state, a)).collect();
-        assert_eq!(enabled, vec![true, false, true, true, true, true]);
+        assert_eq!(enabled, vec![true, false, true, false, true, true, true]);
         assert_eq!((TAB_MENU[0].action)(a), Action::CloseTab(a));
         dispatch(&mut state, Action::DuplicateTab(a), &ctx);
         assert!((TAB_MENU[1].enabled)(&state, a));

@@ -318,7 +318,7 @@ fn pdf_session_tab(state: &AppState, pdf: &PdfTab) -> Option<SessionTab> {
     Some(SessionTab::Pdf {
         path: doc.path().to_path_buf(),
         view: pdf.view.clone(),
-        preview: false,
+        preview: pdf.preview,
     })
 }
 
@@ -501,7 +501,11 @@ pub fn record_folder(state: &mut AppState, root: &Path) {
 /// Creates the tab for one saved tab; `None` for kinds that are not restored.
 fn restore_tab(state: &mut AppState, saved: &SessionTab, ctx: &egui::Context) -> Option<TabId> {
     match saved {
-        SessionTab::Pdf { path, view, .. } => Some(restore_pdf_tab(state, path, view, ctx)),
+        SessionTab::Pdf {
+            path,
+            view,
+            preview,
+        } => Some(restore_pdf_tab(state, path, view, *preview, ctx)),
         // The comparison is computed again; only the two documents are remembered.
         SessionTab::Diff { left, right } => {
             Some(crate::action::insert_diff_tab(state, left, right, ctx))
@@ -513,6 +517,7 @@ fn restore_pdf_tab(
     state: &mut AppState,
     path: &Path,
     view: &ViewState,
+    preview: bool,
     ctx: &egui::Context,
 ) -> TabId {
     let path = normalize_path(path);
@@ -529,6 +534,7 @@ fn restore_pdf_tab(
         view: rebased(view, &path),
         ui: PdfViewUiState::default(),
         toc,
+        preview,
     }));
     document_opened(state, None, &path);
     tab

@@ -1,4 +1,4 @@
-//! The file explorer (WS-2, WS-4, WS-5, WS-11): the folder tree of the workspace in the upper
+//! The file explorer (WS-2 – WS-5, WS-9 – WS-11): the folder tree of the workspace in the upper
 //! section of the sidebar.
 //!
 //! The workspace (`AppState::workspace`) is one for the whole application and its index is
@@ -9,8 +9,10 @@
 //! how the folding is saved and restored. The drawing functions only show those results and turn
 //! clicks into [`Action`]s.
 //!
-//! Opening a file goes through one place: a click on a file row becomes [`RowEvent::Open`] in
-//! [`show_row`], and [`open_action`] turns it into [`Action::OpenFromExplorer`].
+//! Opening a file goes through one place: [`open_action`] makes the [`Action::OpenFromExplorer`]
+//! for a click (whose kind [`crate::action::explorer_click`] decides), a key ([`tree_key`]) or
+//! an entry of the right-click menu ([`EXPLORER_MENU`]). Copying a path and showing a folder in
+//! the file manager go through [`ExplorerServices`], which tests replace.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -18,10 +20,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use egui::{Key, Pos2, Rect, RichText, ScrollArea, Sense, TextEdit, TextStyle, Ui};
+use egui::{
+    EventFilter, FocusDirection, Id, Key, Modifiers, Pos2, Rect, RichText, ScrollArea, Sense,
+    StrokeKind, TextEdit, TextStyle, Ui, WidgetInfo,
+};
 use refdesk_core::{EntryKind, ScanLimits, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher};
 
-use crate::action::{Action, notifier};
+use crate::action::{Action, ExplorerOpen, explorer_click, notifier};
 use crate::i18n::tr;
 use crate::panels::toc::{Fold, match_ranges, scroll_target, title_job, triangle};
 use crate::session;
@@ -201,6 +206,509 @@ pub fn import_expanded(index: &WorkspaceIndex, saved: &[PathBuf]) -> HashSet<u32
         .collect()
 }
 
+/// The folders inside folder `idx` at any depth, in index order. The index lists a folder's
+/// contents right after it (pre-order), so they are the entries that follow it while deeper.
+pub fn descendant_dirs(index: &WorkspaceIndex, idx: u32) -> Vec<u32> {
+    let Some(depth) = index.entry(idx).map(|e| e.depth) else {
+        return Vec::new();
+    };
+    index
+        .entries
+        .iter()
+        .enumerate()
+        .skip(idx as usize + 1)
+        .take_while(|(_, e)| e.depth > depth)
+        .filter(|(_, e)| e.kind == EntryKind::Dir)
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
+// --- keyboard (WS-10) ------------------------------------------------------------------------
+
+/// A key the tree reacts to while it has the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeKey {
+    /// ↑
+    Up,
+    /// ↓
+    Down,
+    /// ←
+    Left,
+    /// →
+    Right,
+    /// Home
+    Home,
+    /// End
+    End,
+    /// Page Up
+    PageUp,
+    /// Page Down
+    PageDown,
+    /// Enter: open a file in an ordinary tab, fold or unfold a folder.
+    Enter,
+    /// Space: open a file in the preview tab, fold or unfold a folder.
+    Space,
+}
+
+impl TreeKey {
+    /// The keys and the egui keys they come from. Taking them from the input also keeps them
+    /// from the view, which would scroll with them.
+    const ALL: [(Key, TreeKey); 10] = [
+        (Key::ArrowUp, TreeKey::Up),
+        (Key::ArrowDown, TreeKey::Down),
+        (Key::ArrowLeft, TreeKey::Left),
+        (Key::ArrowRight, TreeKey::Right),
+        (Key::Home, TreeKey::Home),
+        (Key::End, TreeKey::End),
+        (Key::PageUp, TreeKey::PageUp),
+        (Key::PageDown, TreeKey::PageDown),
+        (Key::Enter, TreeKey::Enter),
+        (Key::Space, TreeKey::Space),
+    ];
+}
+
+/// What a key in the tree does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeMove {
+    /// The cursor goes to this entry.
+    Cursor(u32),
+    /// Folder `idx` opens or folds; the cursor stays on it.
+    Fold {
+        /// The folder.
+        idx: u32,
+        /// Open it (else fold it).
+        open: bool,
+    },
+    /// File `idx` opens.
+    Open {
+        /// The file.
+        idx: u32,
+        /// In which kind of tab.
+        how: ExplorerOpen,
+    },
+    /// The keyboard goes back to the filter box (↑ on the first row).
+    ToFilter,
+    /// Nothing happens.
+    Nothing,
+}
+
+/// What `key` does in the tree showing `rows` with the cursor on entry `cursor` (`None`, or an
+/// entry that is not shown, counts as no cursor: the first key puts it on the first row, End on
+/// the last). `page` is how many rows Page Up and Page Down move. While `filtering`, every
+/// folder is open and does not fold, so → and ← only move.
+pub fn tree_key(
+    index: &WorkspaceIndex,
+    rows: &[Row],
+    cursor: Option<u32>,
+    key: TreeKey,
+    page: usize,
+    filtering: bool,
+) -> TreeMove {
+    let Some(last) = rows.len().checked_sub(1) else {
+        return TreeMove::Nothing;
+    };
+    let at = |pos: usize| TreeMove::Cursor(rows[pos.min(last)].idx);
+    let Some(pos) = cursor.and_then(|c| rows.iter().position(|r| r.idx == c)) else {
+        return match key {
+            TreeKey::End => at(last),
+            _ => at(0),
+        };
+    };
+    let row = &rows[pos];
+    let foldable = row.fold != Fold::Leaf && !filtering;
+    match key {
+        TreeKey::Up if pos == 0 => TreeMove::ToFilter,
+        TreeKey::Up => at(pos - 1),
+        TreeKey::Down => at(pos + 1),
+        TreeKey::Home => at(0),
+        TreeKey::End => at(last),
+        TreeKey::PageUp => at(pos.saturating_sub(page.max(1))),
+        TreeKey::PageDown => at(pos + page.max(1)),
+        TreeKey::Right => match row.fold {
+            Fold::Closed if foldable => TreeMove::Fold {
+                idx: row.idx,
+                open: true,
+            },
+            Fold::Leaf => TreeMove::Nothing,
+            // Open: to the first child, which is the next row.
+            _ => match rows.get(pos + 1) {
+                Some(next) if next.depth > row.depth => TreeMove::Cursor(next.idx),
+                _ => TreeMove::Nothing,
+            },
+        },
+        TreeKey::Left => {
+            if foldable && row.fold == Fold::Open {
+                return TreeMove::Fold {
+                    idx: row.idx,
+                    open: false,
+                };
+            }
+            index
+                .entry(row.idx)
+                .and_then(|e| e.parent)
+                .filter(|p| rows.iter().any(|r| r.idx == *p))
+                .map_or(TreeMove::Nothing, TreeMove::Cursor)
+        }
+        TreeKey::Enter | TreeKey::Space => match row.fold {
+            Fold::Leaf => TreeMove::Open {
+                idx: row.idx,
+                how: if key == TreeKey::Enter {
+                    ExplorerOpen::Pinned
+                } else {
+                    ExplorerOpen::Preview
+                },
+            },
+            fold if foldable => TreeMove::Fold {
+                idx: row.idx,
+                open: fold == Fold::Closed,
+            },
+            _ => TreeMove::Nothing,
+        },
+    }
+}
+
+// --- the right-click menu (WS-9) --------------------------------------------------------------
+
+/// What a right click in the explorer was on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuOn {
+    /// A file row.
+    File,
+    /// A folder row.
+    Folder,
+    /// The empty part of the list.
+    Empty,
+}
+
+/// Everything the entries of the right-click menu decide from.
+#[derive(Clone, Debug)]
+pub struct MenuContext<'a> {
+    /// What was clicked.
+    pub on: MenuOn,
+    /// The entry of the index, for a row.
+    pub idx: Option<u32>,
+    /// The absolute path of the entry; the workspace folder for [`MenuOn::Empty`].
+    pub path: PathBuf,
+    /// The path relative to the workspace folder (empty for [`MenuOn::Empty`]).
+    pub rel: PathBuf,
+    /// A folder row is expanded.
+    pub expanded: bool,
+    /// A filter is active: folders do not fold.
+    pub filtering: bool,
+    /// The file picked with "Select for Compare", if any.
+    pub pick: Option<&'a Path>,
+    /// The document of the window's focused tab, if any.
+    pub current: Option<&'a Path>,
+    /// The window whose explorer this is.
+    pub window: WindowId,
+}
+
+impl MenuContext<'_> {
+    fn open(&self, how: ExplorerOpen) -> Option<MenuEffect> {
+        Some(MenuEffect::Queue(Action::OpenFromExplorer {
+            path: self.path.clone(),
+            window: self.window,
+            how,
+        }))
+    }
+}
+
+/// What choosing an entry of the right-click menu does. Opening and comparing are actions for
+/// `dispatch`; the rest only touches this window's explorer or the outside world.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuEffect {
+    /// Queue an action.
+    Queue(Action),
+    /// Open or fold a folder.
+    Fold {
+        /// The folder.
+        idx: u32,
+        /// Open it (else fold it).
+        open: bool,
+    },
+    /// Open a folder and every folder inside it.
+    ExpandAll(u32),
+    /// Fold every folder.
+    CollapseAll,
+    /// Remember a file as the older side of the next comparison.
+    Pick(PathBuf),
+    /// Put a text on the clipboard.
+    Copy(String),
+    /// Show a folder in the file manager.
+    Reveal(PathBuf),
+}
+
+/// One entry of the explorer's right-click menu. Like `commands::TAB_MENU` it is a table that
+/// drawing reads; whether an entry is possible and what it does are plain functions.
+pub struct ExplorerMenuEntry {
+    /// What the click has to be on for the entry to be listed.
+    pub on: MenuOn,
+    /// A separator line goes above the entry.
+    pub separator_before: bool,
+    /// The i18n key of the displayed name.
+    pub name: fn(&MenuContext<'_>) -> &'static str,
+    /// Whether the entry can be chosen now.
+    pub enabled: fn(&MenuContext<'_>) -> bool,
+    /// What choosing it does.
+    pub effect: fn(&MenuContext<'_>) -> Option<MenuEffect>,
+}
+
+fn yes(_: &MenuContext<'_>) -> bool {
+    true
+}
+
+fn not_filtering(m: &MenuContext<'_>) -> bool {
+    !m.filtering
+}
+
+fn copy_path(m: &MenuContext<'_>) -> Option<MenuEffect> {
+    Some(MenuEffect::Copy(m.path.display().to_string()))
+}
+
+/// The menu, in display order; each kind of click lists its own rows.
+pub static EXPLORER_MENU: &[ExplorerMenuEntry] = &[
+    // A file.
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.open",
+        enabled: yes,
+        effect: |m| m.open(ExplorerOpen::Pinned),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.open_background",
+        enabled: yes,
+        effect: |m| m.open(ExplorerOpen::Background),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.open_split",
+        enabled: yes,
+        effect: |m| m.open(ExplorerOpen::SplitSide),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.open_window",
+        enabled: yes,
+        effect: |m| m.open(ExplorerOpen::NewWindow),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: true,
+        name: |_| "explorer.menu.pick_compare",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Pick(m.path.clone())),
+    },
+    // The picked file is the older (left) side, the clicked one the newer.
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.compare_picked",
+        enabled: |m| m.pick.is_some_and(|p| p != m.path),
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::StartDiff {
+                left: m.pick?.to_path_buf(),
+                right: m.path.clone(),
+            }))
+        },
+    },
+    // The document being read is the older side.
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.compare_current",
+        enabled: |m| m.current.is_some_and(|c| c != m.path),
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::StartDiff {
+                left: m.current?.to_path_buf(),
+                right: m.path.clone(),
+            }))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: true,
+        name: |_| "explorer.menu.copy_path",
+        enabled: yes,
+        effect: copy_path,
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.copy_relative",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Copy(m.rel.display().to_string())),
+    },
+    // The folder that holds the file.
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.reveal",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Reveal(m.path.parent()?.to_path_buf())),
+    },
+    // A folder.
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |m| {
+            if m.expanded {
+                "explorer.menu.collapse"
+            } else {
+                "explorer.menu.expand"
+            }
+        },
+        enabled: not_filtering,
+        effect: |m| {
+            Some(MenuEffect::Fold {
+                idx: m.idx?,
+                open: !m.expanded,
+            })
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |_| "explorer.menu.expand_all",
+        enabled: not_filtering,
+        effect: |m| Some(MenuEffect::ExpandAll(m.idx?)),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: true,
+        name: |_| "explorer.menu.copy_path",
+        enabled: yes,
+        effect: copy_path,
+    },
+    // The folder itself.
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |_| "explorer.menu.reveal",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Reveal(m.path.clone())),
+    },
+    // The empty part of the list.
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: false,
+        name: |_| "explorer.refresh",
+        enabled: yes,
+        effect: |_| Some(MenuEffect::Queue(Action::RefreshWorkspace)),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: false,
+        name: |_| "explorer.collapse_all",
+        enabled: yes,
+        effect: |_| Some(MenuEffect::CollapseAll),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: false,
+        name: |_| "cmd.file.close_folder",
+        enabled: yes,
+        effect: |_| Some(MenuEffect::Queue(Action::CloseFolder)),
+    },
+];
+
+/// The rows of the menu for a click on `on`, in display order.
+pub fn menu_entries(on: MenuOn) -> impl Iterator<Item = &'static ExplorerMenuEntry> {
+    EXPLORER_MENU.iter().filter(move |e| e.on == on)
+}
+
+// --- the outside world ---------------------------------------------------------------------
+
+/// Puts text on the clipboard. Tests use a fake that records instead.
+pub trait TextClipboard: Send + Sync {
+    /// Copies `text`.
+    fn copy_text(&self, ctx: &egui::Context, text: String);
+}
+
+/// Called with the outcome of [`FolderOpener::open_folder`], possibly on another thread.
+pub type OpenDone = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+/// Shows a folder in the file manager. Tests use a fake that records instead.
+pub trait FolderOpener: Send + Sync {
+    /// Opens `dir` without blocking the caller; `done` gets the outcome.
+    fn open_folder(&self, dir: &Path, done: OpenDone);
+}
+
+/// The clipboard of the windowing system, through egui.
+struct EguiClipboard;
+
+impl TextClipboard for EguiClipboard {
+    fn copy_text(&self, ctx: &egui::Context, text: String) {
+        ctx.copy_text(text);
+    }
+}
+
+/// `xdg-open DIR` on a thread of its own: it may take a moment to start the file manager.
+struct XdgOpen;
+
+impl FolderOpener for XdgOpen {
+    fn open_folder(&self, dir: &Path, done: OpenDone) {
+        // Shared so that `done` is still there to report a thread that could not start.
+        let done = Arc::new(Mutex::new(Some(done)));
+        let finish = |slot: &Mutex<Option<OpenDone>>, result| {
+            if let Some(done) = slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                done(result);
+            }
+        };
+        let (dir, slot) = (dir.to_path_buf(), Arc::clone(&done));
+        let spawned = std::thread::Builder::new()
+            .name("refdesk-xdg-open".into())
+            .spawn(move || {
+                let result = std::process::Command::new("xdg-open")
+                    .arg(&dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map_err(|e| format!("xdg-open: {e}"))
+                    .and_then(|status| {
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(format!("xdg-open: {status}"))
+                        }
+                    });
+                finish(&slot, result);
+            });
+        if let Err(err) = spawned {
+            finish(&done, Err(err.to_string()));
+        }
+    }
+}
+
+/// How the explorer reaches the clipboard and the file manager.
+#[derive(Clone)]
+pub struct ExplorerServices {
+    /// Where "Copy Path" puts the text.
+    pub clipboard: Arc<dyn TextClipboard>,
+    /// What "Show in File Manager" runs.
+    pub opener: Arc<dyn FolderOpener>,
+}
+
+impl Default for ExplorerServices {
+    fn default() -> Self {
+        ExplorerServices {
+            clipboard: Arc::new(EguiClipboard),
+            opener: Arc::new(XdgOpen),
+        }
+    }
+}
+
+impl std::fmt::Debug for ExplorerServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExplorerServices")
+    }
+}
+
 /// What one frame of the explorer draws.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prepared {
@@ -259,9 +767,121 @@ pub struct ExplorerState {
     /// Scroll offset and height of the list as of the last frame, for [`scroll_target`].
     scroll_offset: f32,
     view_height: f32,
+    /// The row chosen with the keyboard (or the last clicked one), as an entry of `index`.
+    cursor: Option<u32>,
+    /// The cursor moved by key: the list scrolls it into view on the next frame.
+    scroll_to_cursor: bool,
+    /// The file chosen with "Select for Compare" (absolute path).
+    compare_pick: Option<PathBuf>,
+    /// The clipboard and the file manager.
+    pub services: ExplorerServices,
+    /// Errors from the file manager, reported from its thread, shown on the next frame.
+    reveal_errors: Arc<Mutex<Vec<String>>>,
 }
 
 impl ExplorerState {
+    /// Starts over for another workspace: no folding, filter, cursor or pick. The services stay.
+    pub fn reset(&mut self) {
+        *self = ExplorerState {
+            services: self.services.clone(),
+            ..ExplorerState::default()
+        };
+    }
+
+    /// The file chosen with "Select for Compare", if any.
+    #[cfg(test)]
+    pub fn compare_pick(&self) -> Option<&Path> {
+        self.compare_pick.as_deref()
+    }
+
+    /// Forgets the file chosen with "Select for Compare" (a comparison started).
+    pub fn clear_compare_pick(&mut self) {
+        self.compare_pick = None;
+    }
+
+    /// The entry the keyboard cursor is on.
+    #[cfg(test)]
+    pub fn cursor(&self) -> Option<u32> {
+        self.cursor
+    }
+
+    /// Opens or folds folder `idx`. Files are left alone.
+    pub fn set_expanded(&mut self, idx: u32, open: bool) {
+        if self.is_dir(idx) && self.expanded.contains(&idx) != open {
+            self.toggle(idx);
+        }
+    }
+
+    /// Opens folder `idx` and every folder inside it.
+    pub fn expand_all_below(&mut self, idx: u32) {
+        let Some(index) = self.index.clone() else {
+            return;
+        };
+        if !self.is_dir(idx) {
+            return;
+        }
+        self.expanded.insert(idx);
+        self.expanded.extend(descendant_dirs(&index, idx));
+        self.version += 1;
+    }
+
+    fn is_dir(&self, idx: u32) -> bool {
+        self.index
+            .as_ref()
+            .and_then(|i| i.entry(idx))
+            .is_some_and(|e| e.kind == EntryKind::Dir)
+    }
+
+    /// Carries out a menu entry's effect: actions go onto `queue`, copying and the file manager
+    /// go through [`ExplorerServices`]; a copy is confirmed and a failure reported in the status
+    /// bar.
+    pub fn apply(&mut self, effect: MenuEffect, ctx: &egui::Context, queue: &mut Vec<Action>) {
+        match effect {
+            MenuEffect::Queue(action) => queue.push(action),
+            MenuEffect::Fold { idx, open } => self.set_expanded(idx, open),
+            MenuEffect::ExpandAll(idx) => self.expand_all_below(idx),
+            MenuEffect::CollapseAll => self.collapse_all(),
+            MenuEffect::Pick(path) => self.compare_pick = Some(path),
+            MenuEffect::Copy(text) => {
+                queue.push(Action::ShowNotice(
+                    tr("explorer.copied").replace("{}", &text),
+                ));
+                self.services.clipboard.copy_text(ctx, text);
+            }
+            MenuEffect::Reveal(dir) => {
+                let (errors, ctx) = (Arc::clone(&self.reveal_errors), ctx.clone());
+                self.services.opener.open_folder(
+                    &dir,
+                    Box::new(move |result| {
+                        if let Err(err) = result {
+                            log::warn!("cannot show the folder in the file manager: {err}");
+                            errors
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push(err);
+                            ctx.request_repaint();
+                        }
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Turns the file manager's errors reported since the last frame into status bar notices.
+    fn report_reveal_errors(&self, queue: &mut Vec<Action>) {
+        let errors = std::mem::take(
+            &mut *self
+                .reveal_errors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for err in errors {
+            queue.push(Action::ShowNotice(
+                tr("explorer.reveal_failed").replace("{}", &err),
+            ));
+        }
+    }
+
     /// Moves the folding over to a new index (a rescan, or the first result): the expanded
     /// folders are carried by path, saved ones are applied to the first index.
     fn sync(&mut self, index: &Arc<WorkspaceIndex>) {
@@ -272,7 +892,13 @@ impl ExplorerState {
             Some(paths) => paths,
             None => self.expanded_paths(),
         };
+        // The cursor follows its entry by path, like the folding.
+        let cursor = self
+            .cursor
+            .and_then(|c| self.index.as_ref()?.entry(c))
+            .map(|e| e.rel_path.clone());
         self.expanded = import_expanded(index, &paths);
+        self.cursor = cursor.and_then(|p| index.find(&p));
         self.index = Some(Arc::clone(index));
         self.folded = None;
         self.version += 1;
@@ -359,12 +985,7 @@ impl ExplorerState {
 
     /// Opens a folded folder or folds an open one. Files are left alone.
     pub fn toggle(&mut self, idx: u32) {
-        let is_dir = self
-            .index
-            .as_ref()
-            .and_then(|i| i.entry(idx))
-            .is_some_and(|e| e.kind == EntryKind::Dir);
-        if !is_dir {
+        if !self.is_dir(idx) {
             return;
         }
         if !self.expanded.remove(&idx) {
@@ -469,7 +1090,7 @@ pub fn start_workspace(state: &mut AppState, root: PathBuf, ctx: &egui::Context)
         changed,
     });
     for window in &mut state.windows {
-        window.explorer = ExplorerState::default();
+        window.explorer.reset();
     }
 }
 
@@ -539,7 +1160,7 @@ pub fn open_folder(state: &mut AppState, path: &Path, ctx: &egui::Context) {
 pub fn close_folder(state: &mut AppState) {
     state.workspace = None;
     for window in &mut state.windows {
-        window.explorer = ExplorerState::default();
+        window.explorer.reset();
     }
 }
 
@@ -624,18 +1245,45 @@ fn hint(ui: &mut Ui, text: &str) {
 
 /// What a row asked for, collected while drawing and applied afterwards.
 enum RowEvent {
+    /// A folder row was clicked.
     Toggle(u32),
-    /// The one place a file row asks to be opened.
-    Open(u32),
+    /// A file row was clicked.
+    Open(u32, ExplorerOpen),
+    /// A row was clicked: the cursor goes there and the tree takes the keyboard.
+    Select(u32),
+    /// An entry of a right-click menu was chosen.
+    Menu(MenuEffect),
 }
 
-/// The action that opens file `idx` of the index from the explorer of `window`. Every way the
-/// explorer opens a file goes through here.
-pub fn open_action(index: &WorkspaceIndex, idx: u32, window: WindowId) -> Action {
+/// The action that opens file `idx` of the index from the explorer of `window` in the kind of
+/// tab `how` asks for. Clicks, keys and the right-click menu all open files through here.
+pub fn open_action(
+    index: &WorkspaceIndex,
+    idx: u32,
+    window: WindowId,
+    how: ExplorerOpen,
+) -> Action {
     Action::OpenFromExplorer {
         path: index.abs_path(idx),
         window,
+        how,
     }
+}
+
+/// The id of the filter box of a window's explorer.
+fn filter_id(window: WindowId) -> Id {
+    Id::unique(("explorer_filter", window))
+}
+
+/// The id that holds the keyboard focus of a window's tree (its empty background).
+fn tree_id(window: WindowId) -> Id {
+    Id::unique(("explorer_tree", window))
+}
+
+/// Whether the tree of `window`'s explorer has the keyboard (WS-10).
+#[cfg(test)]
+pub fn tree_has_focus(ctx: &egui::Context, window: WindowId) -> bool {
+    ctx.memory(|m| m.has_focus(tree_id(window)))
 }
 
 /// Draws the body of the explorer section of `window`: the filter box and the tree, or what to
@@ -648,6 +1296,7 @@ pub fn show_body(
     window: WindowId,
     queue: &mut Vec<Action>,
 ) {
+    explorer.report_reveal_errors(queue);
     let Some(view) = view else {
         explorer.focus_filter = false;
         ui.horizontal(|ui| {
@@ -689,17 +1338,27 @@ pub fn show_body(
         return;
     }
 
+    // ↓ in the filter box goes down into the list; it is taken before the box sees it.
+    let filter_id = filter_id(window);
+    let down = ui.memory(|m| m.has_focus(filter_id))
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown));
     let edit = ui.add(
         TextEdit::singleline(&mut explorer.filter)
+            .id(filter_id)
             .hint_text(tr("explorer.filter_hint"))
             .desired_width(f32::INFINITY),
     );
     if std::mem::take(&mut explorer.focus_filter) {
         edit.request_focus();
     }
-    // The text field gives up the keyboard on Esc by itself; clearing is added to that.
-    if (edit.has_focus() || edit.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
+    // The text field gives up the keyboard on Esc by itself, which hands it back to the
+    // document view. A filter is cleared first, keeping the keyboard in the box.
+    if (edit.has_focus() || edit.lost_focus())
+        && ui.input(|i| i.key_pressed(Key::Escape))
+        && !explorer.filter.is_empty()
+    {
         explorer.filter.clear();
+        edit.request_focus();
     }
     if let Some(err) = &view.error {
         hint(ui, &tr("explorer.failed").replace("{}", err));
@@ -714,27 +1373,197 @@ pub fn show_body(
         hint(ui, tr("explorer.no_match"));
         return;
     }
-    show_tree(ui, &index, explorer, &prepared, window, queue);
+    if down {
+        explorer.cursor = prepared.rows.first().map(|r| r.idx);
+        explorer.scroll_to_cursor = true;
+        ui.memory_mut(|m| {
+            m.request_focus(tree_id(window));
+            // egui would move the focus on with the arrow itself.
+            m.move_focus(FocusDirection::None);
+        });
+    }
+    show_tree(ui, &index, explorer, prepared, current, window, queue);
 }
 
-/// The rows of the tree, only those in view.
+/// What every row of one frame needs besides itself.
+struct RowEnv<'a> {
+    index: &'a WorkspaceIndex,
+    prepared: &'a Prepared,
+    cursor: Option<u32>,
+    tree_focused: bool,
+    /// The entry of the file picked for comparing, if it is in the index.
+    pick_idx: Option<u32>,
+    pick: Option<&'a Path>,
+    current: Option<&'a Path>,
+    window: WindowId,
+}
+
+impl RowEnv<'_> {
+    fn menu_context(&self, on: MenuOn, idx: Option<u32>) -> MenuContext<'_> {
+        let entry = idx.and_then(|i| self.index.entry(i));
+        MenuContext {
+            on,
+            idx,
+            path: idx.map_or_else(|| self.index.root.clone(), |i| self.index.abs_path(i)),
+            rel: entry.map(|e| e.rel_path.clone()).unwrap_or_default(),
+            expanded: idx.is_some_and(|i| {
+                self.prepared
+                    .rows
+                    .iter()
+                    .any(|r| r.idx == i && r.fold == Fold::Open)
+            }),
+            filtering: self.prepared.filtering,
+            pick: self.pick,
+            current: self.current,
+            window: self.window,
+        }
+    }
+}
+
+/// Which tree a frame draws: the index, the document of the window's focused tab, the window.
+#[derive(Clone, Copy)]
+struct TreeOf<'a> {
+    index: &'a Arc<WorkspaceIndex>,
+    current: Option<&'a Path>,
+    window: WindowId,
+}
+
+/// Reads the keys of the tree while it has the keyboard and applies them (WS-10). Returns the
+/// rows to draw, worked out again when a folder opened or folded.
+fn handle_tree_keys(
+    ui: &mut Ui,
+    tree: TreeOf<'_>,
+    explorer: &mut ExplorerState,
+    mut prepared: Prepared,
+    page: usize,
+    queue: &mut Vec<Action>,
+) -> Prepared {
+    let TreeOf {
+        index,
+        current,
+        window,
+    } = tree;
+    let tree_id = tree_id(window);
+    // The tree moves with the arrows itself; egui would move the focus to another widget.
+    ui.memory_mut(|m| {
+        m.set_focus_lock_filter(
+            tree_id,
+            EventFilter {
+                tab: false,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: false,
+            },
+        );
+    });
+    // Taking the keys out of the input also keeps them from the view behind (drawn later).
+    let keys: Vec<TreeKey> = ui.input_mut(|i| {
+        TreeKey::ALL
+            .iter()
+            .filter(|(key, _)| i.consume_key(Modifiers::NONE, *key))
+            .map(|(_, tree_key)| *tree_key)
+            .collect()
+    });
+    if keys.is_empty() {
+        return prepared;
+    }
+    for key in keys {
+        let step = tree_key(
+            index,
+            &prepared.rows,
+            explorer.cursor,
+            key,
+            page,
+            prepared.filtering,
+        );
+        match step {
+            TreeMove::Cursor(idx) => {
+                explorer.cursor = Some(idx);
+                explorer.scroll_to_cursor = true;
+            }
+            TreeMove::Fold { idx, open } => {
+                explorer.cursor = Some(idx);
+                explorer.set_expanded(idx, open);
+                prepared = explorer.prepare(index, current);
+            }
+            TreeMove::Open { idx, how } => queue.push(open_action(index, idx, window, how)),
+            TreeMove::ToFilter => ui.memory_mut(|m| m.request_focus(filter_id(window))),
+            TreeMove::Nothing => {}
+        }
+    }
+    ui.memory_mut(|m| m.move_focus(FocusDirection::None));
+    prepared
+}
+
+/// The rows of the tree, only those in view, with the keyboard and the right-click menus.
 fn show_tree(
     ui: &mut Ui,
     index: &Arc<WorkspaceIndex>,
     explorer: &mut ExplorerState,
-    prepared: &Prepared,
+    prepared: Prepared,
+    current: Option<&Path>,
     window: WindowId,
     queue: &mut Vec<Action>,
 ) {
     let row_h = ui.text_style_height(&TextStyle::Body) + 4.0;
     let stride = row_h + ui.spacing().item_spacing.y;
+    let tree_id = tree_id(window);
+    let tree_focused = ui.memory(|m| m.has_focus(tree_id));
+    let prepared = if tree_focused {
+        let page = ((explorer.view_height / stride) as usize).saturating_sub(1);
+        let tree = TreeOf {
+            index,
+            current,
+            window,
+        };
+        handle_tree_keys(ui, tree, explorer, prepared, page, queue)
+    } else {
+        prepared
+    };
+
+    let mut events = Vec::new();
+    let pick_idx = explorer
+        .compare_pick
+        .as_deref()
+        .and_then(|p| p.strip_prefix(&index.root).ok())
+        .and_then(|rel| index.find(rel));
+    let env = RowEnv {
+        index,
+        prepared: &prepared,
+        cursor: explorer.cursor,
+        tree_focused,
+        pick_idx,
+        pick: explorer.compare_pick.as_deref(),
+        current,
+        window,
+    };
+
+    // The background of the list: clicking it gives the tree the keyboard, right-clicking it
+    // opens the menu of the folder as a whole. The rows lie on top of it.
+    let background = ui.interact(ui.available_rect_before_wrap(), tree_id, Sense::click());
+    if background.clicked() {
+        background.request_focus();
+    }
+    background.context_menu(|ui| menu_ui(ui, &env.menu_context(MenuOn::Empty, None), &mut events));
+
     let mut area = ScrollArea::vertical()
         .id_salt("explorer_tree")
         .auto_shrink([false, false]);
+    let cursor_row = env
+        .cursor
+        .and_then(|c| prepared.rows.iter().position(|r| r.idx == c));
     // The list follows the reader only when the pointer is not over it: a row being clicked
-    // must not move away.
+    // must not move away. A cursor moved by key is always brought into view.
     let in_panel = ui.rect_contains_pointer(ui.max_rect());
-    if !in_panel
+    if std::mem::take(&mut explorer.scroll_to_cursor)
+        && let Some(row) = cursor_row
+    {
+        if let Some(offset) =
+            scroll_target(row, stride, explorer.scroll_offset, explorer.view_height)
+        {
+            area = area.vertical_scroll_offset(offset);
+        }
+    } else if !in_panel
         && let Some(row) = prepared.current_row
         && let Some(offset) =
             scroll_target(row, stride, explorer.scroll_offset, explorer.view_height)
@@ -742,10 +1571,9 @@ fn show_tree(
         area = area.vertical_scroll_offset(offset);
     }
 
-    let mut events = Vec::new();
     let output = area.show_rows(ui, row_h, prepared.rows.len(), |ui, range| {
         for row in &prepared.rows[range] {
-            show_row(ui, row_h, row, index, prepared, &mut events);
+            show_row(ui, row_h, row, &env, &mut events);
         }
     });
     explorer.scroll_offset = output.state.clamped_offset().y;
@@ -753,45 +1581,79 @@ fn show_tree(
 
     for event in events {
         match event {
+            RowEvent::Select(idx) => {
+                explorer.cursor = Some(idx);
+                ui.memory_mut(|m| m.request_focus(tree_id));
+            }
             RowEvent::Toggle(idx) => explorer.toggle(idx),
-            RowEvent::Open(idx) => queue.push(open_action(index, idx, window)),
+            RowEvent::Open(idx, how) => queue.push(open_action(index, idx, window, how)),
+            RowEvent::Menu(effect) => explorer.apply(effect, ui.ctx(), queue),
+        }
+    }
+}
+
+/// The entries of a right-click menu for `m`; a chosen one becomes an event.
+fn menu_ui(ui: &mut Ui, m: &MenuContext<'_>, events: &mut Vec<RowEvent>) {
+    for entry in menu_entries(m.on) {
+        if entry.separator_before {
+            ui.separator();
+        }
+        let button = egui::Button::new(tr((entry.name)(m)));
+        if ui.add_enabled((entry.enabled)(m), button).clicked() {
+            events.extend((entry.effect)(m).map(RowEvent::Menu));
+            ui.close();
         }
     }
 }
 
 /// Draws one row: the fold triangle of a folder, the name (one line, shortened with "…" when
-/// too long; the relative path in a tooltip) and turns its click into an event. A click on a
-/// folder folds it, a click on a file opens it (a single and a double click are told apart
-/// here when files open in a preview tab).
-fn show_row(
-    ui: &mut Ui,
-    row_h: f32,
-    row: &Row,
-    index: &WorkspaceIndex,
-    prepared: &Prepared,
-    events: &mut Vec<RowEvent>,
-) {
-    let Some(entry) = index.entry(row.idx) else {
+/// too long; the relative path in a tooltip), the keyboard cursor and the comparison pick, and
+/// turns its clicks into events. A click on a folder folds it; on a file it opens the file in
+/// the kind of tab [`explorer_click`] decides. The row is a button with its name (and, for a
+/// folder, whether it is open) for the accessibility tree.
+fn show_row(ui: &mut Ui, row_h: f32, row: &Row, env: &RowEnv<'_>, events: &mut Vec<RowEvent>) {
+    let Some(entry) = env.index.entry(row.idx) else {
         return;
     };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::hover());
     let indent = f32::from(row.depth.min(MAX_INDENT_DEPTH)) * INDENT;
     let fold_rect =
         Rect::from_min_size(rect.min + egui::vec2(indent, 0.0), egui::vec2(row_h, row_h));
-    let name_rect = Rect::from_min_max(Pos2::new(fold_rect.right(), rect.top()), rect.max);
+    let picked = env.pick_idx == Some(row.idx);
+    let mark_w = if picked { 14.0 } else { 0.0 };
+    let name_rect = Rect::from_min_max(
+        Pos2::new(fold_rect.right(), rect.top()),
+        Pos2::new(rect.right() - mark_w, rect.bottom()),
+    );
+    // Clicks only: the tree as a whole holds the keyboard, not each row.
     let response = ui.interact(
         rect,
         ui.make_persistent_id(("explorer_row", row.idx)),
-        Sense::click(),
+        Sense::CLICK,
     );
+    response.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, &entry.name));
+    if row.fold != Fold::Leaf {
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_expanded(row.fold == Fold::Open);
+        });
+    }
 
-    let is_current = prepared.current == Some(row.idx);
+    let is_current = env.prepared.current == Some(row.idx);
     let visuals = ui.visuals().clone();
     let painter = ui.painter();
     if is_current {
         painter.rect_filled(rect, 2.0, visuals.selection.bg_fill);
     } else if response.hovered() {
         painter.rect_filled(rect, 2.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    // The keyboard cursor is an outline, unlike the filled current document.
+    if env.tree_focused && env.cursor == Some(row.idx) {
+        painter.rect_stroke(
+            rect.shrink(0.5),
+            2.0,
+            egui::Stroke::new(1.0, visuals.strong_text_color()),
+            StrokeKind::Inside,
+        );
     }
     let text_color = if is_current {
         visuals.selection.stroke.color
@@ -805,6 +1667,10 @@ fn show_row(
             visuals.weak_text_color()
         };
         painter.add(triangle(fold_rect, row.fold == Fold::Open, color));
+    }
+    if picked {
+        let center = Pos2::new(rect.right() - mark_w / 2.0, rect.center().y);
+        painter.circle_filled(center, 3.5, visuals.warn_fg_color);
     }
     let job = title_job(
         &entry.name,
@@ -823,14 +1689,32 @@ fn show_row(
 
     let response = response.on_hover_ui(|ui| {
         ui.label(entry.rel_path.display().to_string());
-    });
-    if response.clicked() {
-        match entry.kind {
-            EntryKind::Dir if !prepared.filtering => events.push(RowEvent::Toggle(row.idx)),
-            EntryKind::Dir => {}
-            EntryKind::Pdf => events.push(RowEvent::Open(row.idx)),
+        if picked {
+            ui.weak(tr("explorer.picked"));
         }
+    });
+    let (clicked, middle) = (response.clicked(), response.middle_clicked());
+    if clicked || middle || response.secondary_clicked() {
+        events.push(RowEvent::Select(row.idx));
     }
+    match entry.kind {
+        EntryKind::Dir if clicked && !env.prepared.filtering => {
+            events.push(RowEvent::Toggle(row.idx));
+        }
+        EntryKind::Pdf if clicked || middle => {
+            let ctrl = ui.input(|i| i.modifiers.ctrl);
+            let how = explorer_click(response.double_clicked(), middle, ctrl);
+            events.push(RowEvent::Open(row.idx, how));
+        }
+        _ => {}
+    }
+    response.context_menu(|ui| {
+        let on = match entry.kind {
+            EntryKind::Dir => MenuOn::Folder,
+            EntryKind::Pdf => MenuOn::File,
+        };
+        menu_ui(ui, &env.menu_context(on, Some(row.idx)), events);
+    });
 }
 
 #[cfg(test)]
@@ -1648,12 +2532,15 @@ mod tests {
 
     /// Clicks down the explorer until a click opens a file; returns the click position and the
     /// action.
-    fn find_file_row(ctx: &egui::Context, state: &mut AppState) -> (Pos2, PathBuf, WindowId) {
+    fn find_file_row(
+        ctx: &egui::Context,
+        state: &mut AppState,
+    ) -> (Pos2, PathBuf, WindowId, ExplorerOpen) {
         for y in (28..300).step_by(4) {
             let pos = Pos2::new(100.0, y as f32);
             for action in click_at(ctx, state, pos) {
-                if let Action::OpenFromExplorer { path, window } = action {
-                    return (pos, path, window);
+                if let Action::OpenFromExplorer { path, window, how } = action {
+                    return (pos, path, window, how);
                 }
             }
         }
@@ -1672,14 +2559,16 @@ mod tests {
         for _ in 0..2 {
             frame(&ctx, &mut state, Vec::new());
         }
-        let (pos, path, window) = find_file_row(&ctx, &mut state);
+        let (pos, path, window, how) = find_file_row(&ctx, &mut state);
         assert_eq!(path, a, "the first file row");
         assert_eq!(window, WindowId::MAIN);
+        assert_eq!(how, ExplorerOpen::Preview, "a single click");
         dispatch(
             &mut state,
             Action::OpenFromExplorer {
                 path: path.clone(),
                 window,
+                how,
             },
             &ctx,
         );
@@ -1763,5 +2652,925 @@ mod tests {
         assert_eq!(names(&index, &p.rows), ["beta.pdf"]);
         frame(&ctx, &mut state, key(Key::Escape));
         assert_eq!(state.main_window().explorer.filter, "");
+    }
+
+    // --- WP-72: keyboard, right-click menu, accessibility ------------------------------------
+
+    /// sample() with "specs" open: guides, specs, net, intro.pdf, a.pdf, B.pdf.
+    fn sample_rows() -> (Arc<WorkspaceIndex>, Vec<Row>) {
+        let index = sample();
+        let expanded: HashSet<u32> = [idx(&index, "specs")].into();
+        let rows = visible_rows(&index, &expanded);
+        assert_eq!(
+            names(&index, &rows),
+            ["guides", "specs", "net", "intro.pdf", "a.pdf", "B.pdf"]
+        );
+        (index, rows)
+    }
+
+    #[test]
+    fn arrow_keys_move_the_cursor_and_stop_at_the_ends() {
+        let (index, rows) = sample_rows();
+        let key = |cursor: Option<&str>, k| {
+            tree_key(&index, &rows, cursor.map(|c| idx(&index, c)), k, 2, false)
+        };
+        let to = |rel: &str| TreeMove::Cursor(idx(&index, rel));
+        // Without a cursor the first key lands on the first row, End on the last.
+        assert_eq!(key(None, TreeKey::Down), to("guides"));
+        assert_eq!(key(None, TreeKey::Enter), to("guides"));
+        assert_eq!(key(None, TreeKey::End), to("B.pdf"));
+        assert_eq!(key(Some("guides"), TreeKey::Down), to("specs"));
+        assert_eq!(key(Some("specs"), TreeKey::Up), to("guides"));
+        assert_eq!(key(Some("B.pdf"), TreeKey::Down), to("B.pdf"));
+        // ↑ on the first row goes back to the filter box.
+        assert_eq!(key(Some("guides"), TreeKey::Up), TreeMove::ToFilter);
+        assert_eq!(key(Some("a.pdf"), TreeKey::Home), to("guides"));
+        assert_eq!(key(Some("guides"), TreeKey::End), to("B.pdf"));
+        assert_eq!(key(Some("guides"), TreeKey::PageDown), to("specs/net"));
+        assert_eq!(key(Some("B.pdf"), TreeKey::PageUp), to("specs/intro.pdf"));
+        assert_eq!(key(Some("specs"), TreeKey::PageUp), to("guides"));
+        assert_eq!(key(Some("a.pdf"), TreeKey::PageDown), to("B.pdf"));
+        // A cursor on an entry that is not shown counts as none.
+        assert_eq!(key(Some("guides/deep"), TreeKey::Down), to("guides"));
+        assert_eq!(
+            tree_key(&index, &[], None, TreeKey::Down, 2, false),
+            TreeMove::Nothing
+        );
+    }
+
+    #[test]
+    fn right_and_left_open_fold_and_walk_the_tree() {
+        let (index, rows) = sample_rows();
+        let key = |cursor: &str, k| tree_key(&index, &rows, Some(idx(&index, cursor)), k, 2, false);
+        let i = |rel: &str| idx(&index, rel);
+        // → opens a folded folder, then goes to its first child; nothing on a file.
+        assert_eq!(
+            key("guides", TreeKey::Right),
+            TreeMove::Fold {
+                idx: i("guides"),
+                open: true
+            }
+        );
+        assert_eq!(
+            key("specs", TreeKey::Right),
+            TreeMove::Cursor(i("specs/net"))
+        );
+        assert_eq!(key("a.pdf", TreeKey::Right), TreeMove::Nothing);
+        // ← folds an open folder, else goes to the parent; nothing at the top level.
+        assert_eq!(
+            key("specs", TreeKey::Left),
+            TreeMove::Fold {
+                idx: i("specs"),
+                open: false
+            }
+        );
+        assert_eq!(
+            key("specs/net", TreeKey::Left),
+            TreeMove::Cursor(i("specs"))
+        );
+        assert_eq!(
+            key("specs/intro.pdf", TreeKey::Left),
+            TreeMove::Cursor(i("specs"))
+        );
+        assert_eq!(key("guides", TreeKey::Left), TreeMove::Nothing);
+        assert_eq!(key("a.pdf", TreeKey::Left), TreeMove::Nothing);
+    }
+
+    #[test]
+    fn enter_opens_an_ordinary_tab_space_a_preview_and_both_fold_folders() {
+        let (index, rows) = sample_rows();
+        let key = |cursor: &str, k| tree_key(&index, &rows, Some(idx(&index, cursor)), k, 2, false);
+        let i = |rel: &str| idx(&index, rel);
+        assert_eq!(
+            key("a.pdf", TreeKey::Enter),
+            TreeMove::Open {
+                idx: i("a.pdf"),
+                how: ExplorerOpen::Pinned
+            }
+        );
+        assert_eq!(
+            key("a.pdf", TreeKey::Space),
+            TreeMove::Open {
+                idx: i("a.pdf"),
+                how: ExplorerOpen::Preview
+            }
+        );
+        for k in [TreeKey::Enter, TreeKey::Space] {
+            assert_eq!(
+                key("specs", k),
+                TreeMove::Fold {
+                    idx: i("specs"),
+                    open: false
+                }
+            );
+            assert_eq!(
+                key("guides", k),
+                TreeMove::Fold {
+                    idx: i("guides"),
+                    open: true
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn while_filtering_folders_do_not_fold_and_the_arrows_only_move() {
+        let index = sample();
+        let rows = filtered_rows(&index, &folded_names(&index), "tcp");
+        assert_eq!(names(&index, &rows), ["specs", "net", "tcp.pdf"]);
+        let key = |cursor: &str, k| tree_key(&index, &rows, Some(idx(&index, cursor)), k, 2, true);
+        assert_eq!(key("specs", TreeKey::Left), TreeMove::Nothing);
+        assert_eq!(key("specs", TreeKey::Enter), TreeMove::Nothing);
+        assert_eq!(
+            key("specs", TreeKey::Right),
+            TreeMove::Cursor(idx(&index, "specs/net"))
+        );
+        assert_eq!(
+            key("specs/net", TreeKey::Left),
+            TreeMove::Cursor(idx(&index, "specs"))
+        );
+        assert_eq!(
+            key("specs/net/tcp.pdf", TreeKey::Enter),
+            TreeMove::Open {
+                idx: idx(&index, "specs/net/tcp.pdf"),
+                how: ExplorerOpen::Pinned
+            }
+        );
+    }
+
+    #[test]
+    fn expand_all_below_opens_every_folder_inside() {
+        let index = sample();
+        assert_eq!(
+            descendant_dirs(&index, idx(&index, "guides")),
+            [
+                idx(&index, "guides/deep"),
+                idx(&index, "guides/deep/deeper")
+            ]
+        );
+        assert!(descendant_dirs(&index, idx(&index, "a.pdf")).is_empty());
+        let mut state = ExplorerState::default();
+        state.prepare(&index, None);
+        state.expand_all_below(idx(&index, "guides"));
+        assert_eq!(
+            names(&index, &state.prepare(&index, None).rows)[..5],
+            ["guides", "deep", "deeper", "x.pdf", "specs"]
+        );
+        assert!(!state.is_expanded(idx(&index, "specs")));
+        state.set_expanded(idx(&index, "guides"), false);
+        assert_eq!(state.prepare(&index, None).rows.len(), 4);
+    }
+
+    /// A clipboard that records what it was given.
+    #[derive(Default)]
+    struct FakeClipboard(Mutex<Vec<String>>);
+
+    impl TextClipboard for FakeClipboard {
+        fn copy_text(&self, _ctx: &egui::Context, text: String) {
+            self.0.lock().expect("lock").push(text);
+        }
+    }
+
+    /// A file manager that records the folders it was asked to show, and fails when told to.
+    #[derive(Default)]
+    struct FakeOpener {
+        opened: Mutex<Vec<PathBuf>>,
+        fail: Option<String>,
+    }
+
+    impl FolderOpener for FakeOpener {
+        fn open_folder(&self, dir: &Path, done: OpenDone) {
+            self.opened.lock().expect("lock").push(dir.to_path_buf());
+            done(self.fail.clone().map_or(Ok(()), Err));
+        }
+    }
+
+    fn fake_services(
+        fail: Option<&str>,
+    ) -> (Arc<FakeClipboard>, Arc<FakeOpener>, ExplorerServices) {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let opener = Arc::new(FakeOpener {
+            opened: Mutex::default(),
+            fail: fail.map(str::to_owned),
+        });
+        let services = ExplorerServices {
+            clipboard: Arc::clone(&clipboard) as Arc<dyn TextClipboard>,
+            opener: Arc::clone(&opener) as Arc<dyn FolderOpener>,
+        };
+        (clipboard, opener, services)
+    }
+
+    fn menu_context<'a>(
+        index: &WorkspaceIndex,
+        on: MenuOn,
+        rel: Option<&str>,
+        pick: Option<&'a Path>,
+        current: Option<&'a Path>,
+    ) -> MenuContext<'a> {
+        let i = rel.map(|r| idx(index, r));
+        MenuContext {
+            on,
+            idx: i,
+            path: i.map_or_else(|| index.root.clone(), |i| index.abs_path(i)),
+            rel: rel.map(PathBuf::from).unwrap_or_default(),
+            expanded: false,
+            filtering: false,
+            pick,
+            current,
+            window: WindowId::MAIN,
+        }
+    }
+
+    fn menu_rows(m: &MenuContext<'_>) -> Vec<(&'static str, bool)> {
+        menu_entries(m.on)
+            .map(|e| ((e.name)(m), (e.enabled)(m)))
+            .collect()
+    }
+
+    #[test]
+    fn each_kind_of_click_has_its_menu_and_every_entry_has_its_texts() {
+        let index = sample();
+        let file = menu_context(&index, MenuOn::File, Some("a.pdf"), None, None);
+        assert_eq!(
+            menu_rows(&file),
+            [
+                ("explorer.menu.open", true),
+                ("explorer.menu.open_background", true),
+                ("explorer.menu.open_split", true),
+                ("explorer.menu.open_window", true),
+                ("explorer.menu.pick_compare", true),
+                ("explorer.menu.compare_picked", false),
+                ("explorer.menu.compare_current", false),
+                ("explorer.menu.copy_path", true),
+                ("explorer.menu.copy_relative", true),
+                ("explorer.menu.reveal", true),
+            ]
+        );
+        let mut folder = menu_context(&index, MenuOn::Folder, Some("specs"), None, None);
+        assert_eq!(
+            menu_rows(&folder),
+            [
+                ("explorer.menu.expand", true),
+                ("explorer.menu.expand_all", true),
+                ("explorer.menu.copy_path", true),
+                ("explorer.menu.reveal", true),
+            ]
+        );
+        folder.expanded = true;
+        assert_eq!(menu_rows(&folder)[0], ("explorer.menu.collapse", true));
+        folder.filtering = true;
+        assert_eq!(
+            menu_rows(&folder)[..2],
+            [
+                ("explorer.menu.collapse", false),
+                ("explorer.menu.expand_all", false)
+            ]
+        );
+        let empty = menu_context(&index, MenuOn::Empty, None, None, None);
+        assert_eq!(
+            menu_rows(&empty),
+            [
+                ("explorer.refresh", true),
+                ("explorer.collapse_all", true),
+                ("cmd.file.close_folder", true),
+            ]
+        );
+        for m in [&file, &folder, &empty] {
+            for e in menu_entries(m.on) {
+                for lang in [crate::i18n::Lang::Ko, crate::i18n::Lang::En] {
+                    assert!(crate::i18n::lookup(lang, (e.name)(m)).is_some());
+                }
+            }
+        }
+        let separators: Vec<bool> = menu_entries(MenuOn::File)
+            .map(|e| e.separator_before)
+            .collect();
+        assert_eq!(
+            separators,
+            [
+                false, false, false, false, true, false, false, true, false, false
+            ]
+        );
+    }
+
+    fn effect_of(m: &MenuContext<'_>, name: &str) -> Option<MenuEffect> {
+        menu_entries(m.on)
+            .find(|e| (e.name)(m) == name)
+            .and_then(|e| (e.effect)(m))
+    }
+
+    #[test]
+    fn the_file_menu_opens_in_four_ways_and_copies_both_paths() {
+        let index = sample();
+        let m = menu_context(&index, MenuOn::File, Some("specs/net/tcp.pdf"), None, None);
+        let path = PathBuf::from("/ws/specs/net/tcp.pdf");
+        for (name, how) in [
+            ("explorer.menu.open", ExplorerOpen::Pinned),
+            ("explorer.menu.open_background", ExplorerOpen::Background),
+            ("explorer.menu.open_split", ExplorerOpen::SplitSide),
+            ("explorer.menu.open_window", ExplorerOpen::NewWindow),
+        ] {
+            assert_eq!(
+                effect_of(&m, name),
+                Some(MenuEffect::Queue(Action::OpenFromExplorer {
+                    path: path.clone(),
+                    window: WindowId::MAIN,
+                    how
+                })),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            effect_of(&m, "explorer.menu.copy_path"),
+            Some(MenuEffect::Copy("/ws/specs/net/tcp.pdf".into()))
+        );
+        assert_eq!(
+            effect_of(&m, "explorer.menu.copy_relative"),
+            Some(MenuEffect::Copy("specs/net/tcp.pdf".into()))
+        );
+        assert_eq!(
+            effect_of(&m, "explorer.menu.reveal"),
+            Some(MenuEffect::Reveal(PathBuf::from("/ws/specs/net")))
+        );
+        let folder = menu_context(&index, MenuOn::Folder, Some("specs"), None, None);
+        assert_eq!(
+            effect_of(&folder, "explorer.menu.reveal"),
+            Some(MenuEffect::Reveal(PathBuf::from("/ws/specs")))
+        );
+        assert_eq!(
+            effect_of(&folder, "explorer.menu.expand"),
+            Some(MenuEffect::Fold {
+                idx: idx(&index, "specs"),
+                open: true
+            })
+        );
+        let empty = menu_context(&index, MenuOn::Empty, None, None, None);
+        assert_eq!(
+            effect_of(&empty, "cmd.file.close_folder"),
+            Some(MenuEffect::Queue(Action::CloseFolder))
+        );
+    }
+
+    #[test]
+    fn a_picked_file_is_compared_as_the_older_side_and_the_current_document_too() {
+        let index = sample();
+        let tcp = PathBuf::from("/ws/specs/net/tcp.pdf");
+        let udp = PathBuf::from("/ws/specs/net/udp.pdf");
+        let reading = PathBuf::from("/elsewhere/reading.pdf");
+        let picking = menu_context(&index, MenuOn::File, Some("specs/net/tcp.pdf"), None, None);
+        assert_eq!(
+            effect_of(&picking, "explorer.menu.pick_compare"),
+            Some(MenuEffect::Pick(tcp.clone()))
+        );
+        // The picked file itself cannot be compared with itself.
+        let same = menu_context(
+            &index,
+            MenuOn::File,
+            Some("specs/net/tcp.pdf"),
+            Some(&tcp),
+            Some(&tcp),
+        );
+        assert!(!menu_rows(&same)[5].1 && !menu_rows(&same)[6].1);
+        let other = menu_context(
+            &index,
+            MenuOn::File,
+            Some("specs/net/udp.pdf"),
+            Some(&tcp),
+            Some(&reading),
+        );
+        assert!(menu_rows(&other)[5].1 && menu_rows(&other)[6].1);
+        assert_eq!(
+            effect_of(&other, "explorer.menu.compare_picked"),
+            Some(MenuEffect::Queue(Action::StartDiff {
+                left: tcp.clone(),
+                right: udp.clone()
+            }))
+        );
+        assert_eq!(
+            effect_of(&other, "explorer.menu.compare_current"),
+            Some(MenuEffect::Queue(Action::StartDiff {
+                left: reading,
+                right: udp
+            }))
+        );
+    }
+
+    #[test]
+    fn copying_goes_to_the_clipboard_and_showing_to_the_file_manager() {
+        let ctx = egui::Context::default();
+        let (clipboard, opener, services) = fake_services(None);
+        let mut explorer = ExplorerState {
+            services,
+            ..Default::default()
+        };
+        let mut queue = Vec::new();
+        explorer.apply(MenuEffect::Copy("/ws/a.pdf".into()), &ctx, &mut queue);
+        assert_eq!(*clipboard.0.lock().expect("lock"), ["/ws/a.pdf"]);
+        assert!(matches!(&queue[..], [Action::ShowNotice(text)] if text.contains("/ws/a.pdf")));
+        queue.clear();
+        explorer.apply(
+            MenuEffect::Reveal(PathBuf::from("/ws/specs")),
+            &ctx,
+            &mut queue,
+        );
+        assert_eq!(
+            *opener.opened.lock().expect("lock"),
+            [PathBuf::from("/ws/specs")]
+        );
+        explorer.report_reveal_errors(&mut queue);
+        assert!(queue.is_empty(), "no failure, no notice");
+        explorer.apply(
+            MenuEffect::Pick(PathBuf::from("/ws/a.pdf")),
+            &ctx,
+            &mut queue,
+        );
+        assert_eq!(explorer.compare_pick(), Some(Path::new("/ws/a.pdf")));
+    }
+
+    #[test]
+    fn a_file_manager_that_fails_is_reported_in_the_status_bar() {
+        let ctx = egui::Context::default();
+        let (_, opener, services) = fake_services(Some("no xdg-open"));
+        let mut explorer = ExplorerState {
+            services,
+            ..Default::default()
+        };
+        let mut queue = Vec::new();
+        explorer.apply(MenuEffect::Reveal(PathBuf::from("/ws")), &ctx, &mut queue);
+        assert_eq!(opener.opened.lock().expect("lock").len(), 1);
+        explorer.report_reveal_errors(&mut queue);
+        assert!(
+            matches!(&queue[..], [Action::ShowNotice(text)] if text.contains("no xdg-open")),
+            "{queue:?}"
+        );
+        // Reported once.
+        queue.clear();
+        explorer.report_reveal_errors(&mut queue);
+        assert!(queue.is_empty());
+        // The notice reaches the status bar through dispatch.
+        let mut state = AppState::new();
+        dispatch(&mut state, Action::ShowNotice("hello".into()), &ctx);
+        assert_eq!(
+            state.status_notice.as_ref().map(|n| n.text.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn the_pick_is_used_up_by_a_comparison_and_dropped_with_the_folder() {
+        let first = TempDir::new("pick-first");
+        first.file("a.pdf");
+        let second = TempDir::new("pick-second");
+        second.file("b.pdf");
+        let ctx = egui::Context::default();
+        let repaints = watch_repaints(&ctx);
+        let mut state = AppState::new();
+        let (clipboard, _, services) = fake_services(None);
+        state.windows[0].explorer.services = services;
+        open_folder_and_wait(&ctx, &repaints, &mut state, &first.0, 1);
+        let pick = |state: &mut AppState| {
+            state.windows[0].explorer.apply(
+                MenuEffect::Pick(PathBuf::from("/refdesk-test/wp72-old.pdf")),
+                &egui::Context::default(),
+                &mut Vec::new(),
+            );
+            assert!(state.windows[0].explorer.compare_pick().is_some());
+        };
+        pick(&mut state);
+        dispatch(
+            &mut state,
+            Action::StartDiff {
+                left: PathBuf::from("/refdesk-test/wp72-old.pdf"),
+                right: PathBuf::from("/refdesk-test/wp72-new.pdf"),
+            },
+            &ctx,
+        );
+        assert_eq!(state.windows[0].explorer.compare_pick(), None);
+        pick(&mut state);
+        open_folder_and_wait(&ctx, &repaints, &mut state, &second.0, 1);
+        assert_eq!(state.windows[0].explorer.compare_pick(), None);
+        // The injected services survive the new folder.
+        state.windows[0]
+            .explorer
+            .apply(MenuEffect::Copy("x".into()), &ctx, &mut Vec::new());
+        assert_eq!(*clipboard.0.lock().expect("lock"), ["x"]);
+    }
+
+    // --- through drawn frames --------------------------------------------------------------
+
+    /// A frame at a given time (so double clicks are told apart from two clicks) with modifiers.
+    fn frame_at(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        events: Vec<egui::Event>,
+        time: f64,
+        modifiers: egui::Modifiers,
+    ) -> Vec<Action> {
+        let mut queue = Vec::new();
+        let mut all = vec![egui::Event::ModifiersChanged(modifiers)];
+        all.extend(events);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+            time: Some(time),
+            events: all,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| show_window(ui, state, 0, &mut queue))
+            .drop_without_applying_deltas();
+        queue
+    }
+
+    /// One labeled button of the accessibility tree.
+    #[derive(Debug)]
+    struct Node {
+        label: String,
+        rect: Rect,
+        expanded: Option<bool>,
+    }
+
+    /// The labeled buttons of one drawn frame of the main window.
+    fn buttons(ctx: &egui::Context, state: &mut AppState, time: f64) -> Vec<Node> {
+        ctx.enable_accesskit();
+        let mut queue = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| show_window(ui, state, 0, &mut queue));
+        let update = output.platform_output.accesskit_update.clone();
+        output.drop_without_applying_deltas();
+        update
+            .map(|u| u.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, n)| n.role() == egui::accesskit::Role::Button)
+            .filter_map(|(_, n)| {
+                let b = n.bounds()?;
+                Some(Node {
+                    label: n.label()?.to_owned(),
+                    rect: Rect::from_min_max(
+                        Pos2::new(b.x0 as f32, b.y0 as f32),
+                        Pos2::new(b.x1 as f32, b.y1 as f32),
+                    ),
+                    expanded: n.is_expanded(),
+                })
+            })
+            .collect()
+    }
+
+    fn row_center(nodes: &[Node], label: &str) -> Pos2 {
+        nodes
+            .iter()
+            .find(|n| n.label == label)
+            .unwrap_or_else(|| panic!("no row {label} in {nodes:?}"))
+            .rect
+            .center()
+    }
+
+    fn press(button: egui::PointerButton, pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A click at `pos` over three frames from `time`; returns the queued actions.
+    fn click_kind(
+        ctx: &egui::Context,
+        state: &mut AppState,
+        pos: Pos2,
+        button: egui::PointerButton,
+        modifiers: egui::Modifiers,
+        time: f64,
+    ) -> Vec<Action> {
+        let mut queue = frame_at(
+            ctx,
+            state,
+            vec![egui::Event::PointerMoved(pos)],
+            time,
+            modifiers,
+        );
+        queue.extend(frame_at(
+            ctx,
+            state,
+            vec![press(button, pos, true)],
+            time + 0.02,
+            modifiers,
+        ));
+        queue.extend(frame_at(
+            ctx,
+            state,
+            vec![press(button, pos, false)],
+            time + 0.04,
+            modifiers,
+        ));
+        queue
+    }
+
+    fn opened(queue: &[Action]) -> Vec<(String, ExplorerOpen)> {
+        queue
+            .iter()
+            .filter_map(|a| match a {
+                Action::OpenFromExplorer { path, how, .. } => {
+                    Some((path.file_name()?.to_string_lossy().into_owned(), *how))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A workspace with sub/c.pdf, a.pdf, b.pdf, scanned and drawn.
+    fn drawn_workspace(name: &str) -> (TempDir, egui::Context, AppState) {
+        let dir = TempDir::new(name);
+        dir.file("a.pdf");
+        dir.file("b.pdf");
+        dir.file("sub/c.pdf");
+        let ctx = egui::Context::default();
+        let repaints = watch_repaints(&ctx);
+        let mut state = AppState::new();
+        open_folder_and_wait(&ctx, &repaints, &mut state, &dir.0, 3);
+        for i in 0..3 {
+            frame_at(
+                &ctx,
+                &mut state,
+                Vec::new(),
+                i as f64 * 0.02,
+                egui::Modifiers::NONE,
+            );
+        }
+        (dir, ctx, state)
+    }
+
+    #[test]
+    fn single_double_middle_and_ctrl_clicks_open_the_right_kind_of_tab() {
+        use egui::PointerButton::{Middle, Primary};
+        let (_dir, ctx, mut state) = drawn_workspace("clicks");
+        let nodes = buttons(&ctx, &mut state, 1.0);
+        let a = row_center(&nodes, "a.pdf");
+        let none = egui::Modifiers::NONE;
+        let q = click_kind(&ctx, &mut state, a, Primary, none, 10.0);
+        assert_eq!(opened(&q), [("a.pdf".into(), ExplorerOpen::Preview)]);
+        // The second click of a double click.
+        let mut q = frame_at(&ctx, &mut state, vec![press(Primary, a, true)], 10.10, none);
+        q.extend(frame_at(
+            &ctx,
+            &mut state,
+            vec![press(Primary, a, false)],
+            10.12,
+            none,
+        ));
+        assert_eq!(opened(&q), [("a.pdf".into(), ExplorerOpen::Pinned)]);
+        let q = click_kind(&ctx, &mut state, a, Middle, none, 20.0);
+        assert_eq!(opened(&q), [("a.pdf".into(), ExplorerOpen::Background)]);
+        let q = click_kind(&ctx, &mut state, a, Primary, egui::Modifiers::CTRL, 30.0);
+        assert_eq!(opened(&q), [("a.pdf".into(), ExplorerOpen::Background)]);
+        // A folder only folds.
+        let sub = row_center(&nodes, "sub");
+        let q = click_kind(&ctx, &mut state, sub, Primary, none, 40.0);
+        assert!(opened(&q).is_empty());
+        let index = index_now(&state).expect("index");
+        assert!(state.windows[0].explorer.is_expanded(idx(&index, "sub")));
+    }
+
+    fn key_at(ctx: &egui::Context, state: &mut AppState, k: Key, time: f64) -> Vec<Action> {
+        frame_at(ctx, state, key(k), time, egui::Modifiers::NONE)
+    }
+
+    #[test]
+    fn the_keyboard_walks_the_tree_and_opens_files() {
+        let (_dir, ctx, mut state) = drawn_workspace("keys");
+        let index = index_now(&state).expect("index");
+        let i = |rel: &str| idx(&index, rel);
+        let nodes = buttons(&ctx, &mut state, 1.0);
+        // Clicking a row gives the tree the keyboard and puts the cursor there.
+        click_kind(
+            &ctx,
+            &mut state,
+            row_center(&nodes, "a.pdf"),
+            egui::PointerButton::Primary,
+            egui::Modifiers::NONE,
+            10.0,
+        );
+        frame_at(&ctx, &mut state, Vec::new(), 10.1, egui::Modifiers::NONE);
+        assert!(tree_has_focus(&ctx, WindowId::MAIN));
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("a.pdf")));
+        let mut t = 11.0;
+        let mut step = |state: &mut AppState, k: Key| {
+            t += 1.0;
+            key_at(&ctx, state, k, t)
+        };
+        assert!(step(&mut state, Key::ArrowDown).is_empty());
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("b.pdf")));
+        assert_eq!(
+            opened(&step(&mut state, Key::Enter)),
+            [("b.pdf".into(), ExplorerOpen::Pinned)]
+        );
+        assert_eq!(
+            opened(&step(&mut state, Key::Space)),
+            [("b.pdf".into(), ExplorerOpen::Preview)]
+        );
+        step(&mut state, Key::Home);
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("sub")));
+        step(&mut state, Key::ArrowRight);
+        assert!(state.windows[0].explorer.is_expanded(i("sub")));
+        step(&mut state, Key::ArrowRight);
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("sub/c.pdf")));
+        step(&mut state, Key::ArrowLeft);
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("sub")));
+        step(&mut state, Key::ArrowLeft);
+        assert!(!state.windows[0].explorer.is_expanded(i("sub")));
+        // Enter on a folder opens it and opens no file.
+        assert!(opened(&step(&mut state, Key::Enter)).is_empty());
+        assert!(state.windows[0].explorer.is_expanded(i("sub")));
+        step(&mut state, Key::End);
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("b.pdf")));
+        step(&mut state, Key::PageUp);
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("sub")));
+        step(&mut state, Key::PageDown);
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("b.pdf")));
+        assert!(
+            tree_has_focus(&ctx, WindowId::MAIN),
+            "the arrows kept the keyboard"
+        );
+        // ↑ on the first row: back to the filter box; ↓ there: down to the first row.
+        step(&mut state, Key::Home);
+        step(&mut state, Key::ArrowUp);
+        step(&mut state, Key::F1);
+        let filter_focused =
+            |ctx: &egui::Context| ctx.memory(|m| m.has_focus(filter_id(WindowId::MAIN)));
+        assert!(filter_focused(&ctx));
+        assert!(!tree_has_focus(&ctx, WindowId::MAIN));
+        step(&mut state, Key::End);
+        step(&mut state, Key::ArrowDown);
+        step(&mut state, Key::F1);
+        assert!(tree_has_focus(&ctx, WindowId::MAIN));
+        assert_eq!(state.windows[0].explorer.cursor(), Some(i("sub")));
+        // Esc lets go of the tree.
+        step(&mut state, Key::Escape);
+        step(&mut state, Key::F1);
+        assert!(!tree_has_focus(&ctx, WindowId::MAIN));
+    }
+
+    #[test]
+    fn escape_clears_the_filter_first_and_then_leaves_the_box() {
+        let (_dir, ctx, mut state) = drawn_workspace("escape");
+        dispatch(&mut state, Action::ShowExplorer, &ctx);
+        let none = egui::Modifiers::NONE;
+        frame_at(&ctx, &mut state, Vec::new(), 1.0, none);
+        frame_at(
+            &ctx,
+            &mut state,
+            vec![egui::Event::Text("b".into())],
+            1.1,
+            none,
+        );
+        assert_eq!(state.windows[0].explorer.filter, "b");
+        let filter_focused =
+            |ctx: &egui::Context| ctx.memory(|m| m.has_focus(filter_id(WindowId::MAIN)));
+        key_at(&ctx, &mut state, Key::Escape, 2.0);
+        frame_at(&ctx, &mut state, Vec::new(), 2.1, none);
+        assert_eq!(state.windows[0].explorer.filter, "");
+        assert!(filter_focused(&ctx), "the box keeps the keyboard");
+        key_at(&ctx, &mut state, Key::Escape, 3.0);
+        frame_at(&ctx, &mut state, Vec::new(), 3.1, none);
+        assert!(!filter_focused(&ctx), "back to the document view");
+        assert!(!ctx.text_edit_focused());
+    }
+
+    #[test]
+    fn the_view_does_not_scroll_while_the_explorer_has_the_keyboard() {
+        let dir = TempDir::new("noscroll");
+        let mut builder = refdesk_core::testutil::PdfBuilder::new();
+        for page in 0..6 {
+            builder = builder.page(400.0, 600.0, |p| {
+                p.text(72.0, 100.0, 12.0, &format!("page {page}"));
+            });
+        }
+        let doc_path = dir.0.join("long.pdf");
+        std::fs::write(&doc_path, builder.build()).expect("write pdf");
+        dir.file("other.pdf");
+        let ctx = egui::Context::default();
+        let repaints = watch_repaints(&ctx);
+        let mut state = AppState::new();
+        open_folder_and_wait(&ctx, &repaints, &mut state, &dir.0, 2);
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget {
+                path: doc_path.clone(),
+                page: None,
+            }]),
+            &ctx,
+        );
+        let tab = state.focus.expect("focus");
+        let doc = state
+            .docs
+            .get(state.tabs.pdf(tab).expect("pdf").doc)
+            .expect("doc")
+            .clone();
+        wait_for(&ctx, &repaints, "the document", || doc.info().is_some());
+        let none = egui::Modifiers::NONE;
+        for i in 0..4 {
+            frame_at(&ctx, &mut state, Vec::new(), i as f64 * 0.02, none);
+        }
+        let anchor = |state: &AppState| state.tabs.pdf(tab).expect("pdf").view.anchor;
+        let start = anchor(&state);
+        let nodes = buttons(&ctx, &mut state, 1.0);
+        click_kind(
+            &ctx,
+            &mut state,
+            row_center(&nodes, "other.pdf"),
+            egui::PointerButton::Primary,
+            none,
+            10.0,
+        );
+        // The pointer rests over the view, which would scroll with the keys if it saw them.
+        frame_at(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(Pos2::new(700.0, 400.0))],
+            10.1,
+            none,
+        );
+        assert!(tree_has_focus(&ctx, WindowId::MAIN));
+        for (n, k) in [Key::PageDown, Key::ArrowDown, Key::End, Key::Space]
+            .into_iter()
+            .enumerate()
+        {
+            key_at(&ctx, &mut state, k, 11.0 + n as f64);
+        }
+        assert_eq!(anchor(&state), start, "the view stayed");
+        // Without the explorer's keyboard the same key scrolls the view.
+        key_at(&ctx, &mut state, Key::Escape, 20.0);
+        key_at(&ctx, &mut state, Key::End, 21.0);
+        frame_at(&ctx, &mut state, Vec::new(), 21.1, none);
+        assert_ne!(
+            anchor(&state),
+            start,
+            "the view scrolls when the explorer lets go"
+        );
+    }
+
+    #[test]
+    fn file_and_outline_rows_are_named_buttons_in_the_accessibility_tree() {
+        let dir = TempDir::new("a11y");
+        let pdf = refdesk_core::testutil::PdfBuilder::new()
+            .page(400.0, 600.0, |p| {
+                p.text(72.0, 100.0, 18.0, "1 Introduction");
+            })
+            .page(400.0, 600.0, |p| {
+                p.text(72.0, 100.0, 18.0, "2 Design");
+            })
+            .outline("1 Introduction", 1, 100.0, |o| {
+                o.child("1.1 Scope", 1, 300.0);
+            })
+            .outline_leaf("2 Design", 2, 100.0)
+            .build();
+        let doc_path = dir.0.join("guide.pdf");
+        std::fs::write(&doc_path, pdf).expect("write pdf");
+        dir.file("specs/net.pdf");
+        let ctx = egui::Context::default();
+        let repaints = watch_repaints(&ctx);
+        let mut state = AppState::new();
+        open_folder_and_wait(&ctx, &repaints, &mut state, &dir.0, 2);
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget {
+                path: doc_path,
+                page: None,
+            }]),
+            &ctx,
+        );
+        let tab = state.focus.expect("focus");
+        let doc = state
+            .docs
+            .get(state.tabs.pdf(tab).expect("pdf").doc)
+            .expect("doc")
+            .clone();
+        wait_for(&ctx, &repaints, "the document", || doc.info().is_some());
+        for i in 0..3 {
+            frame_at(
+                &ctx,
+                &mut state,
+                Vec::new(),
+                i as f64 * 0.02,
+                egui::Modifiers::NONE,
+            );
+        }
+        let nodes = buttons(&ctx, &mut state, 1.0);
+        let find = |label: &str| {
+            nodes
+                .iter()
+                .find(|n| n.label == label)
+                .unwrap_or_else(|| panic!("no button {label} in {nodes:?}"))
+        };
+        assert_eq!(find("guide.pdf").expanded, None);
+        assert_eq!(find("specs").expanded, Some(false));
+        // The outline starts with its top level shown.
+        assert_eq!(find("1 Introduction").expanded, Some(false));
+        assert_eq!(find("2 Design").expanded, None);
+        assert!(find("2 Design").rect.is_positive());
     }
 }

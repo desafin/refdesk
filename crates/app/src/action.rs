@@ -41,13 +41,15 @@ pub enum Action {
     CloseFolder,
     /// Scan the workspace folder again (WS-11).
     RefreshWorkspace,
-    /// Open a file clicked in the explorer of a window, in that window; an open document gets
-    /// the focus instead (WS-3). The one action every explorer click that opens a file makes.
+    /// Open a file from the explorer of a window, in that window (WS-3, WS-9). Every way the
+    /// explorer opens a file makes this action; `how` says what kind of tab.
     OpenFromExplorer {
         /// The file.
         path: PathBuf,
-        /// The window whose explorer was clicked.
+        /// The window whose explorer was used.
         window: WindowId,
+        /// A preview tab, an ordinary one, one behind the current tab, …
+        how: ExplorerOpen,
     },
     /// Close a tab.
     CloseTab(TabId),
@@ -61,6 +63,8 @@ pub enum Action {
     FocusTab(TabId),
     /// Open another view of the same document, copying the view state.
     DuplicateTab(TabId),
+    /// Make a preview tab an ordinary tab that the explorer does not replace (WS-3).
+    PinTab(TabId),
     /// Show another view of a PDF tab's document in a new pane beside it (TAB-3).
     SplitTab {
         /// The tab whose view is copied.
@@ -84,6 +88,8 @@ pub enum Action {
     /// Set the scroll speed multiplier, or `None` to go back to the value of `config.toml`
     /// (VIEW-12). The choice is kept in `prefs.json`.
     SetScrollSpeed(Option<f32>),
+    /// Show a short message at the right end of the status bar for a few seconds.
+    ShowNotice(String),
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
     /// clipboard (SEL-2).
     CopySelection(TabId),
@@ -226,6 +232,43 @@ pub enum OpenHow {
     SplitSide,
 }
 
+/// What kind of tab [`Action::OpenFromExplorer`] opens (WS-3, WS-9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorerOpen {
+    /// A preview tab: replaces the preview tab of the focused pane, else a new preview tab. A
+    /// document that is open already gets the focus instead.
+    Preview,
+    /// An ordinary tab; a document already open in a preview tab pins that tab.
+    Pinned,
+    /// An ordinary tab right after the current one, which keeps the focus.
+    Background,
+    /// A new view in a new pane to the right of the focused pane.
+    SplitSide,
+    /// A new view in a new window.
+    NewWindow,
+}
+
+/// What a click on a file row of the explorer opens (WS-3): a single click a preview tab, a
+/// double click an ordinary tab (the first click of it already opened the preview, which the
+/// second pins), a middle click or Ctrl+click an ordinary tab behind the current one.
+pub fn explorer_click(double: bool, middle: bool, ctrl: bool) -> ExplorerOpen {
+    if middle || ctrl {
+        ExplorerOpen::Background
+    } else if double {
+        ExplorerOpen::Pinned
+    } else {
+        ExplorerOpen::Preview
+    }
+}
+
+/// The preview tab among the tabs of a pane, if it has one (the first, should it have several).
+pub fn preview_tab_in(pane: &[TabId], is_preview: impl Fn(TabId) -> bool) -> Option<TabId> {
+    pane.iter().copied().find(|t| is_preview(*t))
+}
+
+/// Seconds a notice from [`Action::ShowNotice`] stays in the status bar.
+const NOTICE_SECS: f64 = 4.0;
+
 /// The notifier handed to documents: it asks egui for a new frame.
 pub(crate) fn notifier(ctx: &egui::Context) -> Notifier {
     let ctx = ctx.clone();
@@ -278,12 +321,12 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         }
         Action::CloseFolder => explorer::close_folder(state),
         Action::RefreshWorkspace => explorer::refresh(state),
-        Action::OpenFromExplorer { path, window } => {
-            // The file opens in the window whose explorer was clicked.
+        Action::OpenFromExplorer { path, window, how } => {
+            // The file opens in the window whose explorer was used.
             if let Some(w) = state.window_index(window) {
                 state.follow_window_focus(w);
             }
-            open_file(state, OpenTarget { path, page: None }, ctx);
+            open_from_explorer(state, &path, how, ctx);
         }
         Action::CloseTab(tab) => close_tab(state, tab),
         Action::CloseOtherTabs(tab) => close_other_tabs(state, tab),
@@ -307,6 +350,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::DuplicateTab(tab) => {
             duplicate_tab(state, tab);
         }
+        Action::PinTab(tab) => pin_tab(state, tab),
         Action::SplitTab { tab, dir } => {
             split_tab(state, tab, dir);
         }
@@ -324,6 +368,13 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             _ => {}
         },
         Action::SetScrollSpeed(speed) => set_scroll_speed(state, speed, ctx),
+        Action::ShowNotice(text) => {
+            state.status_notice = Some(StatusNotice {
+                text,
+                until: ctx.input(|i| i.time) + NOTICE_SECS,
+            });
+            ctx.request_repaint();
+        }
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
         Action::Find(tab) => search::find(state, tab, false, ctx),
         Action::FindSelection(tab) => search::find(state, tab, true, ctx),
@@ -339,6 +390,12 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::FindNext(tab) => search::step(state, tab, true, ctx),
         Action::FindPrev(tab) => search::step(state, tab, false, ctx),
         Action::StartDiff { left, right } => {
+            // The tabs whose documents are compared are kept open; a pick in an explorer is
+            // used up.
+            pin_tabs_showing(state, &[&left, &right]);
+            for window in &mut state.windows {
+                window.explorer.clear_compare_pick();
+            }
             let tab = insert_diff_tab(state, &left, &right, ctx);
             place_new_tab(state, tab, None);
         }
@@ -405,14 +462,27 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             transfer::new_window(state);
         }
         Action::DetachTab(tab) => {
-            transfer::detach_tab(state, tab);
+            if transfer::detach_tab(state, tab).is_some() {
+                pin_tab(state, tab);
+            }
         }
         Action::MoveTab { tab, to } => {
             if transfer::move_tab(state, tab, to) {
+                pin_tab(state, tab);
                 windows::raise(ctx, state, to);
             }
         }
-        Action::MergeAllWindows => transfer::merge_all(state),
+        Action::MergeAllWindows => {
+            // The panes of the main window would get several preview tabs.
+            let moved: Vec<TabId> = state.windows[1..]
+                .iter()
+                .flat_map(|w| w.dock.tabs())
+                .collect();
+            for tab in moved {
+                pin_tab(state, tab);
+            }
+            transfer::merge_all(state);
+        }
         Action::CloseWindow(id) => {
             if id == state.main_window().id {
                 quit(ctx);
@@ -500,28 +570,47 @@ fn place_new_tab(state: &mut AppState, tab: TabId, near: Option<TabId>) {
 /// Opens a document and shows it in a tab of the focused pane. An already open document is not
 /// opened again: its existing tab gets the focus instead (OPEN-5).
 fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
-    let path = normalize_path(&target.path);
-    let open = state.docs.find(&path);
-    if let Some(tab) = open.and_then(|doc| existing_tab_for(state, doc)) {
-        if let Some(page) = target.page {
-            jump_to_page(state, tab, page);
-        }
-        let from = state.focused_window_index();
-        focus_tab(state, tab);
-        // The tab may be in another window: bring that window forward.
-        if let Some(w) = state.window_of(tab).filter(|w| *w != from) {
-            windows::raise(ctx, state, state.windows[w].id);
-        }
+    if focus_open_document(state, &target, ctx) {
         return;
     }
+    let tab = new_pdf_tab(state, target, false, ctx);
+    place_new_tab(state, tab, None);
+}
 
+/// When a tab shows the document of `target` already, focuses it (jumping to the requested page)
+/// and returns true.
+fn focus_open_document(state: &mut AppState, target: &OpenTarget, ctx: &egui::Context) -> bool {
+    let Some(tab) = state
+        .docs
+        .find(&target.path)
+        .and_then(|doc| existing_tab_for(state, doc))
+    else {
+        return false;
+    };
+    if let Some(page) = target.page {
+        jump_to_page(state, tab, page);
+    }
+    let from = state.focused_window_index();
+    focus_tab(state, tab);
+    // The tab may be in another window: bring that window forward.
+    if let Some(w) = state.window_of(tab).filter(|w| *w != from) {
+        windows::raise(ctx, state, state.windows[w].id);
+    }
+    true
+}
+
+/// A new PDF tab on the document of `target`, which is opened unless it is open already. It
+/// starts where the reader left the document last time (SES-3), else at the top at the default
+/// zoom. The tab is not put into any window yet.
+fn new_pdf_tab(
+    state: &mut AppState,
+    target: OpenTarget,
+    preview: bool,
+    ctx: &egui::Context,
+) -> TabId {
+    let path = normalize_path(&target.path);
     // A document shown only by a comparison tab gets a view of its own on the same handle.
-    let doc = open.unwrap_or_else(|| {
-        state
-            .docs
-            .insert(DocumentHandle::open(&path, notifier(ctx)))
-    });
-    // Where the reader left this document last time (SES-3), else the top at the default zoom.
+    let doc = open_document(state, &path, ctx);
     let remembered = session::remembered_view(state, &path);
     let mut view = remembered.view;
     if let Some(page) = target.page.filter(|_| !remembered.found) {
@@ -541,6 +630,7 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
         view,
         ui: PdfViewUiState::default(),
         toc,
+        preview,
     }));
     if remembered.found
         && let Some(page) = target.page
@@ -551,7 +641,167 @@ fn open_file(state: &mut AppState, target: OpenTarget, ctx: &egui::Context) {
     // Without a record by path, the content fingerprint may still find one (a moved file).
     let waiting = (!remembered.found && target.page.is_none()).then_some(tab);
     session::document_opened(state, waiting, &path);
-    place_new_tab(state, tab, None);
+    tab
+}
+
+/// `Action::OpenFromExplorer` after the focus moved to the explorer's window: opens `path` in
+/// the kind of tab `how` asks for (WS-3, WS-9).
+fn open_from_explorer(state: &mut AppState, path: &Path, how: ExplorerOpen, ctx: &egui::Context) {
+    let target = OpenTarget {
+        path: path.to_path_buf(),
+        page: None,
+    };
+    let existing = state
+        .docs
+        .find(path)
+        .and_then(|doc| existing_tab_for(state, doc));
+    match how {
+        ExplorerOpen::Preview => {
+            if focus_open_document(state, &target, ctx) {
+                return;
+            }
+            let w = state.focused_window_index();
+            let dock = &state.windows[w].dock;
+            let pane = dock
+                .focused_tab()
+                .map(|t| dock.pane_tabs(t))
+                .unwrap_or_default();
+            let is_preview = |t: TabId| state.tabs.pdf(t).is_some_and(|p| p.preview);
+            match preview_tab_in(&pane, is_preview) {
+                Some(old) => {
+                    // A pane keeps at most one preview tab (a drag may have brought another).
+                    for other in pane.iter().filter(|t| **t != old) {
+                        pin_tab(state, *other);
+                    }
+                    let tab = replace_preview(state, old, target, ctx);
+                    focus_tab(state, tab);
+                }
+                None => {
+                    let tab = new_pdf_tab(state, target, true, ctx);
+                    place_new_tab(state, tab, None);
+                }
+            }
+        }
+        ExplorerOpen::Pinned => {
+            if focus_open_document(state, &target, ctx) {
+                if let Some(tab) = state.focus {
+                    pin_tab(state, tab);
+                }
+                return;
+            }
+            let tab = new_pdf_tab(state, target, false, ctx);
+            place_new_tab(state, tab, None);
+        }
+        ExplorerOpen::Background => {
+            if let Some(tab) = existing {
+                pin_tab(state, tab);
+                return;
+            }
+            let tab = new_pdf_tab(state, target, false, ctx);
+            let w = state.focused_window_index();
+            let keep = state.focus.filter(|t| state.windows[w].dock.contains(*t));
+            transfer::put_tab(state, tab, w, keep);
+            // A window that showed only the start page has nothing else to keep showing.
+            match keep.filter(|t| state.windows[w].dock.contains(*t)) {
+                Some(keep) => {
+                    state.windows[w].dock.activate(keep);
+                }
+                None => focus_tab(state, tab),
+            }
+        }
+        ExplorerOpen::SplitSide => {
+            let Some(tab) = view_for(state, existing, target, ctx) else {
+                return;
+            };
+            let w = state.focused_window_index();
+            let base = state.windows[w]
+                .dock
+                .focused_tab()
+                .filter(|t| matches!(state.tabs.get(*t), Some(Tab::Pdf(_) | Tab::Diff(_))));
+            match base {
+                Some(base) if state.windows[w].dock.split(base, tab, SplitDir::Right) => {
+                    state.focus = Some(tab);
+                }
+                _ => place_new_tab(state, tab, None),
+            }
+        }
+        ExplorerOpen::NewWindow => {
+            let Some(tab) = view_for(state, existing, target, ctx) else {
+                return;
+            };
+            let id = state.add_window();
+            if let Some(w) = state.window_index(id) {
+                state.windows[w].dock.add_tab(tab, None);
+            }
+            state.focus = Some(tab);
+        }
+    }
+}
+
+/// A new ordinary tab for a document: a copy of the view of `existing` when a tab shows the
+/// document already, else a tab opened as usual. Not put into any window yet.
+fn view_for(
+    state: &mut AppState,
+    existing: Option<TabId>,
+    target: OpenTarget,
+    ctx: &egui::Context,
+) -> Option<TabId> {
+    match existing {
+        Some(tab) => copy_view(state, tab),
+        None => Some(new_pdf_tab(state, target, false, ctx)),
+    }
+}
+
+/// Shows the document of `target` in place of preview tab `old`: a new preview tab takes the
+/// same spot in the same pane and `old` goes. Where `old` was in its document is remembered
+/// (SES-3), and its document is closed when no other tab shows it. Returns the new tab.
+///
+/// A new tab rather than a changed one, so that nothing kept per tab (the wait for a
+/// fingerprint, the focus order) carries over from the old document to the new one.
+fn replace_preview(
+    state: &mut AppState,
+    old: TabId,
+    target: OpenTarget,
+    ctx: &egui::Context,
+) -> TabId {
+    session::record_tab(state, old);
+    let tab = new_pdf_tab(state, target, true, ctx);
+    let Some(w) = state.window_of(old) else {
+        place_new_tab(state, tab, None);
+        return tab;
+    };
+    state.windows[w].dock.add_tab(tab, Some(old));
+    state.windows[w].dock.remove_tab(old);
+    if let Some(Tab::Pdf(pdf)) = state.tabs.remove(old)
+        && !state.tabs.doc_in_use(pdf.doc)
+    {
+        state.docs.remove(pdf.doc);
+    }
+    if state.focus == Some(old) {
+        state.focus = Some(tab);
+    }
+    tab
+}
+
+/// Makes a preview tab an ordinary one. Nothing for other tabs.
+fn pin_tab(state: &mut AppState, tab: TabId) {
+    if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+        pdf.preview = false;
+    }
+}
+
+/// Pins every preview tab that shows one of `paths`.
+fn pin_tabs_showing(state: &mut AppState, paths: &[&Path]) {
+    let docs: Vec<DocId> = paths.iter().filter_map(|p| state.docs.find(p)).collect();
+    let tabs: Vec<TabId> = state
+        .tabs
+        .iter()
+        .filter(|(_, tab)| matches!(tab, Tab::Pdf(p) if p.preview && docs.contains(&p.doc)))
+        .map(|(id, _)| id)
+        .collect();
+    for tab in tabs {
+        pin_tab(state, tab);
+    }
 }
 
 /// Moves both views of a comparison tab to the next or previous change, when its result is
@@ -811,6 +1061,8 @@ fn reopen_closed_tab(state: &mut AppState, ctx: &egui::Context) {
         view: closed.view,
         ui: PdfViewUiState::default(),
         toc: Box::default(),
+        // A tab brought back is an ordinary tab, whatever it was.
+        preview: false,
     }));
     place_new_tab(state, tab, None);
 }
@@ -821,6 +1073,7 @@ fn copy_view(state: &mut AppState, tab: TabId) -> Option<TabId> {
     let mut source = state.tabs.pdf(tab).cloned()?;
     // The copy starts with a fresh view; its scroll follows from the copied anchor.
     source.ui = PdfViewUiState::default();
+    source.preview = false;
     Some(state.tabs.insert(Tab::Pdf(source)))
 }
 
@@ -829,6 +1082,8 @@ fn copy_view(state: &mut AppState, tab: TabId) -> Option<TabId> {
 fn duplicate_tab(state: &mut AppState, tab: TabId) -> Option<TabId> {
     state.window_of(tab)?;
     let new = copy_view(state, tab)?;
+    // A tab that was worth a second view is kept (WS-3).
+    pin_tab(state, tab);
     place_new_tab(state, new, Some(tab));
     Some(new)
 }
@@ -839,6 +1094,7 @@ fn split_tab(state: &mut AppState, tab: TabId, dir: SplitDir) -> Option<TabId> {
     let w = state.window_of(tab)?;
     let new = copy_view(state, tab)?;
     if state.windows[w].dock.split(tab, new, dir) {
+        pin_tab(state, tab);
         state.focus = Some(new);
         Some(new)
     } else {
@@ -2038,5 +2294,585 @@ mod tests {
         dispatch(&mut state, Action::ToggleToc, &ctx);
         assert_eq!(open_flags(&state), vec![true, false]);
         assert_eq!(state.windows[1].toc_width, DEFAULT_TOC_WIDTH);
+    }
+}
+
+/// Tests of preview tabs and the other ways the explorer opens files (WS-3, WS-9).
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::windows::tab_label;
+    use refdesk_core::testutil::PdfBuilder;
+
+    fn explorer_open(state: &mut AppState, ctx: &egui::Context, path: &str, how: ExplorerOpen) {
+        let window = state.focused_window().id;
+        explorer_open_in(state, ctx, path, how, window);
+    }
+
+    fn explorer_open_in(
+        state: &mut AppState,
+        ctx: &egui::Context,
+        path: &str,
+        how: ExplorerOpen,
+        window: WindowId,
+    ) {
+        dispatch(
+            state,
+            Action::OpenFromExplorer {
+                path: PathBuf::from(path),
+                window,
+                how,
+            },
+            ctx,
+        );
+    }
+
+    fn open(state: &mut AppState, ctx: &egui::Context, path: &str) -> TabId {
+        dispatch(state, Action::OpenFiles(vec![OpenTarget::parse(path)]), ctx);
+        state.focus.expect("focused")
+    }
+
+    fn is_preview(state: &AppState, tab: TabId) -> bool {
+        state.tabs.pdf(tab).expect("pdf tab").preview
+    }
+
+    fn path_of(state: &AppState, tab: TabId) -> PathBuf {
+        let doc = state.tabs.pdf(tab).expect("pdf tab").doc;
+        state.docs.get(doc).expect("document").path().to_path_buf()
+    }
+
+    /// The tabs of the main window with their documents and whether they are previews.
+    fn main_tabs(state: &AppState) -> Vec<(String, bool)> {
+        state
+            .main_window()
+            .dock
+            .tabs()
+            .into_iter()
+            .map(|t| {
+                let name = path_of(state, t)
+                    .file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .into_owned();
+                (name, is_preview(state, t))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_kind_of_click_decides_the_kind_of_tab() {
+        assert_eq!(explorer_click(false, false, false), ExplorerOpen::Preview);
+        assert_eq!(explorer_click(true, false, false), ExplorerOpen::Pinned);
+        assert_eq!(explorer_click(false, true, false), ExplorerOpen::Background);
+        assert_eq!(explorer_click(false, false, true), ExplorerOpen::Background);
+        assert_eq!(explorer_click(true, false, true), ExplorerOpen::Background);
+    }
+
+    #[test]
+    fn the_preview_tab_of_a_pane_is_found_among_its_tabs() {
+        let (a, b, c) = (TabId::for_test(1), TabId::for_test(2), TabId::for_test(3));
+        assert_eq!(preview_tab_in(&[a, b, c], |t| t == b), Some(b));
+        assert_eq!(preview_tab_in(&[a, c], |t| t == b), None);
+        assert_eq!(preview_tab_in(&[], |_| true), None);
+    }
+
+    #[test]
+    fn a_single_click_opens_a_preview_tab_and_the_next_one_replaces_it_in_place() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/wp72/left.pdf");
+        open(&mut state, &ctx, "/refdesk-test/wp72/right.pdf");
+        let left = state.main_window().dock.tabs()[0];
+        dispatch(&mut state, Action::FocusTab(left), &ctx);
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let first = state.focus.expect("focus");
+        assert!(is_preview(&state, first));
+        assert_eq!(
+            main_tabs(&state),
+            [
+                ("left.pdf".into(), false),
+                ("right.pdf".into(), false),
+                ("a.pdf".into(), true)
+            ]
+        );
+        // Move the preview tab between the two others: its spot is kept when it is replaced.
+        let tabs = state.main_window().dock.tabs();
+        state.windows[0].dock.remove_tab(tabs[2]);
+        state.windows[0].dock.add_tab(tabs[2], Some(tabs[0]));
+
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/b.pdf",
+            ExplorerOpen::Preview,
+        );
+        assert_eq!(
+            main_tabs(&state),
+            [
+                ("left.pdf".into(), false),
+                ("b.pdf".into(), true),
+                ("right.pdf".into(), false)
+            ],
+            "same number of tabs, same spot, the new document"
+        );
+        let second = state.focus.expect("focus");
+        assert_eq!(
+            path_of(&state, second),
+            Path::new("/refdesk-test/wp72/b.pdf")
+        );
+        assert!(
+            state
+                .docs
+                .find(Path::new("/refdesk-test/wp72/a.pdf"))
+                .is_none(),
+            "the replaced document is closed"
+        );
+        assert_eq!(state.docs.len(), 3);
+    }
+
+    #[test]
+    fn a_replaced_document_that_another_tab_shows_stays_open() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let preview = state.focus.expect("focus");
+        // Another view of `a` in a second pane. Splitting pins the source, so the source is
+        // made a preview again by hand.
+        let other = split_tab(&mut state, preview, SplitDir::Right).expect("split");
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(preview) {
+            pdf.preview = true;
+        }
+        dispatch(&mut state, Action::FocusTab(preview), &ctx);
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/b.pdf",
+            ExplorerOpen::Preview,
+        );
+        assert!(
+            state
+                .docs
+                .find(Path::new("/refdesk-test/wp72/a.pdf"))
+                .is_some()
+        );
+        assert_eq!(
+            path_of(&state, other),
+            Path::new("/refdesk-test/wp72/a.pdf")
+        );
+    }
+
+    #[test]
+    fn a_single_click_on_an_open_document_goes_to_its_tab_and_keeps_the_preview() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let pinned = open(&mut state, &ctx, "/refdesk-test/wp72/pinned.pdf");
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let preview = state.focus.expect("focus");
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/pinned.pdf",
+            ExplorerOpen::Preview,
+        );
+        assert_eq!(state.focus, Some(pinned));
+        assert!(!is_preview(&state, pinned));
+        assert!(is_preview(&state, preview), "the preview tab is left alone");
+        assert_eq!(state.main_window().dock.tab_count(), 2);
+        // The preview's own document: back to it, nothing replaced.
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        assert_eq!(state.focus, Some(preview));
+        assert!(is_preview(&state, preview));
+    }
+
+    #[test]
+    fn a_double_click_pins_the_preview_and_the_next_single_click_makes_a_new_preview() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        // The two clicks of a double click: the first opens the preview, the second pins it.
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let a = state.focus.expect("focus");
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Pinned,
+        );
+        assert_eq!(state.focus, Some(a));
+        assert!(
+            !is_preview(&state, a),
+            "the same tab became an ordinary tab"
+        );
+        assert_eq!(state.main_window().dock.tab_count(), 1);
+
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/b.pdf",
+            ExplorerOpen::Preview,
+        );
+        assert_eq!(
+            main_tabs(&state),
+            [("a.pdf".into(), false), ("b.pdf".into(), true)],
+            "the pinned tab is not replaced"
+        );
+        // A double click on a file that is not open opens an ordinary tab directly.
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/c.pdf",
+            ExplorerOpen::Pinned,
+        );
+        assert_eq!(main_tabs(&state)[2], ("c.pdf".into(), false));
+        assert_eq!(main_tabs(&state)[1], ("b.pdf".into(), true));
+    }
+
+    #[test]
+    fn using_a_preview_tab_pins_it() {
+        let ctx = egui::Context::default();
+        type Use = fn(&mut AppState, &egui::Context, TabId);
+        let uses: [(&str, Use); 7] = [
+            ("PinTab (title double click, tab menu)", |s, c, t| {
+                dispatch(s, Action::PinTab(t), c)
+            }),
+            ("the Keep Tab Open command", |s, c, _| {
+                let action = crate::commands::command("tab.pin")
+                    .and_then(|cmd| cmd.run(s))
+                    .expect("the command runs for a preview tab");
+                dispatch(s, action, c);
+            }),
+            ("duplicate", |s, c, t| {
+                dispatch(s, Action::DuplicateTab(t), c)
+            }),
+            ("split", |s, c, t| {
+                dispatch(
+                    s,
+                    Action::SplitTab {
+                        tab: t,
+                        dir: SplitDir::Right,
+                    },
+                    c,
+                )
+            }),
+            ("detach", |s, c, t| dispatch(s, Action::DetachTab(t), c)),
+            ("move to another window", |s, c, t| {
+                let to = transfer::new_window(s);
+                dispatch(s, Action::MoveTab { tab: t, to }, c);
+            }),
+            ("compare", |s, c, t| {
+                let left = path_of(s, t);
+                dispatch(
+                    s,
+                    Action::StartDiff {
+                        left,
+                        right: PathBuf::from("/refdesk-test/wp72/other.pdf"),
+                    },
+                    c,
+                );
+            }),
+        ];
+        for (what, use_it) in uses {
+            let mut state = AppState::new();
+            open(&mut state, &ctx, "/refdesk-test/wp72/keep.pdf");
+            explorer_open(
+                &mut state,
+                &ctx,
+                "/refdesk-test/wp72/a.pdf",
+                ExplorerOpen::Preview,
+            );
+            let tab = state.focus.expect("focus");
+            assert!(is_preview(&state, tab));
+            use_it(&mut state, &ctx, tab);
+            assert!(!is_preview(&state, tab), "{what} pins the tab");
+            // No copy is a preview either.
+            assert!(
+                state
+                    .tabs
+                    .iter()
+                    .all(|(_, t)| !matches!(t, Tab::Pdf(p) if p.preview)),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keep_open_command_is_only_possible_on_a_preview_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let pin = crate::commands::command("tab.pin").expect("command");
+        assert!(!(pin.enabled)(&state));
+        open(&mut state, &ctx, "/refdesk-test/wp72/keep.pdf");
+        assert!(!(pin.enabled)(&state));
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let tab = state.focus.expect("focus");
+        assert_eq!(pin.run(&state), Some(Action::PinTab(tab)));
+    }
+
+    #[test]
+    fn each_pane_has_its_own_preview_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let x = open(&mut state, &ctx, "/refdesk-test/wp72/x.pdf");
+        let copy = split_tab(&mut state, x, SplitDir::Right).expect("split");
+        // The right pane has the focus.
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let right_preview = state.focus.expect("focus");
+        assert_eq!(
+            state.main_window().dock.pane_tabs(copy),
+            [copy, right_preview]
+        );
+        // The left pane gets a preview of its own instead of taking the right one.
+        dispatch(&mut state, Action::FocusTab(x), &ctx);
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/b.pdf",
+            ExplorerOpen::Preview,
+        );
+        let left_preview = state.focus.expect("focus");
+        assert_ne!(left_preview, right_preview);
+        assert_eq!(state.main_window().dock.pane_tabs(x), [x, left_preview]);
+        // The next click in the left pane replaces only the left preview.
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/c.pdf",
+            ExplorerOpen::Preview,
+        );
+        let left_now = state.focus.expect("focus");
+        assert_eq!(
+            path_of(&state, left_now),
+            Path::new("/refdesk-test/wp72/c.pdf")
+        );
+        assert_eq!(state.main_window().dock.pane_tabs(x), [x, left_now]);
+        assert_eq!(
+            path_of(&state, right_preview),
+            Path::new("/refdesk-test/wp72/a.pdf")
+        );
+        assert!(is_preview(&state, right_preview));
+    }
+
+    #[test]
+    fn a_click_in_the_explorer_of_the_second_window_opens_there() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let first = open(&mut state, &ctx, "/refdesk-test/wp72/main.pdf");
+        let second = transfer::new_window(&mut state);
+        // The keyboard is back in the main window; the click is in the second window.
+        dispatch(&mut state, Action::FocusTab(first), &ctx);
+        explorer_open_in(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+            second,
+        );
+        let tab = state.focus.expect("focus");
+        assert_eq!(state.window_of(tab), state.window_index(second));
+        assert!(is_preview(&state, tab));
+        assert_eq!(
+            state.windows[1].dock.tabs(),
+            [tab],
+            "the start page made room"
+        );
+        assert_eq!(state.main_window().dock.tabs(), [first]);
+    }
+
+    #[test]
+    fn a_middle_click_opens_an_ordinary_tab_behind_the_current_one() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let x = open(&mut state, &ctx, "/refdesk-test/wp72/x.pdf");
+        let y = open(&mut state, &ctx, "/refdesk-test/wp72/y.pdf");
+        dispatch(&mut state, Action::FocusTab(x), &ctx);
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Background,
+        );
+        assert_eq!(state.focus, Some(x), "the focus stays");
+        assert_eq!(state.main_window().dock.focused_tab(), Some(x));
+        let tabs = state.main_window().dock.tabs();
+        assert_eq!(tabs.len(), 3);
+        assert_eq!((tabs[0], tabs[2]), (x, y), "right after the current tab");
+        assert_eq!(
+            path_of(&state, tabs[1]),
+            Path::new("/refdesk-test/wp72/a.pdf")
+        );
+        assert!(!is_preview(&state, tabs[1]));
+        // On an open document nothing new opens.
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/y.pdf",
+            ExplorerOpen::Background,
+        );
+        assert_eq!(state.main_window().dock.tab_count(), 3);
+        assert_eq!(state.focus, Some(x));
+        // A window that shows only the start page shows the new tab.
+        let mut fresh = AppState::new();
+        explorer_open(
+            &mut fresh,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Background,
+        );
+        let only = fresh.main_window().dock.tabs();
+        assert_eq!(only.len(), 1);
+        assert_eq!(fresh.focus, Some(only[0]));
+    }
+
+    #[test]
+    fn opening_beside_and_in_a_new_window_make_ordinary_views() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let x = open(&mut state, &ctx, "/refdesk-test/wp72/x.pdf");
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::SplitSide,
+        );
+        let beside = state.focus.expect("focus");
+        assert_eq!(state.main_window().dock.pane_count(), 2);
+        assert_eq!(state.main_window().dock.pane_tabs(x), [x]);
+        assert!(!is_preview(&state, beside));
+
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::NewWindow,
+        );
+        let in_window = state.focus.expect("focus");
+        assert_ne!(in_window, beside, "a second view of the open document");
+        assert_eq!(state.windows.len(), 2);
+        assert_eq!(state.windows[1].dock.tabs(), [in_window]);
+        assert_eq!(state.docs.len(), 2);
+    }
+
+    #[test]
+    fn the_preview_title_is_italic_until_the_tab_is_pinned() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let tab = state.focus.expect("focus");
+        let label = tab_label(&state, tab);
+        assert_eq!(label.text, "a.pdf");
+        assert!(label.italic);
+        dispatch(&mut state, Action::PinTab(tab), &ctx);
+        assert!(!tab_label(&state, tab).italic);
+        let start = AppState::new();
+        assert!(!tab_label(&start, start.main_window().dock.tabs()[0]).italic);
+    }
+
+    #[test]
+    fn a_closed_preview_tab_comes_back_as_an_ordinary_tab() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let tab = state.focus.expect("focus");
+        dispatch(&mut state, Action::CloseTab(tab), &ctx);
+        dispatch(&mut state, Action::ReopenClosedTab, &ctx);
+        let back = state.focus.expect("focus");
+        assert_eq!(path_of(&state, back), Path::new("/refdesk-test/wp72/a.pdf"));
+        assert!(!is_preview(&state, back));
+    }
+
+    #[test]
+    fn the_preview_flag_survives_a_session_round_trip() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/wp72/kept.pdf");
+        explorer_open(
+            &mut state,
+            &ctx,
+            "/refdesk-test/wp72/a.pdf",
+            ExplorerOpen::Preview,
+        );
+        let saved = session::to_session(&state);
+        let mut restored = AppState::new();
+        session::restore(&mut restored, &saved, &ctx);
+        assert_eq!(
+            main_tabs(&restored),
+            [("kept.pdf".into(), false), ("a.pdf".into(), true)]
+        );
+    }
+
+    #[test]
+    fn the_place_in_a_replaced_document_is_remembered_and_found_again() {
+        let pdf = |label: &str| {
+            let mut builder = PdfBuilder::new();
+            for page in 0..5 {
+                builder = builder.page(400.0, 600.0, |p| {
+                    p.text(72.0, 100.0, 12.0, &format!("{label} page {page}"));
+                });
+            }
+            builder.write_temp(&format!("wp72-{label}"))
+        };
+        let (a, b) = (pdf("a"), pdf("b"));
+        let (a_path, b_path) = (
+            a.path().to_str().expect("utf-8").to_owned(),
+            b.path().to_str().expect("utf-8").to_owned(),
+        );
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        explorer_open(&mut state, &ctx, &a_path, ExplorerOpen::Preview);
+        let tab = state.focus.expect("focus");
+        let place = Location::new(3, 0.0, 120.0);
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+            pdf.view.anchor = place;
+        }
+        explorer_open(&mut state, &ctx, &b_path, ExplorerOpen::Preview);
+        assert!(state.docs.find(a.path()).is_none(), "a was closed");
+        explorer_open(&mut state, &ctx, &a_path, ExplorerOpen::Preview);
+        let again = state.focus.expect("focus");
+        assert_eq!(state.tabs.pdf(again).expect("pdf").view.anchor, place);
+        assert_eq!(state.main_window().dock.tab_count(), 1);
     }
 }

@@ -147,6 +147,7 @@ pub fn side_tab(doc: DocId, path: PathBuf) -> PdfTab {
         view: ViewState::new(path),
         ui: PdfViewUiState::default(),
         toc: Box::default(),
+        preview: false,
     }
 }
 

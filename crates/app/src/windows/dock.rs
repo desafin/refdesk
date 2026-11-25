@@ -56,8 +56,8 @@ impl SplitDir {
 /// The host never changes the layout itself: closing and focusing come back as calls here, and
 /// the host turns them into actions for `dispatch` (rule R-6).
 pub trait DockHost {
-    /// The text on the tab.
-    fn title(&mut self, tab: TabId) -> String;
+    /// The text on the tab (italic for a preview tab).
+    fn title(&mut self, tab: TabId) -> WidgetText;
     /// The text shown while the pointer rests on the tab, if any.
     fn tooltip(&mut self, tab: TabId) -> Option<String>;
     /// Draws the content of the tab.
@@ -71,6 +71,8 @@ pub trait DockHost {
     fn close_requested(&mut self, tab: TabId);
     /// The user made the tab the focused one (clicked its title or its pane).
     fn activated(&mut self, tab: TabId);
+    /// The user double-clicked the title of the tab (which keeps a preview tab open, WS-3).
+    fn title_double_clicked(&mut self, tab: TabId);
 }
 
 /// The tab layout of one window: panes, the splits between them, which tab each pane shows and
@@ -567,7 +569,7 @@ impl<H: DockHost> TabViewer for Viewer<'_, H> {
     }
 
     fn title(&mut self, tab: &mut TabId) -> WidgetText {
-        self.host.title(*tab).into()
+        self.host.title(*tab)
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut TabId) {
@@ -580,6 +582,9 @@ impl<H: DockHost> TabViewer for Viewer<'_, H> {
         }
         if response.clicked() {
             self.host.activated(*tab);
+        }
+        if response.double_clicked() {
+            self.host.title_double_clicked(*tab);
         }
         // `egui_dock`'s own tab menu is off so the host decides every entry and their order.
         response.context_menu(|ui| self.host.context_menu(ui, *tab));
@@ -1019,8 +1024,8 @@ mod tests {
     }
 
     impl DockHost for TestHost {
-        fn title(&mut self, tab: TabId) -> String {
-            format!("{tab:?}")
+        fn title(&mut self, tab: TabId) -> WidgetText {
+            format!("{tab:?}").into()
         }
         fn tooltip(&mut self, _tab: TabId) -> Option<String> {
             Some("tip".to_owned())
@@ -1041,6 +1046,7 @@ mod tests {
         fn activated(&mut self, tab: TabId) {
             self.activated.push(tab);
         }
+        fn title_double_clicked(&mut self, _tab: TabId) {}
     }
 
     fn frame(ctx: &egui::Context, d: &mut DockLayout, host: &mut TestHost) {

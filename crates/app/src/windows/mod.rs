@@ -297,9 +297,9 @@ pub fn show_window(
 
     // Everything the tab bars and menus show is worked out before the window's layout is
     // borrowed for drawing.
-    let titles: HashMap<TabId, (String, Option<String>)> = shown
+    let titles: HashMap<TabId, (TabLabel, Option<String>)> = shown
         .iter()
-        .map(|t| (*t, (tab_title(state, *t), tab_tooltip(state, *t))))
+        .map(|t| (*t, (tab_label(state, *t), tab_tooltip(state, *t))))
         .collect();
     let menus: HashMap<TabId, Vec<MenuItem>> = shown
         .iter()
@@ -506,6 +506,35 @@ pub fn tab_title(state: &AppState, tab: TabId) -> String {
     }
 }
 
+/// What a tab's title shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabLabel {
+    /// The text ([`tab_title`]).
+    pub text: String,
+    /// Drawn in italics: the tab is a preview tab (WS-3).
+    pub italic: bool,
+}
+
+impl TabLabel {
+    /// The title as the tab bar draws it.
+    pub fn widget_text(&self) -> egui::WidgetText {
+        let text = egui::RichText::new(&self.text);
+        if self.italic {
+            text.italics().into()
+        } else {
+            text.into()
+        }
+    }
+}
+
+/// The title of a tab in the tab bar: [`tab_title`], in italics for a preview tab.
+pub fn tab_label(state: &AppState, tab: TabId) -> TabLabel {
+    TabLabel {
+        text: tab_title(state, tab),
+        italic: state.tabs.pdf(tab).is_some_and(|p| p.preview),
+    }
+}
+
 /// The full path of a PDF tab's document (both paths for a comparison tab).
 fn tab_tooltip(state: &AppState, tab: TabId) -> Option<String> {
     if let Some(diff) = state.tabs.diff(tab) {
@@ -522,7 +551,7 @@ struct WindowHost<'a> {
     docs: &'a DocStore,
     textures: &'a mut TextureCache,
     focus: Option<TabId>,
-    titles: HashMap<TabId, (String, Option<String>)>,
+    titles: HashMap<TabId, (TabLabel, Option<String>)>,
     menus: HashMap<TabId, Vec<MenuItem>>,
     /// What the start page shows; `None` when this window has no start page.
     start: Option<StartPage>,
@@ -534,11 +563,11 @@ struct WindowHost<'a> {
 }
 
 impl DockHost for WindowHost<'_> {
-    fn title(&mut self, tab: TabId) -> String {
+    fn title(&mut self, tab: TabId) -> egui::WidgetText {
         self.titles
             .get(&tab)
-            .map(|(title, _)| title.clone())
-            .unwrap_or_else(|| tr("tab.unknown").to_owned())
+            .map(|(label, _)| label.widget_text())
+            .unwrap_or_else(|| tr("tab.unknown").into())
     }
 
     fn tooltip(&mut self, tab: TabId) -> Option<String> {
@@ -615,6 +644,12 @@ impl DockHost for WindowHost<'_> {
     fn activated(&mut self, tab: TabId) {
         if self.focus != Some(tab) {
             self.queue.push(Action::FocusTab(tab));
+        }
+    }
+
+    fn title_double_clicked(&mut self, tab: TabId) {
+        if matches!(self.tabs.get(tab), Some(Tab::Pdf(p)) if p.preview) {
+            self.queue.push(Action::PinTab(tab));
         }
     }
 }
@@ -854,6 +889,67 @@ mod tests {
         assert_eq!(state.focus, Some(a));
         assert_ne!(state.focus, Some(b));
         assert_eq!(state.main_window().dock.focused_tab(), Some(a));
+    }
+
+    #[test]
+    fn double_clicking_the_title_of_a_preview_tab_keeps_it_open() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        dispatch(
+            &mut state,
+            Action::OpenFromExplorer {
+                path: std::path::PathBuf::from("/refdesk-test/wp72-title.pdf"),
+                window: WindowId::MAIN,
+                how: crate::action::ExplorerOpen::Preview,
+            },
+            &ctx,
+        );
+        let tab = state.focus.expect("focus");
+        assert!(tab_label(&state, tab).italic);
+        frame(&ctx, &mut state);
+        frame(&ctx, &mut state);
+        let (pane, _) = state.main_window().dock.pane_rects()[0];
+        let at = pane.left_top() + vec2(20.0, 10.0);
+        let double_click = |ctx: &egui::Context, state: &mut AppState, start: f64| {
+            let click = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut queue = Vec::new();
+            for (i, events) in [
+                vec![egui::Event::PointerMoved(at)],
+                vec![click(true)],
+                vec![click(false)],
+                vec![click(true)],
+                vec![click(false)],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0))),
+                    time: Some(start + i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| show_window(ui, state, 0, &mut queue))
+                    .drop_without_applying_deltas();
+            }
+            queue
+        };
+        let queue = double_click(&ctx, &mut state, 10.0);
+        assert!(queue.contains(&Action::PinTab(tab)), "{queue:?}");
+        state.actions.extend(queue);
+        dispatch_queued(&mut state, &ctx);
+        assert!(!tab_label(&state, tab).italic);
+        // An ordinary tab asks for nothing.
+        let queue = double_click(&ctx, &mut state, 20.0);
+        assert!(
+            !queue.iter().any(|a| matches!(a, Action::PinTab(_))),
+            "{queue:?}"
+        );
     }
 
     /// Runs one headless frame of every window with these input events. `focused` says whether
