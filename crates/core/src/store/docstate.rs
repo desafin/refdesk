@@ -12,6 +12,19 @@ use crate::model::ViewState;
 /// The most records kept. Beyond this the least recently opened are dropped.
 pub const MAX_RECORDS: usize = 2000;
 
+/// The most recent workspace folders kept.
+pub const MAX_RECENT_FOLDERS: usize = 50;
+
+/// A folder that was opened as a workspace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentFolder {
+    /// The folder, as given to [`DocStateDb::record_folder`].
+    pub path: PathBuf,
+    /// When it was last opened (Unix seconds, from the caller).
+    #[serde(default)]
+    pub last_opened: i64,
+}
+
 /// What is remembered about one document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "DocRecordRepr")]
@@ -73,6 +86,8 @@ pub struct DocStateDb {
     /// Format version of the file.
     pub version: u32,
     records: Vec<DocRecord>,
+    /// Recently opened workspace folders, newest first.
+    recent_folders: Vec<RecentFolder>,
 }
 
 impl Default for DocStateDb {
@@ -80,6 +95,7 @@ impl Default for DocStateDb {
         DocStateDb {
             version: FORMAT_VERSION,
             records: Vec::new(),
+            recent_folders: Vec::new(),
         }
     }
 }
@@ -153,6 +169,33 @@ impl DocStateDb {
         all
     }
 
+    /// Remembers that the folder `path` was opened as a workspace at `now` (Unix seconds). The
+    /// same path is kept once. At most [`MAX_RECENT_FOLDERS`] are kept; the least recent go.
+    pub fn record_folder(&mut self, path: &Path, now: i64) {
+        self.recent_folders.retain(|f| f.path != path);
+        self.recent_folders.insert(
+            0,
+            RecentFolder {
+                path: path.to_path_buf(),
+                last_opened: now,
+            },
+        );
+        self.sort_folders();
+    }
+
+    /// The `n` most recently opened workspace folders, newest first.
+    pub fn recent_folders(&self, n: usize) -> Vec<&RecentFolder> {
+        self.recent_folders.iter().take(n).collect()
+    }
+
+    /// Newest first (a stable sort, so on equal times the one recorded last stays first), cut
+    /// to the limit.
+    fn sort_folders(&mut self) {
+        self.recent_folders
+            .sort_by_key(|f| std::cmp::Reverse(f.last_opened));
+        self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+    }
+
     fn enforce_limit(&mut self) {
         while self.records.len() > MAX_RECORDS {
             let oldest = self
@@ -180,10 +223,18 @@ fn parse_db(bytes: &[u8]) -> Result<Loaded<DocStateDb>, String> {
 
     let mut dropped = Vec::new();
     let records = lenient_items(obj.get("records"), "records", &mut dropped);
+    let recent_folders = lenient_items(obj.get("recent_folders"), "recent_folders", &mut dropped);
     let mut db = DocStateDb {
         version: FORMAT_VERSION,
         records,
+        recent_folders,
     };
+    // A hand-edited file may hold a folder twice; newest first, then keep the first of each.
+    db.recent_folders
+        .sort_by_key(|f| std::cmp::Reverse(f.last_opened));
+    let mut seen = std::collections::HashSet::new();
+    db.recent_folders.retain(|f| seen.insert(f.path.clone()));
+    db.sort_folders();
     // A hand-edited file may hold the same path twice; keep the most recent.
     let mut unique: Vec<DocRecord> = Vec::with_capacity(db.records.len());
     for rec in db.records.drain(..) {
@@ -455,5 +506,106 @@ mod tests {
         let back = db.lookup(Path::new("/docs/a.pdf"), None).unwrap();
         assert_eq!(back.view.history.len(), 50);
         assert_eq!(back.view.history.current(), &current);
+    }
+
+    #[test]
+    fn recent_folders_are_newest_first_and_unique() {
+        let mut db = DocStateDb::default();
+        db.record_folder(Path::new("/w/a"), 10);
+        db.record_folder(Path::new("/w/b"), 20);
+        db.record_folder(Path::new("/w/c"), 30);
+        db.record_folder(Path::new("/w/a"), 40);
+        let paths: Vec<&Path> = db
+            .recent_folders(10)
+            .iter()
+            .map(|f| f.path.as_path())
+            .collect();
+        assert_eq!(
+            paths,
+            [Path::new("/w/a"), Path::new("/w/c"), Path::new("/w/b")]
+        );
+        assert_eq!(db.recent_folders(10)[0].last_opened, 40);
+        assert_eq!(db.recent_folders(2).len(), 2);
+        assert!(db.recent_folders(0).is_empty());
+    }
+
+    #[test]
+    fn recent_folders_on_equal_times_put_the_last_recorded_first() {
+        let mut db = DocStateDb::default();
+        db.record_folder(Path::new("/w/a"), 5);
+        db.record_folder(Path::new("/w/b"), 5);
+        assert_eq!(db.recent_folders(1)[0].path, Path::new("/w/b"));
+    }
+
+    #[test]
+    fn recent_folders_are_capped() {
+        let mut db = DocStateDb::default();
+        for i in 0..(MAX_RECENT_FOLDERS as i64 + 10) {
+            db.record_folder(&PathBuf::from(format!("/w/{i}")), i);
+        }
+        let all = db.recent_folders(usize::MAX);
+        assert_eq!(all.len(), MAX_RECENT_FOLDERS);
+        assert_eq!(all[0].path, Path::new("/w/59"));
+        assert_eq!(all[MAX_RECENT_FOLDERS - 1].path, Path::new("/w/10"));
+    }
+
+    #[test]
+    fn recent_folders_roundtrip_and_old_files_have_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("documents.json");
+        let mut db = db_of(vec![rec("/docs/a.pdf", None, 1)]);
+        db.record_folder(Path::new("/w/a"), 10);
+        db.record_folder(Path::new("/w/b"), 20);
+        db.save(&path).unwrap();
+        let loaded = DocStateDb::load(&path);
+        assert_eq!(loaded, db);
+        assert_eq!(loaded.recent_folders(5).len(), 2);
+
+        fs::write(
+            &path,
+            r#"{"version": 1, "records": [{"path": "/docs/a.pdf"}]}"#,
+        )
+        .unwrap();
+        let old = DocStateDb::load(&path);
+        assert_eq!(old.len(), 1);
+        assert!(old.recent_folders(5).is_empty());
+        assert!(!bad_path(&path).exists());
+    }
+
+    #[test]
+    fn a_file_with_recent_folders_still_reads_by_the_old_shape() {
+        #[derive(Deserialize)]
+        struct OldDb {
+            records: Vec<DocRecord>,
+        }
+        let mut db = db_of(vec![rec("/docs/a.pdf", None, 1)]);
+        db.record_folder(Path::new("/w/a"), 10);
+        let json = serde_json::to_string(&db).unwrap();
+        let old: OldDb = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.records.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_and_unordered_recent_folders_in_a_hand_edited_file_are_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("documents.json");
+        fs::write(
+            &path,
+            r#"{"version": 1, "recent_folders": [
+                 {"path": "/w/a", "last_opened": 5}, {"path": "/w/b", "last_opened": 9},
+                 {"path": "/w/a", "last_opened": 1}, {"nope": 1}]}"#,
+        )
+        .unwrap();
+        let db = DocStateDb::load(&path);
+        let paths: Vec<&Path> = db
+            .recent_folders(10)
+            .iter()
+            .map(|f| f.path.as_path())
+            .collect();
+        assert_eq!(paths, [Path::new("/w/b"), Path::new("/w/a")]);
+        assert!(
+            bad_path(&path).exists(),
+            "the dropped item keeps the original"
+        );
     }
 }

@@ -314,6 +314,7 @@ fn pdf_session_tab(state: &AppState, pdf: &PdfTab) -> Option<SessionTab> {
     Some(SessionTab::Pdf {
         path: doc.path().to_path_buf(),
         view: pdf.view.clone(),
+        preview: false,
     })
 }
 
@@ -338,6 +339,7 @@ pub fn to_session(state: &AppState) -> Session {
                 .to_layout(|t| keys.get(&t).cloned().unwrap_or_default()),
             toc_open: window.toc_open,
             toc_width: window.toc_width,
+            ..SessionWindow::default()
         });
     }
     // Drops the start pages from the layouts.
@@ -449,7 +451,7 @@ pub fn restore(state: &mut AppState, session: &Session, ctx: &egui::Context) {
 /// Creates the tab for one saved tab; `None` for kinds that are not restored.
 fn restore_tab(state: &mut AppState, saved: &SessionTab, ctx: &egui::Context) -> Option<TabId> {
     match saved {
-        SessionTab::Pdf { path, view } => Some(restore_pdf_tab(state, path, view, ctx)),
+        SessionTab::Pdf { path, view, .. } => Some(restore_pdf_tab(state, path, view, ctx)),
         // The comparison is computed again; only the two documents are remembered.
         SessionTab::Diff { left, right } => {
             Some(crate::action::insert_diff_tab(state, left, right, ctx))
@@ -1468,6 +1470,7 @@ mod tests {
             SessionTab::Pdf {
                 path: path.to_path_buf(),
                 view,
+                preview: false,
             },
         );
         session.windows.push(SessionWindow {

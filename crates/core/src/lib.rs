@@ -19,6 +19,7 @@ pub mod store;
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;
 pub mod text;
+pub mod workspace;
 
 pub use diff::{
     Change, ChangeKind, DiffJob, DiffLimits, DiffOptions, DiffResult, Mark, MarkKind, Side, Span,
@@ -41,8 +42,12 @@ pub use search::{
 };
 pub use store::{
     CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths,
-    Session, SessionTab, SessionWindow, Theme, atomic_write,
+    RecentFolder, Session, SessionTab, SessionWindow, SessionWorkspace, Theme, atomic_write,
 };
 pub use text::{
     CopyOptions, PageText, Selection, TextBlock, TextChar, TextLine, TextPos, selection_text,
+};
+pub use workspace::{
+    EntryKind, ScanLimits, WorkspaceEntry, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher,
+    natural_cmp,
 };

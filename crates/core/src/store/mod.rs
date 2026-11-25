@@ -21,9 +21,9 @@ pub mod session;
 
 pub use atomic::{atomic_write, bad_path, quarantine, read_json_or_default};
 pub use config::{CaptureConfig, Config, DefaultZoom, Language, Theme};
-pub use docstate::{DocRecord, DocStateDb, MAX_RECORDS};
+pub use docstate::{DocRecord, DocStateDb, MAX_RECENT_FOLDERS, MAX_RECORDS, RecentFolder};
 pub use paths::Paths;
-pub use session::{LayoutNode, Session, SessionTab, SessionWindow};
+pub use session::{LayoutNode, Session, SessionTab, SessionWindow, SessionWorkspace};
 
 /// The format version written to every stored file.
 pub const FORMAT_VERSION: u32 = 1;

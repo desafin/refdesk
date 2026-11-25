@@ -251,6 +251,7 @@ mod tests {
             refdesk_core::SessionTab::Pdf {
                 path: path.clone(),
                 view: refdesk_core::ViewState::new(path),
+                preview: false,
             },
         );
         startup.session.windows.push(refdesk_core::SessionWindow {
@@ -314,6 +315,7 @@ mod tests {
             refdesk_core::SessionTab::Pdf {
                 path: PathBuf::from("/refdesk-test/other.pdf"),
                 view: refdesk_core::ViewState::new(PathBuf::from("/refdesk-test/other.pdf")),
+                preview: false,
             },
         );
         if let refdesk_core::LayoutNode::Tabs { tabs, .. } = &mut startup.session.windows[0].layout

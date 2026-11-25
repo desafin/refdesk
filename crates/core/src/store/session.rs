@@ -14,6 +14,10 @@ use crate::model::ViewState;
 const MIN_FRACTION: f32 = 0.05;
 const MAX_FRACTION: f32 = 0.95;
 
+/// Smallest and largest share of the sidebar the explorer may take.
+const MIN_SIDEBAR_SPLIT: f32 = 0.1;
+const MAX_SIDEBAR_SPLIT: f32 = 0.9;
+
 /// The windows and tabs that were open.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,6 +28,8 @@ pub struct Session {
     pub windows: Vec<SessionWindow>,
     /// Every tab, keyed by the key the layouts refer to.
     pub tabs: BTreeMap<String, SessionTab>,
+    /// The folder opened as a workspace, if any.
+    pub workspace: Option<SessionWorkspace>,
 }
 
 impl Default for Session {
@@ -32,8 +38,19 @@ impl Default for Session {
             version: FORMAT_VERSION,
             windows: Vec::new(),
             tabs: BTreeMap::new(),
+            workspace: None,
         }
     }
+}
+
+/// The workspace folder (`docs/ARCHITECTURE.md` §4.13) as remembered by the session.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionWorkspace {
+    /// The folder.
+    pub root: PathBuf,
+    /// Folders the explorer showed expanded, as paths relative to `root`.
+    #[serde(default)]
+    pub expanded: Vec<PathBuf>,
 }
 
 /// One window of the session.
@@ -48,10 +65,17 @@ pub struct SessionWindow {
     pub maximized: bool,
     /// How the tabs are split and grouped.
     pub layout: LayoutNode,
-    /// Whether the table-of-contents panel was open.
+    /// Whether the sidebar (explorer and outline together) was open. The name is kept from the
+    /// time the sidebar held only the table of contents, so that stored files still match.
     pub toc_open: bool,
-    /// Width of the table-of-contents panel in points.
+    /// Width of the sidebar in points.
     pub toc_width: f32,
+    /// Whether the explorer section of the sidebar was expanded.
+    pub explorer_open: bool,
+    /// Whether the outline (table of contents) section of the sidebar was expanded.
+    pub outline_open: bool,
+    /// Share of the sidebar's height the explorer takes, within 0.1 ..= 0.9.
+    pub sidebar_split: f32,
 }
 
 impl Default for SessionWindow {
@@ -63,6 +87,9 @@ impl Default for SessionWindow {
             layout: LayoutNode::default(),
             toc_open: false,
             toc_width: 260.0,
+            explorer_open: true,
+            outline_open: true,
+            sidebar_split: default_fraction(),
         }
     }
 }
@@ -156,6 +183,8 @@ pub enum SessionTab {
         path: PathBuf,
         /// Position, zoom and history.
         view: ViewState,
+        /// Whether this is a preview tab (replaced by the next file opened from the explorer).
+        preview: bool,
     },
     /// A comparison of two PDFs.
     Diff {
@@ -174,6 +203,8 @@ enum SessionTabRepr {
         path: PathBuf,
         #[serde(default)]
         view: Option<ViewState>,
+        #[serde(default)]
+        preview: bool,
     },
     Diff {
         left: PathBuf,
@@ -184,9 +215,17 @@ enum SessionTabRepr {
 impl From<SessionTabRepr> for SessionTab {
     fn from(repr: SessionTabRepr) -> SessionTab {
         match repr {
-            SessionTabRepr::Pdf { path, view } => {
+            SessionTabRepr::Pdf {
+                path,
+                view,
+                preview,
+            } => {
                 let view = view.unwrap_or_else(|| ViewState::new(path.clone()));
-                SessionTab::Pdf { path, view }
+                SessionTab::Pdf {
+                    path,
+                    view,
+                    preview,
+                }
             }
             SessionTabRepr::Diff { left, right } => SessionTab::Diff { left, right },
         }
@@ -225,12 +264,20 @@ impl Session {
     ///   the other side (a window's root stays as an empty group);
     /// * tabs that no layout shows are removed from `tabs`;
     /// * if there is any window, exactly one is `main` (the first one marked, else the first);
-    /// * `active` is moved into range and `fraction` into 0.05 ..= 0.95.
+    /// * `active` is moved into range and `fraction` into 0.05 ..= 0.95;
+    /// * each window's `sidebar_split` is moved into 0.1 ..= 0.9.
     pub fn normalized(mut self) -> Session {
         let mut used = HashSet::new();
         for window in &mut self.windows {
             let layout = std::mem::take(&mut window.layout);
             window.layout = prune(layout, &self.tabs, &mut used).unwrap_or_default();
+            window.sidebar_split = if window.sidebar_split.is_nan() {
+                default_fraction()
+            } else {
+                window
+                    .sidebar_split
+                    .clamp(MIN_SIDEBAR_SPLIT, MAX_SIDEBAR_SPLIT)
+            };
         }
         self.tabs.retain(|key, _| used.contains(key));
 
@@ -316,11 +363,22 @@ fn parse_session(bytes: &[u8]) -> Result<Loaded<Session>, String> {
         }
         Some(_) => dropped.push("tabs: expected an object".to_string()),
     }
+    let workspace = match obj.get("workspace") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(item) => match serde_json::from_value::<SessionWorkspace>(item.clone()) {
+            Ok(workspace) => Some(workspace),
+            Err(e) => {
+                dropped.push(format!("workspace: {e}"));
+                None
+            }
+        },
+    };
     Ok(Loaded {
         value: Session {
             version: FORMAT_VERSION,
             windows,
             tabs,
+            workspace,
         },
         dropped: (!dropped.is_empty()).then(|| dropped.join("; ")),
     })
@@ -338,6 +396,7 @@ mod tests {
         SessionTab::Pdf {
             path: PathBuf::from(path),
             view: ViewState::new(PathBuf::from(path)),
+            preview: false,
         }
     }
 
@@ -387,6 +446,7 @@ mod tests {
                     layout: split(0.4, tabs_node(&["a", "b"], 1), tabs_node(&["c"], 0)),
                     toc_open: true,
                     toc_width: 300.0,
+                    ..SessionWindow::default()
                 },
                 window(false, tabs_node(&[], 0)),
             ],
@@ -517,6 +577,7 @@ mod tests {
             SessionTab::Pdf {
                 path: doc,
                 view: view.clone(),
+                preview: false,
             },
         );
         s.save(&path).unwrap();
@@ -688,5 +749,114 @@ mod tests {
         );
         assert_eq!(layout.tab_keys().collect::<Vec<_>>(), ["a", "b", "c", "d"]);
         assert_eq!(tabs_node(&[], 0).tab_keys().count(), 0);
+    }
+
+    #[test]
+    fn sidebar_and_workspace_fields_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let mut s = sample();
+        s.windows[0].explorer_open = false;
+        s.windows[0].outline_open = false;
+        s.windows[0].sidebar_split = 0.3;
+        s.workspace = Some(SessionWorkspace {
+            root: "/docs".into(),
+            expanded: vec!["a".into(), "a/b".into()],
+        });
+        s.tabs.insert(
+            "a".into(),
+            SessionTab::Pdf {
+                path: "/docs/a/x.pdf".into(),
+                view: ViewState::new("/docs/a/x.pdf".into()),
+                preview: true,
+            },
+        );
+        s.save(&path).unwrap();
+        assert_eq!(Session::load(&path), s);
+    }
+
+    #[test]
+    fn files_without_the_new_fields_read_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        fs::write(
+            &path,
+            r#"{"version": 1, "windows": [
+                 {"main": true, "toc_open": true, "toc_width": 300.0,
+                  "layout": {"type": "tabs", "tabs": ["a"], "active": 0}}
+               ],
+               "tabs": {"a": {"type": "pdf", "path": "/docs/a.pdf"}}}"#,
+        )
+        .unwrap();
+        let s = Session::load(&path);
+        assert_eq!(s.workspace, None);
+        let w = &s.windows[0];
+        assert!(w.toc_open);
+        assert_eq!(w.toc_width, 300.0);
+        assert!(w.explorer_open);
+        assert!(w.outline_open);
+        assert_eq!(w.sidebar_split, 0.5);
+        let SessionTab::Pdf { preview, .. } = &s.tabs["a"] else {
+            panic!("not a pdf tab");
+        };
+        assert!(!preview);
+        assert!(!bad_path(&path).exists());
+    }
+
+    #[test]
+    fn a_file_with_the_new_fields_still_reads_by_the_old_shape() {
+        // The shape before this change: the same fields minus the new ones, unknown ones ignored.
+        #[derive(Deserialize)]
+        struct OldWindow {
+            toc_open: bool,
+            toc_width: f32,
+        }
+        #[derive(Deserialize)]
+        struct OldSession {
+            windows: Vec<OldWindow>,
+        }
+        let mut s = sample();
+        s.workspace = Some(SessionWorkspace {
+            root: "/docs".into(),
+            expanded: Vec::new(),
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        let old: OldSession = serde_json::from_str(&json).unwrap();
+        assert!(old.windows[0].toc_open);
+        assert_eq!(old.windows[0].toc_width, 300.0);
+    }
+
+    #[test]
+    fn a_damaged_workspace_is_dropped_and_the_rest_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        fs::write(
+            &path,
+            r#"{"version": 1, "workspace": {"expanded": 3}, "windows": []}"#,
+        )
+        .unwrap();
+        let s = Session::load(&path);
+        assert_eq!(s.workspace, None);
+        assert!(bad_path(&path).exists(), "the original is kept");
+    }
+
+    #[test]
+    fn normalized_clamps_sidebar_split() {
+        let mut windows = vec![
+            window(true, tabs_node(&[], 0)),
+            window(false, tabs_node(&[], 0)),
+            window(false, tabs_node(&[], 0)),
+            window(false, tabs_node(&[], 0)),
+            window(false, tabs_node(&[], 0)),
+        ];
+        for (w, split) in windows
+            .iter_mut()
+            .zip([0.0, 1.0, f32::NAN, 0.25, f32::INFINITY])
+        {
+            w.sidebar_split = split;
+        }
+        let s = session(&[], windows).normalized();
+        let got: Vec<f32> = s.windows.iter().map(|w| w.sidebar_split).collect();
+        assert_eq!(got, [0.1, 0.9, 0.5, 0.25, 0.9]);
     }
 }
