@@ -18,8 +18,8 @@ pub mod testutil;
 pub mod text;
 
 pub use engine::{
-    DocStatus, DocumentHandle, DocumentInfo, EngineError, Notifier, Priority, RenderKey,
-    RenderedImage, RenderedPage,
+    DocStatus, DocumentHandle, DocumentInfo, EngineError, EngineOptions, Notifier, Priority,
+    RenderKey, RenderedImage, RenderedPage,
 };
 pub use fingerprint::{FileStamp, fingerprint_file, stamp};
 pub use geom::{Point, Quad, Rect, Size};

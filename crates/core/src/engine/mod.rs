@@ -1,12 +1,20 @@
 //! Document engine: the contract between core and app (`docs/ARCHITECTURE.md` §4.2).
 //!
-//! This file currently holds the public API skeleton only: a handle can be created, but it stays
-//! in [`DocStatus::Loading`] and produces nothing. WP-12 replaces the bodies with the
-//! worker-backed implementation. The public signatures are the contract and stay as they are.
+//! Each document has one worker thread that owns the MuPDF document (`worker.rs`); all MuPDF
+//! calls live in `backend.rs` (rule R-2). A [`DocumentHandle`] is a cheap clonable handle to that
+//! worker. The non-blocking calls only touch shared state under a short lock; the `*_wait` calls
+//! block until the worker answers and must not be used on the UI thread (rule R-1).
+
+mod backend;
+mod uri;
+mod worker;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
+
+use worker::{Control, Shared, WaitJob};
 
 use crate::geom::{Rect, Size};
 use crate::link::Link;
@@ -116,7 +124,25 @@ pub enum EngineError {
     Failed(String),
 }
 
+/// Tuning of a document engine. [`EngineOptions::default`] is what the app uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineOptions {
+    /// A pending render request that is not requested again within this time is dropped.
+    /// Default 250 ms (`docs/ARCHITECTURE.md` §4.2).
+    pub render_expiry: Duration,
+}
+
+impl Default for EngineOptions {
+    fn default() -> EngineOptions {
+        EngineOptions {
+            render_expiry: Duration::from_millis(250),
+        }
+    }
+}
+
 /// A cheap, clonable handle to one open document and its worker thread.
+///
+/// The worker stops when the last clone is dropped.
 #[derive(Clone)]
 pub struct DocumentHandle {
     inner: Arc<Inner>,
@@ -124,9 +150,14 @@ pub struct DocumentHandle {
 
 struct Inner {
     path: PathBuf,
-    // Read by the worker-backed implementation (WP-12).
-    #[allow(dead_code)]
-    notifier: Notifier,
+    shared: Arc<Shared>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.shared.lock().shutdown = true;
+        self.shared.wake();
+    }
 }
 
 impl fmt::Debug for DocumentHandle {
@@ -140,12 +171,23 @@ impl fmt::Debug for DocumentHandle {
 impl DocumentHandle {
     /// Starts opening `path` and returns at once. Opening happens on the document's worker.
     pub fn open(path: &Path, notifier: Notifier) -> DocumentHandle {
+        DocumentHandle::open_with(path, notifier, EngineOptions::default())
+    }
+
+    /// [`DocumentHandle::open`] with non-default options (used by tests).
+    pub fn open_with(path: &Path, notifier: Notifier, options: EngineOptions) -> DocumentHandle {
+        let shared = Arc::new(Shared::new(notifier, options));
+        worker::spawn(Arc::clone(&shared), path.to_path_buf());
         DocumentHandle {
             inner: Arc::new(Inner {
                 path: path.to_path_buf(),
-                notifier,
+                shared,
             }),
         }
+    }
+
+    fn shared(&self) -> &Shared {
+        &self.inner.shared
     }
 
     /// The path this handle was opened with.
@@ -155,57 +197,137 @@ impl DocumentHandle {
 
     /// The current life-cycle state.
     pub fn status(&self) -> DocStatus {
-        DocStatus::Loading
+        self.shared().lock().status.clone()
     }
 
     /// Document information. `None` until the status is [`DocStatus::Ready`].
     pub fn info(&self) -> Option<Arc<DocumentInfo>> {
-        None
+        self.shared().lock().info.clone()
     }
 
-    /// Supplies the password of an encrypted document.
-    pub fn authenticate(&self, _password: &str) {}
+    /// Supplies the password of an encrypted document. When it is accepted the status becomes
+    /// [`DocStatus::Ready`]; otherwise it stays [`DocStatus::NeedsPassword`]. The notifier is
+    /// called either way.
+    pub fn authenticate(&self, password: &str) {
+        self.control(Control::Authenticate(password.to_string()));
+    }
 
-    /// Reads the file again and increments the generation.
-    pub fn reload(&self) {}
+    /// Reads the file again and increments the generation. Text and links are extracted anew;
+    /// pending requests and undelivered results of the old generation are dropped (rule R-7).
+    pub fn reload(&self) {
+        self.control(Control::Reload);
+    }
+
+    fn control(&self, c: Control) {
+        self.shared().lock().control.push_back(c);
+        self.shared().wake();
+    }
 
     /// Declares that the page is needed now. Call it every frame while that holds; never blocks.
-    pub fn request_render(&self, _key: RenderKey, _prio: Priority) {}
+    ///
+    /// Requests for a key that is pending are merged (priority and time are refreshed). Keys of
+    /// another generation, pages past the end and keys that already failed are ignored.
+    pub fn request_render(&self, key: RenderKey, prio: Priority) {
+        self.shared()
+            .lock()
+            .request_render(key, prio, Instant::now());
+        self.shared().wake();
+    }
 
     /// Takes the pages rendered since the last call. Never blocks.
     pub fn poll_rendered(&self) -> Vec<RenderedPage> {
-        Vec::new()
+        let mut st = self.shared().lock();
+        let generation = st.generation;
+        let mut out = std::mem::take(&mut st.rendered);
+        out.retain(|r| r.key.generation == generation);
+        out
     }
 
     /// The text of a page, or `None` after queuing its extraction. Never blocks.
-    pub fn page_text(&self, _page: u32) -> Option<Arc<PageText>> {
+    pub fn page_text(&self, page: u32) -> Option<Arc<PageText>> {
+        let mut st = self.shared().lock();
+        if let Some(t) = st.texts.get(&page) {
+            return Some(Arc::clone(t));
+        }
+        st.want_text(page);
+        drop(st);
+        self.shared().wake();
         None
     }
 
     /// The links of a page, or `None` after queuing their extraction. Never blocks.
-    pub fn page_links(&self, _page: u32) -> Option<Arc<[Link]>> {
+    pub fn page_links(&self, page: u32) -> Option<Arc<[Link]>> {
+        let mut st = self.shared().lock();
+        if let Some(l) = st.links.get(&page) {
+            return Some(Arc::clone(l));
+        }
+        st.want_links(page);
+        drop(st);
+        self.shared().wake();
         None
     }
 
+    /// Queues a blocking job and waits for its answer.
+    fn wait<T>(
+        &self,
+        make: impl FnOnce(mpsc::Sender<Result<T, EngineError>>) -> WaitJob,
+    ) -> Result<T, EngineError> {
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut st = self.shared().lock();
+            if st.worker_gone {
+                return Err(EngineError::WorkerGone);
+            }
+            st.waits.push_back(make(tx));
+        }
+        self.shared().wake();
+        // The worker answers every job; a dropped sender means it stopped.
+        rx.recv().unwrap_or(Err(EngineError::WorkerGone))
+    }
+
+    /// Checks `page` against the open document, if it is open.
+    fn check_page(&self, page: u32) -> Result<(), EngineError> {
+        match self.shared().lock().page_count() {
+            Some(count) if page >= count => Err(EngineError::PageOutOfRange { page, count }),
+            _ => Ok(()),
+        }
+    }
+
     /// The text of a page. Blocks; must not be called on the UI thread (rule R-1).
-    pub fn page_text_wait(&self, _page: u32) -> Result<Arc<PageText>, EngineError> {
-        Err(EngineError::NotReady)
+    pub fn page_text_wait(&self, page: u32) -> Result<Arc<PageText>, EngineError> {
+        if let Some(t) = self.shared().lock().texts.get(&page) {
+            return Ok(Arc::clone(t));
+        }
+        self.check_page(page)?;
+        self.wait(|reply| WaitJob::Text { page, reply })
     }
 
     /// Renders a page. Blocks; must not be called on the UI thread (rule R-1).
-    pub fn render_wait(&self, _key: RenderKey) -> Result<RenderedPage, EngineError> {
-        Err(EngineError::NotReady)
+    ///
+    /// The result is returned here only, not through [`DocumentHandle::poll_rendered`].
+    pub fn render_wait(&self, key: RenderKey) -> Result<RenderedPage, EngineError> {
+        self.check_page(key.page)?;
+        self.wait(|reply| WaitJob::Render { key, reply })
     }
 
     /// Renders `region` (page space) of a page at the given scale. Blocks; must not be called on
     /// the UI thread (rule R-1).
+    ///
+    /// A region that reaches past the page is clipped to it; when nothing is left the call
+    /// fails.
     pub fn render_region_wait(
         &self,
-        _page: u32,
-        _region: Rect,
-        _scale_milli: u32,
+        page: u32,
+        region: Rect,
+        scale_milli: u32,
     ) -> Result<RenderedImage, EngineError> {
-        Err(EngineError::NotReady)
+        self.check_page(page)?;
+        self.wait(|reply| WaitJob::Region {
+            page,
+            region,
+            scale_milli,
+            reply,
+        })
     }
 }
 
@@ -214,11 +336,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skeleton_handle_keeps_its_path_and_stays_loading() {
-        let handle = DocumentHandle::open(Path::new("/tmp/a.pdf"), Arc::new(|| {}));
-        assert_eq!(handle.path(), Path::new("/tmp/a.pdf"));
-        assert_eq!(handle.status(), DocStatus::Loading);
+    fn missing_file_fails_and_keeps_its_path() {
+        let (tx, rx) = mpsc::channel();
+        let path = std::env::temp_dir().join("refdesk-engine-unit-no-such-file.pdf");
+        let handle = DocumentHandle::open(
+            &path,
+            Arc::new(move || {
+                let _ = tx.send(());
+            }),
+        );
+        assert_eq!(handle.path(), path.as_path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while handle.status() == DocStatus::Loading {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(rx.recv_timeout(left).is_ok(), "no status change");
+        }
+        assert!(matches!(handle.status(), DocStatus::Failed(_)));
         assert!(handle.info().is_none());
         assert!(handle.poll_rendered().is_empty());
+        assert_eq!(handle.page_text_wait(0), Err(EngineError::NotReady));
     }
 }
