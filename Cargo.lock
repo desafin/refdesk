@@ -3122,6 +3122,7 @@ dependencies = [
  "mupdf",
  "notify",
  "png",
+ "refdesk-core",
  "serde",
  "serde_json",
  "similar",

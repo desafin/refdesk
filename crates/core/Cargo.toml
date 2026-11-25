@@ -21,5 +21,13 @@ xxhash-rust.workspace = true
 unicode-normalization.workspace = true
 png.workspace = true
 
+[features]
+# Test PDF generator (`testutil` module). Enabled for this crate's own tests through the
+# self dev-dependency below, so `cargo test --workspace` needs no extra flags.
+testutil = []
+
+[dev-dependencies]
+refdesk-core = { path = ".", features = ["testutil"] }
+
 [lints]
 workspace = true

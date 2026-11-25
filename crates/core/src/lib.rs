@@ -9,6 +9,8 @@ pub mod link;
 pub mod model;
 pub mod nav;
 pub mod outline;
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil;
 pub mod text;
 
 pub use geom::{Point, Quad, Rect, Size};
