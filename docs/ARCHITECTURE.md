@@ -128,6 +128,7 @@ crates/core/src/
   store/             paths.rs, atomic.rs, config.rs, docstate.rs, session.rs
   fingerprint.rs
   ipc.rs
+  workspace.rs       작업 폴더 훑기와 감시
   testutil.rs        테스트용 PDF 생성기 (feature "testutil")
 ```
 
@@ -498,6 +499,38 @@ pub fn listen(socket: &Path, on_request: impl Fn(IpcRequest) + Send + 'static) -
 소켓 경로는 인자로 받는다(`Paths::from_env().socket_path`). `OpenTarget` 은 여기(`core::ipc`)에 있고 app 이 가져다 쓴다.
 명령줄 해석은 app 의 `cli.rs` 에 있다: `refdesk [파일[#page=N]]...`, `--diff A B`, `--no-single-instance`, `--help`, `--version`.
 
+### 4.13 workspace — 작업 폴더
+
+폴더를 훑어 PDF 파일의 색인을 만든다. 디스크를 읽으므로 백그라운드에서 돈다(R-1).
+
+```rust
+pub enum EntryKind { Dir, Pdf }
+pub struct WorkspaceEntry { pub name: String, pub rel_path: PathBuf, pub kind: EntryKind,
+                            pub parent: Option<u32>, pub depth: u16 }
+pub struct WorkspaceIndex { pub root: PathBuf, pub entries: Vec<WorkspaceEntry>, pub truncated: bool }
+// entries: 선순위(트리를 위에서 아래로 그린 순서). 폴더 먼저, 이름은 자연 순서. PDF 가 없는 폴더는 들어 있지 않다.
+
+pub struct ScanLimits { pub max_entries: usize, pub max_depth: u16 }       // 기본 100_000, 16
+pub fn scan(root: &Path, limits: &ScanLimits, cancel: &AtomicBool) -> io::Result<WorkspaceIndex>;
+
+impl WorkspaceScan {                                                        // 백그라운드 실행
+    pub fn start(root: PathBuf, limits: ScanLimits, notifier: Notifier) -> WorkspaceScan;
+    pub fn index(&self) -> Option<Arc<WorkspaceIndex>>;   // 끝난 가장 최근 결과
+    pub fn scanning(&self) -> bool;
+    pub fn rescan(&self);
+}   // drop 하면 취소
+
+impl WorkspaceWatcher {                                                     // 폴더 변화 감시
+    pub fn start(root: &Path, on_change: impl Fn() + Send + 'static) -> io::Result<WorkspaceWatcher>;
+}
+```
+
+- PDF 판정은 확장자 `.pdf`(대소문자 무시)만 본다. 이름이 `.` 으로 시작하는 항목은 건너뛴다.
+- 폴더 심볼릭 링크는 이미 지나온 폴더로 돌아가지 않을 때만 따라간다(순환 방지).
+- 상한을 넘으면 거기서 멈추고 `truncated` 를 세운다. 읽을 수 없는 폴더는 건너뛴다.
+- 감시는 폴더와 PDF 파일의 변화만 알리고, 0.5초 동안의 변화를 한 번으로 묶는다. 감시를 걸 수 없으면(감시 수 한도 등) 오류를 돌려주고, 호출자는 수동 새로 고침으로 지낸다.
+- 세션에는 작업 폴더와 펼친 폴더를(`Session.workspace`), 문서 기록 파일에는 최근 폴더를 둔다.
+
 ### 4.12 testutil — 테스트용 PDF
 
 저장소에 외부 PDF 를 넣지 않는다. 내용과 좌표를 아는 PDF 를 테스트 코드에서 만든다.
@@ -674,6 +707,14 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 - 사각형은 시작점을 **페이지 공간**으로 들고 있다가(스크롤해도 같은 자리) 시작한 쪽의 좌표계로 끝점을 환산해 쪽 안으로 줄인다. 어느 변이든 4 논리 픽셀 미만이면 취소.
 - 배율 = 화면 배율(레이아웃 배율 × `pixels_per_point`) × `config.capture.scale`, 올림. 긴 변 8000 픽셀과 엔진의 쪽 전체 1억 2천만 픽셀 제한을 넘지 않게 낮춘다(`capture_scale_milli`).
 - 파일 이름은 `문서이름-p쪽-YYYYMMDD-HHMMSS.png`(현지 시각, 쪽은 1부터). 같은 이름이 있으면 `-2`, `-3`. `AppState.paths` 가 없으면 저장은 꺼진다.
+
+### 5.9 사이드바와 파일 탐색기
+
+- 창 왼쪽의 사이드바는 두 구역이다: 위는 파일 탐색기(`panels/explorer.rs`), 아래는 목차(`panels/toc.rs`). 구역마다 접을 수 있고 경계를 끌 수 있다. 배치는 `panels/sidebar.rs` 가 맡는다.
+- 작업 폴더는 앱 전체에 하나다(`AppState.workspace`). 모든 창의 탐색기가 같은 색인을 본다. 펼침·거르기·선택 상태는 창마다 따로다.
+- 탐색기는 `WorkspaceIndex` 를 읽기만 한다. 보이는 줄 계산, 이름 거르기, 지금 문서까지 펼치기는 egui 없이 테스트되는 순수 함수다(R-10). 줄이 수만 개여도 보이는 줄만 그린다.
+- **미리보기 탭**: `PdfTab.preview` 가 참인 탭. 탐색기에서 한 번 눌러 열면 포커스된 패인의 미리보기 탭을 대체한다(없으면 새로 만든다). 두 번 누르기, 탭 제목 두 번 누르기, 복제·분할·창 분리·비교에 쓰이면 고정 탭이 된다. 미리보기 탭도 세션에 저장된다.
+- 빠른 열기는 열린 탭, 작업 폴더의 파일, 최근 문서 순으로 보여 준다.
 
 ### 5.8 세션
 
