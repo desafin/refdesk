@@ -4,6 +4,7 @@
 //! egui, eframe or winit (rule R-4 in `docs/ARCHITECTURE.md`). Modules are added by later
 //! work packages.
 
+pub mod engine;
 pub mod geom;
 pub mod link;
 pub mod model;
@@ -13,6 +14,10 @@ pub mod outline;
 pub mod testutil;
 pub mod text;
 
+pub use engine::{
+    DocStatus, DocumentHandle, DocumentInfo, EngineError, Notifier, Priority, RenderKey,
+    RenderedImage, RenderedPage,
+};
 pub use geom::{Point, Quad, Rect, Size};
 pub use link::{Link, LinkTarget, RawLink};
 pub use model::{Location, ViewState, ZoomMode};

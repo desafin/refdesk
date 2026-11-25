@@ -79,8 +79,9 @@ egui·eframe·egui_dock·mupdf 의 현재 API 는 모델이 기억하는 것과 
 - 엔진은 MuPDF 가 준 좌표에서 페이지 bounds 의 원점을 빼서 페이지 공간으로 맞춘 뒤에만 밖으로 내보낸다.
 - `scale` = 논리 픽셀 / pt. 줌 100% 는 `scale = 96/72`.
 - 렌더링 배율 = `scale × pixels_per_point`. 이 머신은 `pixels_per_point = 1.0` 이지만 항상 곱한다.
-- **확인 필요**: MuPDF 가 주는 링크 목적지 좌표(`DestinationKind` 의 left/top)가 위쪽 기준인지는 소스만으로 단정하지 못했다.
-  WP-30 이 좌표를 아는 테스트용 PDF 로 확인해 정규화 방향을 테스트로 고정한다.
+- 링크 목적지 좌표: MuPDF 0.8.0 은 목적지(`DestinationKind` 의 left/top)를 이미 위쪽 기준 좌표로 준다
+  (WP-11 에서 관측: 페이지 공간 (72, 100) 을 가리키게 만든 링크가 `XYZ { left: 72, top: 100 }` 으로 나옴). 뒤집지 않는다.
+  WP-12 의 링크 좌표 테스트가 이를 고정한다.
 
 ## 4. core — 모듈과 계약
 
@@ -94,6 +95,7 @@ crates/core/src/
     mod.rs           DocumentHandle 와 요청·응답 타입 (공개 계약)
     worker.rs        문서 워커 스레드, 우선순위 큐, 취소
     backend.rs       MuPDF 호출 전부 (R-2)
+                     (mod.rs 에는 공개 API 껍데기가 먼저 들어가 있고, WP-12 가 구현을 채운다)
   layout.rs          PageLayout
   nav/
     dest.rs          Destination → Location
@@ -154,6 +156,7 @@ pub enum Priority { Visible, Preview, Prefetch, Background }                    
 
 impl DocumentHandle {
     pub fn open(path: &Path, notifier: Notifier) -> DocumentHandle;   // 즉시 반환. 열기는 워커에서
+    pub fn path(&self) -> &Path;
     pub fn status(&self) -> DocStatus;
     pub fn info(&self) -> Option<Arc<DocumentInfo>>;                  // Ready 전에는 None
     pub fn authenticate(&self, password: &str);
@@ -434,6 +437,9 @@ let pdf: Vec<u8> = PdfBuilder::new()
 
 PDF 를 바이트로 직접 써 내는 작은 생성기다(기본 14 글꼴만 사용, 압축 없음). 좌표 인자는 페이지 공간(왼쪽 위 원점)으로 받고 내부에서 PDF 좌표로 바꾼다.
 `feature = "testutil"` 로 app 의 테스트에서도 쓴다.
+
+실제 API 는 `crates/core/src/testutil.rs` 의 문서 주석이 원본이다. 생성기의 쪽 번호는 1부터 센다(코어의 `Location.page` 는 0부터).
+여러 쪽에 걸친 문단 흐름은 `flow_document` 로 만든다.
 
 ## 5. app — 구조
 
