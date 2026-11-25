@@ -2,6 +2,7 @@
 //! comparison view and the start page.
 
 pub mod diff_view;
+pub mod links;
 pub mod pdf_view;
 pub mod preload;
 pub mod selection;

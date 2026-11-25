@@ -214,6 +214,8 @@ pub fn show(ui: &mut Ui, state: &mut AppState, tab: Option<TabId>, queue: &mut V
     });
 
     ui.horizontal(|ui| {
+        history_buttons(ui, state, tab_id, queue);
+        ui.separator();
         let editing = page_number(ui, state, tab_id, count, labels, queue, info.is_some());
         if !editing && info.is_some() {
             ui.separator();
@@ -227,7 +229,47 @@ pub fn show(ui: &mut Ui, state: &mut AppState, tab: Option<TabId>, queue: &mut V
             ui.separator();
             ui.label(text);
         }
+        // What the link under the pointer leads to (LINK-5, LINK-7).
+        let hover = state
+            .tabs
+            .pdf(tab_id)
+            .and_then(|t| t.ui.links.hover_text.clone());
+        if let Some(text) = hover {
+            ui.separator();
+            ui.add(egui::Label::new(text).truncate());
+        }
     });
+}
+
+/// `[←] [→]`: back and forward in the history of `tab_id` (LINK-2). Disabled where there is
+/// nowhere to go; the hover text names the shortcut.
+fn history_buttons(ui: &mut Ui, state: &AppState, tab_id: TabId, queue: &mut Vec<Action>) {
+    let Some(tab) = state.tabs.pdf(tab_id) else {
+        return;
+    };
+    let history = &tab.view.history;
+    let steps = [
+        ("nav.back", "←", history.can_back(), Action::Back(tab_id)),
+        (
+            "nav.forward",
+            "→",
+            history.can_forward(),
+            Action::Forward(tab_id),
+        ),
+    ];
+    for (id, symbol, enabled, action) in steps {
+        let Some(command) = commands::command(id) else {
+            continue;
+        };
+        let hint = command_hint(ui.ctx(), command);
+        let response = ui
+            .add_enabled(enabled, egui::Button::new(symbol))
+            .on_hover_text(hint.clone())
+            .on_disabled_hover_text(hint);
+        if response.clicked() {
+            queue.push(action);
+        }
+    }
 }
 
 /// The page number, or the page number field while it is open. Returns whether the field is

@@ -125,6 +125,12 @@ pub enum Action {
         /// Which view shows the place.
         how: OpenHow,
     },
+    /// Move a PDF tab one step back in its history (LINK-2), to the exact place it left. The
+    /// place it leaves is recorded, so that `Forward` returns to it. Nothing happens at the
+    /// oldest entry.
+    Back(TabId),
+    /// Move a PDF tab one step forward in its history, mirroring `Back`.
+    Forward(TabId),
     /// Show or hide the table of contents panel of the focused window (TOC-3).
     ToggleToc,
     /// Close the application.
@@ -262,6 +268,8 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             }
         }
         Action::Navigate { tab, to, how } => navigate(state, tab, to, how),
+        Action::Back(tab) => step_history(state, tab, false),
+        Action::Forward(tab) => step_history(state, tab, true),
         Action::ToggleToc => {
             let w = state.focused_window_index();
             if let Some(window) = state.windows.get_mut(w) {
@@ -480,6 +488,42 @@ fn navigate(state: &mut AppState, tab: TabId, to: Location, how: OpenHow) {
     };
     if let Some(target) = target {
         jump_to(state, target, to);
+        mark_arrival(state, target, to);
+    }
+}
+
+/// Moves `tab` one entry back or forward in its history, to the place stored there. The place
+/// the view is at now is handed to the history first, so that the step the other way returns
+/// here. The history gets no new entry.
+fn step_history(state: &mut AppState, tab: TabId, forward: bool) {
+    let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) else {
+        return;
+    };
+    let current = Place {
+        doc: pdf.view.history.current().doc.clone(),
+        loc: pdf.view.anchor,
+    };
+    let step = if forward {
+        pdf.view.history.forward(current)
+    } else {
+        pdf.view.history.back(current)
+    };
+    let Some(place) = step else {
+        return;
+    };
+    // The document may have changed since the place was stored.
+    let page = limit_page(state, tab, place.loc.page).unwrap_or(place.loc.page);
+    let loc = Location { page, ..place.loc };
+    if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+        pdf.view.anchor = loc;
+    }
+    mark_arrival(state, tab, loc);
+}
+
+/// Has the view of `tab` mark the place it just jumped to for a moment (LINK-9).
+fn mark_arrival(state: &mut AppState, tab: TabId, loc: Location) {
+    if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+        pdf.ui.links.mark_arrival(loc);
     }
 }
 
@@ -1382,6 +1426,96 @@ mod tests {
         assert_eq!(back.loc, at(1, 12.0, 250.0));
         let forward = history.forward(back).expect("and forward again");
         assert_eq!(forward.loc, to);
+    }
+
+    #[test]
+    fn back_and_forward_return_to_the_place_that_was_left_without_new_entries() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        let start = at(1, 12.0, 250.0);
+        let to = at(5, 0.0, 120.0);
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+            pdf.view.anchor = start;
+        }
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab,
+                to,
+                how: OpenHow::Here,
+            },
+            &ctx,
+        );
+        // The reader scrolls a little before going back: that place is the one to return to.
+        let read_on = at(5, 0.0, 400.0);
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+            pdf.view.anchor = read_on;
+        }
+        dispatch(&mut state, Action::Back(tab), &ctx);
+        assert_eq!(view(&state, tab).anchor, start);
+        assert!(!view(&state, tab).history.can_back());
+        assert!(view(&state, tab).history.can_forward());
+        dispatch(&mut state, Action::Forward(tab), &ctx);
+        assert_eq!(view(&state, tab).anchor, read_on);
+        assert_eq!(view(&state, tab).history.len(), 2);
+    }
+
+    #[test]
+    fn back_and_forward_with_nowhere_to_go_change_nothing() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        let before = view(&state, tab).clone();
+        dispatch(&mut state, Action::Back(tab), &ctx);
+        dispatch(&mut state, Action::Forward(tab), &ctx);
+        assert_eq!(view(&state, tab), &before);
+        let Some(Tab::Pdf(pdf)) = state.tabs.get(tab) else {
+            panic!("pdf tab");
+        };
+        assert!(pdf.ui.links.arrival.is_none(), "no move, no mark");
+        // A tab that is not a PDF view: no panic.
+        dispatch(&mut state, Action::Back(TabId::for_test(999)), &ctx);
+        dispatch(&mut state, Action::Forward(TabId::for_test(999)), &ctx);
+    }
+
+    #[test]
+    fn jumps_back_and_forward_mark_the_place_they_arrive_at() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        open(&mut state, &ctx, "/refdesk-test/a.pdf");
+        let (tab, _) = state.focused_pdf().expect("pdf tab");
+        let arrival = |state: &AppState| match state.tabs.get(tab) {
+            Some(Tab::Pdf(pdf)) => pdf.ui.links.arrival,
+            _ => None,
+        };
+        let to = at(5, 0.0, 120.0);
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab,
+                to,
+                how: OpenHow::Here,
+            },
+            &ctx,
+        );
+        assert_eq!(arrival(&state), Some(crate::views::links::Arrival::new(to)));
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+            pdf.ui.links.arrival = None;
+        }
+        dispatch(&mut state, Action::Back(tab), &ctx);
+        let start = view(&state, tab).anchor;
+        assert_eq!(
+            arrival(&state),
+            Some(crate::views::links::Arrival::new(start))
+        );
+        if let Some(Tab::Pdf(pdf)) = state.tabs.get_mut(tab) {
+            pdf.ui.links.arrival = None;
+        }
+        dispatch(&mut state, Action::Forward(tab), &ctx);
+        assert!(arrival(&state).is_some_and(|a| a.loc == to));
     }
 
     #[test]

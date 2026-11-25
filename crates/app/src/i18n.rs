@@ -22,6 +22,7 @@ pub const TABLE: &[Row] = &[
     ("menu.file", "파일", "File"),
     ("menu.edit", "편집", "Edit"),
     ("menu.view", "보기", "View"),
+    ("menu.go", "이동", "Go"),
     ("menu.tab", "탭", "Tab"),
     ("menu.window", "창", "Window"),
     ("cmd.window.new", "새 창", "New Window"),
@@ -278,6 +279,19 @@ If refdesk is already running, the files open as tabs in its window instead of a
         "Choose a PDF to compare",
     ),
     ("cmd.view.goto_page", "쪽으로 이동…", "Go to Page…"),
+    ("cmd.nav.back", "뒤로", "Back"),
+    ("cmd.nav.forward", "앞으로", "Forward"),
+    ("link.page", "{page}쪽", "Page {page}"),
+    (
+        "link.page_title",
+        "{page}쪽 — {title}",
+        "Page {page} — {title}",
+    ),
+    (
+        "link.file_page",
+        "{name} — {page}쪽",
+        "{name} — page {page}",
+    ),
     ("cmd.palette.commands", "명령 팔레트…", "Command Palette…"),
     ("cmd.palette.quick_open", "빠른 열기…", "Quick Open…"),
     (

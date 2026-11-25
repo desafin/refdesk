@@ -22,6 +22,8 @@ pub enum MenuGroup {
     Edit,
     /// The "View" menu.
     View,
+    /// The "Go" menu: history and page jumps.
+    Go,
     /// The "Tab" menu.
     Tab,
     /// The "Window" menu. It also lists the open windows (see `windows::menu_bar`).
@@ -30,10 +32,11 @@ pub enum MenuGroup {
 
 impl MenuGroup {
     /// The menus in the order they appear in the menu bar.
-    pub const ALL: [MenuGroup; 5] = [
+    pub const ALL: [MenuGroup; 6] = [
         MenuGroup::File,
         MenuGroup::Edit,
         MenuGroup::View,
+        MenuGroup::Go,
         MenuGroup::Tab,
         MenuGroup::Window,
     ];
@@ -44,6 +47,7 @@ impl MenuGroup {
             MenuGroup::File => "menu.file",
             MenuGroup::Edit => "menu.edit",
             MenuGroup::View => "menu.view",
+            MenuGroup::Go => "menu.go",
             MenuGroup::Tab => "menu.tab",
             MenuGroup::Window => "menu.window",
         }
@@ -142,6 +146,20 @@ fn has_selection(state: &AppState) -> bool {
     state
         .focused_pdf()
         .is_some_and(|(_, pdf)| pdf.ui.has_selection())
+}
+
+/// The focused PDF view has an earlier history entry.
+fn can_go_back(state: &AppState) -> bool {
+    state
+        .focused_pdf()
+        .is_some_and(|(_, pdf)| pdf.view.history.can_back())
+}
+
+/// The focused PDF view has a later history entry.
+fn can_go_forward(state: &AppState) -> bool {
+    state
+        .focused_pdf()
+        .is_some_and(|(_, pdf)| pdf.view.history.can_forward())
 }
 
 fn has_closed_tabs(state: &AppState) -> bool {
@@ -265,9 +283,27 @@ pub static COMMANDS: &[Command] = &[
         action: |s| set_zoom(s, ZoomMode::FitPage),
     },
     Command {
+        id: "nav.back",
+        name_key: "cmd.nav.back",
+        menu: MenuGroup::Go,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft)),
+        aliases: &[],
+        enabled: can_go_back,
+        action: |s| s.focus.map(Action::Back),
+    },
+    Command {
+        id: "nav.forward",
+        name_key: "cmd.nav.forward",
+        menu: MenuGroup::Go,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::ALT, Key::ArrowRight)),
+        aliases: &[],
+        enabled: can_go_forward,
+        action: |s| s.focus.map(Action::Forward),
+    },
+    Command {
         id: "view.goto_page",
         name_key: "cmd.view.goto_page",
-        menu: MenuGroup::View,
+        menu: MenuGroup::Go,
         shortcut: Some(KeyboardShortcut::new(CTRL, Key::G)),
         aliases: &[],
         enabled: has_ready_pdf_focus,
@@ -695,6 +731,54 @@ mod tests {
                 assert!(lookup(lang, g.name_key()).is_some());
             }
         }
+    }
+
+    #[test]
+    fn the_go_menu_lists_back_forward_and_go_to_page_with_their_shortcuts() {
+        let go: Vec<&str> = in_menu(MenuGroup::Go).map(|c| c.id).collect();
+        assert_eq!(go, vec!["nav.back", "nav.forward", "view.goto_page"]);
+        let shortcut = |id| command(id).and_then(|c| c.shortcut);
+        assert_eq!(
+            shortcut("nav.back"),
+            Some(KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft))
+        );
+        assert_eq!(
+            shortcut("nav.forward"),
+            Some(KeyboardShortcut::new(Modifiers::ALT, Key::ArrowRight))
+        );
+        assert!(MenuGroup::ALL.contains(&MenuGroup::Go));
+        assert!(!in_menu(MenuGroup::View).any(|c| c.id == "view.goto_page"));
+    }
+
+    #[test]
+    fn back_and_forward_are_possible_only_where_the_history_goes() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        let back = command("nav.back").expect("command");
+        let forward = command("nav.forward").expect("command");
+        // The start page: no history.
+        assert!(!(back.enabled)(&state) && !(forward.enabled)(&state));
+        dispatch(
+            &mut state,
+            Action::OpenFiles(vec![OpenTarget::parse("/refdesk-test/a.pdf")]),
+            &ctx,
+        );
+        let tab = state.focus.expect("focus");
+        assert!(!(back.enabled)(&state) && !(forward.enabled)(&state));
+        dispatch(
+            &mut state,
+            Action::Navigate {
+                tab,
+                to: refdesk_core::Location::new(3, 0.0, 10.0),
+                how: crate::action::OpenHow::Here,
+            },
+            &ctx,
+        );
+        assert_eq!(back.run(&state), Some(Action::Back(tab)));
+        assert!(forward.run(&state).is_none());
+        dispatch(&mut state, Action::Back(tab), &ctx);
+        assert!(back.run(&state).is_none());
+        assert_eq!(forward.run(&state), Some(Action::Forward(tab)));
     }
 
     #[test]

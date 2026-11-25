@@ -21,15 +21,16 @@ use egui::{
 };
 use refdesk_core::layout::{MAX_ZOOM, MIN_ZOOM, PIXELS_PER_POINT_AT_100};
 use refdesk_core::{
-    DocStatus, DocumentHandle, DocumentInfo, LayoutParams, Location, PageLayout, Point, Priority,
-    RenderKey, Size, ViewState, ZoomMode,
+    DocStatus, DocumentHandle, DocumentInfo, LayoutParams, Location, PageLayout, Place, Point,
+    Priority, RenderKey, Size, ViewState, ZoomMode,
 };
 
-use crate::action::Action;
+use crate::action::{Action, OpenTarget};
 use crate::commands;
 use crate::i18n::tr;
 use crate::panels::status_bar::GotoInput;
 use crate::state::{DocId, PdfTab, TabId};
+use crate::views::links::{self, ClickButton, ClickMods, LinkAction, LinkHit, LinkState};
 use crate::views::selection::{self, Released, SelectionState};
 use crate::views::textures::{Pick, TextureCache};
 
@@ -187,6 +188,9 @@ pub struct PdfViewUiState {
     /// The selected text and the press that is changing it (SEL-1). Cleared when the document is
     /// reloaded. Boxed to keep tabs small.
     pub selection: Box<SelectionState>,
+    /// The link under the pointer, the mark of the last landing place, and the scroll standstill
+    /// timer of the history (LINK-5, LINK-9, LINK-3). Boxed to keep tabs small.
+    pub links: Box<LinkState>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -652,8 +656,42 @@ fn show_document(
 
     let now = ui.input(|i| i.time);
     let texts = |page: u32| doc.page_text(page);
-    if handle_pointer(ui, &response, view_rect, state, &texts, now) && !cx.focused {
+    let links_of = |page: u32| doc.page_links(page);
+    // Ask for the links of the pages on screen so that a click finds them.
+    for page in state.visible_pages() {
+        let _ = doc.page_links(page);
+    }
+    let env = PointerEnv {
+        view_rect,
+        texts: &texts,
+        links_of: &links_of,
+        now,
+        over_link: false,
+    };
+    let hover = hovered_link(ui, &response, state, &env);
+    let hover_text = hover.as_ref().map(|h| {
+        links::describe(
+            &h.link.target,
+            &info.page_sizes,
+            &info.page_labels,
+            &info.outline,
+        )
+        .text()
+    });
+    if state.links.set_hover_text(hover_text.clone()) {
+        // The status bar was drawn before this frame's pointer was known.
+        ui.ctx().request_repaint();
+    }
+    let env = PointerEnv {
+        over_link: hover.is_some(),
+        ..env
+    };
+    let mut link_events = Vec::new();
+    if handle_pointer(ui, &response, state, &env, &mut link_events) && !cx.focused {
         cx.queue.push(Action::FocusTab(cx.tab_id));
+    }
+    for event in link_events {
+        apply_link_event(ui, event, &info.page_sizes, cx.tab_id, cx.queue);
     }
     let hovered = response.contains_pointer();
     if hovered {
@@ -698,6 +736,12 @@ fn show_document(
     scroll_bars(ui, id, outer, view_rect, state);
     state.scroll_motion.note(state.scroll().y, now);
     state.commit(&mut tab.view);
+    // Once the view has stood still, the history entry takes over where it is (LINK-3).
+    if state.links.rest.note(tab.view.anchor, now) {
+        let doc = tab.view.history.current().doc.clone();
+        let loc = tab.view.anchor;
+        tab.view.history.touch(Place { doc, loc });
+    }
 
     let pixels = PixelInfo {
         pixels_per_point: ui.ctx().pixels_per_point(),
@@ -716,6 +760,7 @@ fn show_document(
     for left in [
         state.zoom_gesture.remaining(now),
         state.scroll_motion.remaining(now),
+        state.links.rest.remaining(now),
     ]
     .into_iter()
     .flatten()
@@ -733,7 +778,12 @@ fn show_document(
         cx.textures,
     );
     paint_selection(ui, view_rect, state, &texts);
+    paint_link_hover(ui, view_rect, state, hover.as_ref());
+    paint_arrival(ui, view_rect, state, now);
     show_copy_notice(ui, view_rect, state, now);
+    if let Some(text) = hover_text {
+        response.clone().on_hover_text_at_pointer(text);
+    }
 
     // Right click: the menu of the selection, built from the command module's table.
     if commands::SELECTION_MENU.iter().any(|e| (e.enabled)(tab)) {
@@ -755,31 +805,62 @@ fn show_document(
     }
 }
 
-/// One primary-button event, in the order it arrived.
+/// One pointer event the view reacts to, in the order it arrived.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PointerEvent {
-    Press { pos: Pos2, shift: bool },
+    Press {
+        pos: Pos2,
+        shift: bool,
+    },
     Move(Pos2),
-    Release(Pos2),
+    Release {
+        pos: Pos2,
+        mods: ClickMods,
+    },
+    /// The wheel button.
+    MiddlePress(Pos2),
+    MiddleRelease {
+        pos: Pos2,
+        mods: ClickMods,
+    },
+    /// The mouse's back button.
+    Back(Pos2),
+    /// The mouse's forward button.
+    Forward(Pos2),
+}
+
+fn click_mods(m: &Modifiers) -> ClickMods {
+    ClickMods {
+        ctrl: m.ctrl || m.command,
+        shift: m.shift,
+    }
 }
 
 fn pointer_event(event: &egui::Event) -> Option<PointerEvent> {
     match event {
         egui::Event::PointerButton {
             pos,
-            button: PointerButton::Primary,
-            pressed: true,
+            button,
+            pressed,
             modifiers,
-        } => Some(PointerEvent::Press {
-            pos: *pos,
-            shift: modifiers.shift,
-        }),
-        egui::Event::PointerButton {
-            pos,
-            button: PointerButton::Primary,
-            pressed: false,
-            ..
-        } => Some(PointerEvent::Release(*pos)),
+        } => match (button, pressed) {
+            (PointerButton::Primary, true) => Some(PointerEvent::Press {
+                pos: *pos,
+                shift: modifiers.shift,
+            }),
+            (PointerButton::Primary, false) => Some(PointerEvent::Release {
+                pos: *pos,
+                mods: click_mods(modifiers),
+            }),
+            (PointerButton::Middle, true) => Some(PointerEvent::MiddlePress(*pos)),
+            (PointerButton::Middle, false) => Some(PointerEvent::MiddleRelease {
+                pos: *pos,
+                mods: click_mods(modifiers),
+            }),
+            (PointerButton::Extra1, true) => Some(PointerEvent::Back(*pos)),
+            (PointerButton::Extra2, true) => Some(PointerEvent::Forward(*pos)),
+            _ => None,
+        },
         egui::Event::PointerMoved(pos) => Some(PointerEvent::Move(*pos)),
         _ => None,
     }
@@ -795,27 +876,83 @@ fn viewport_pos(view_rect: Rect, pos: Pos2) -> Point {
     Point::new(v.x, v.y)
 }
 
-/// Applies this frame's primary button events to the selection (SEL-1) and sets the cursor.
-/// Returns true when the button went down in the view.
+/// What the pointer handling reads besides the event list.
+#[derive(Clone, Copy)]
+struct PointerEnv<'a> {
+    view_rect: Rect,
+    texts: selection::PageTexts<'a>,
+    links_of: links::PageLinks<'a>,
+    now: f64,
+    /// The pointer is over a link: the hand cursor, not the I-beam.
+    over_link: bool,
+}
+
+/// What the pointer did that is about links or the history: found by [`handle_pointer`], carried
+/// out by [`apply_link_event`].
+#[derive(Clone, Debug, PartialEq)]
+enum LinkEvent {
+    /// A click on a link.
+    Follow {
+        hit: LinkHit,
+        button: ClickButton,
+        mods: ClickMods,
+    },
+    /// The mouse's back button over the view.
+    Back,
+    /// The mouse's forward button over the view.
+    Forward,
+}
+
+/// The link under the pointer, when it is over the view and no selection is being dragged.
+fn hovered_link(
+    ui: &Ui,
+    response: &egui::Response,
+    state: &PdfViewUiState,
+    env: &PointerEnv,
+) -> Option<LinkHit> {
+    if !response.hovered() || state.selection.is_dragging() {
+        return None;
+    }
+    let pos = ui.input(|i| i.pointer.hover_pos())?;
+    let layout = state.layout()?;
+    links::link_at(
+        layout,
+        state.scroll(),
+        viewport_pos(env.view_rect, pos),
+        env.links_of,
+    )
+}
+
+/// Applies this frame's pointer events to the selection (SEL-1) and sets the cursor. Clicks on
+/// links and the mouse's back and forward buttons go to `out`. Returns true when the primary
+/// button went down in the view.
 ///
 /// The decision between a click and a drag is made by `SelectionState`: [`Released::Click`] is a
-/// single press and release without movement, anything else is a selection gesture.
+/// single press and release without movement, anything else is a selection gesture. Only a
+/// click follows a link.
 fn handle_pointer(
     ui: &Ui,
     response: &egui::Response,
-    view_rect: Rect,
     state: &mut PdfViewUiState,
-    texts: selection::PageTexts,
-    now: f64,
+    env: &PointerEnv,
+    out: &mut Vec<LinkEvent>,
 ) -> bool {
+    let PointerEnv {
+        view_rect,
+        texts,
+        links_of,
+        now,
+        over_link,
+    } = *env;
     let events: Vec<PointerEvent> =
         ui.input(|i| i.events.iter().filter_map(pointer_event).collect());
     let hovered = response.hovered();
+    let inside = |pos: Pos2| hovered && view_rect.contains(pos);
     let mut pressed_here = false;
     for event in events {
         match event {
             PointerEvent::Press { pos, shift } => {
-                if !(hovered && view_rect.contains(pos)) {
+                if !inside(pos) {
                     continue;
                 }
                 pressed_here = true;
@@ -832,7 +969,7 @@ fn handle_pointer(
                     }
                 }
             }
-            PointerEvent::Release(pos) => {
+            PointerEvent::Release { pos, mods } => {
                 if !state.selection.is_dragging() {
                     continue;
                 }
@@ -841,26 +978,91 @@ fn handle_pointer(
                     state.selection.drag_to(texts, vp, hit);
                 }
                 match state.selection.release() {
-                    Some(Released::Click { .. }) => {
-                        // LINK HOOK: a click that did not drag. `hit.loc` is the page-space
-                        // position; following a link under it belongs here.
+                    Some(Released::Click { hit, .. }) => {
+                        // A click that did not drag follows the link under it (LINK-1).
+                        if let Some(link) = links::link_at_hit(&hit, links_of) {
+                            out.push(LinkEvent::Follow {
+                                hit: link,
+                                button: ClickButton::Primary,
+                                mods,
+                            });
+                        }
                     }
                     Some(Released::Selected) | None => {}
+                }
+            }
+            PointerEvent::MiddlePress(pos) => state.links.middle_down = inside(pos),
+            PointerEvent::MiddleRelease { pos, mods } => {
+                if !std::mem::take(&mut state.links.middle_down) {
+                    continue;
+                }
+                let link = hit_at(state, viewport_pos(view_rect, pos))
+                    .and_then(|hit| links::link_at_hit(&hit, links_of));
+                if let Some(link) = link {
+                    out.push(LinkEvent::Follow {
+                        hit: link,
+                        button: ClickButton::Middle,
+                        mods,
+                    });
+                }
+            }
+            PointerEvent::Back(pos) => {
+                if inside(pos) {
+                    out.push(LinkEvent::Back);
+                }
+            }
+            PointerEvent::Forward(pos) => {
+                if inside(pos) {
+                    out.push(LinkEvent::Forward);
                 }
             }
         }
     }
 
-    // The I-beam over text, and while selecting.
-    let over_text = hovered
-        && ui
-            .input(|i| i.pointer.hover_pos())
-            .and_then(|p| hit_at(state, viewport_pos(view_rect, p)))
-            .is_some_and(|hit| selection::over_text(texts, &hit));
-    if over_text || state.selection.is_dragging() {
+    // The hand over a link (LINK-5); else the I-beam over text, and while selecting.
+    if state.selection.is_dragging() {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
+    } else if over_link {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    } else {
+        let over_text = hovered
+            && ui
+                .input(|i| i.pointer.hover_pos())
+                .and_then(|p| hit_at(state, viewport_pos(view_rect, p)))
+                .is_some_and(|hit| selection::over_text(texts, &hit));
+        if over_text {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+        }
     }
     pressed_here
+}
+
+/// Carries out what the pointer asked for: a jump or an open for a followed link, and a history
+/// step for the mouse buttons. Jumps are actions (R-6).
+fn apply_link_event(
+    ui: &Ui,
+    event: LinkEvent,
+    page_sizes: &[Size],
+    tab: TabId,
+    queue: &mut Vec<Action>,
+) {
+    match event {
+        LinkEvent::Back => queue.push(Action::Back(tab)),
+        LinkEvent::Forward => queue.push(Action::Forward(tab)),
+        LinkEvent::Follow { hit, button, mods } => {
+            match links::follow(&hit.link.target, button, mods, page_sizes) {
+                LinkAction::Navigate { to, how } => {
+                    queue.push(Action::Navigate { tab, to, how });
+                }
+                LinkAction::OpenUrl(url) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+                LinkAction::OpenFile { path, page } => {
+                    queue.push(Action::OpenFiles(vec![OpenTarget { path, page }]));
+                }
+                // The status bar already shows the address while the pointer is on the link.
+                LinkAction::Blocked(url) => log::info!("not opening link {url}"),
+            }
+        }
+    }
 }
 
 /// While a selection is being dragged: scrolls the view when the pointer is at its top or bottom
@@ -965,6 +1167,53 @@ fn show_copy_notice(ui: &Ui, view_rect: Rect, state: &mut PdfViewUiState, now: f
     );
     painter.rect_filled(rect, 6.0, Color32::from_black_alpha(210));
     painter.galley(rect.min + pad, galley, Color32::WHITE);
+}
+
+/// Tints the rectangles of the link under the pointer (LINK-5).
+fn paint_link_hover(ui: &Ui, view_rect: Rect, state: &PdfViewUiState, hover: Option<&LinkHit>) {
+    let (Some(hover), Some(layout)) = (hover, state.layout()) else {
+        return;
+    };
+    let base = ui.visuals().hyperlink_color;
+    let color = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 48);
+    let painter = ui.painter_at(view_rect);
+    for r in links::screen_rects(layout, state.scroll(), hover.page, &hover.link.rects) {
+        let rect = Rect::from_min_max(
+            view_rect.min + vec2(r.x0, r.y0),
+            view_rect.min + vec2(r.x1, r.y1),
+        );
+        painter.rect_filled(rect, 2.0, color);
+    }
+}
+
+/// Draws the fading band at the place a jump landed (LINK-9) and asks for frames only while it
+/// is visible.
+fn paint_arrival(ui: &Ui, view_rect: Rect, state: &mut PdfViewUiState, now: f64) {
+    let Some(arrival) = &mut state.links.arrival else {
+        return;
+    };
+    let loc = arrival.loc;
+    let Some(strength) = arrival.strength(now) else {
+        state.links.arrival = None;
+        return;
+    };
+    ui.ctx().request_repaint();
+    let Some(r) = state
+        .layout()
+        .and_then(|layout| links::arrival_band(layout, state.scroll(), loc))
+    else {
+        return;
+    };
+    let rect = Rect::from_min_max(
+        view_rect.min + vec2(r.x0, r.y0),
+        view_rect.min + vec2(r.x1, r.y1),
+    );
+    let alpha = (strength * 110.0).round() as u8;
+    ui.painter_at(view_rect).rect_filled(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(255, 200, 40, alpha),
+    );
 }
 
 fn paint_pages(
@@ -1571,6 +1820,10 @@ mod widget_tests {
         time: f64,
         /// What the frames asked the platform to copy to the clipboard, oldest first.
         copied: Vec<String>,
+        /// The addresses the frames asked the platform to open, oldest first.
+        opened: Vec<String>,
+        /// The cursor the last frame asked for.
+        cursor: CursorIcon,
     }
 
     impl Harness {
@@ -1583,6 +1836,8 @@ mod widget_tests {
                 state: AppState::new(),
                 time: 0.0,
                 copied: Vec::new(),
+                opened: Vec::new(),
+                cursor: CursorIcon::Default,
             }
         }
 
@@ -1618,10 +1873,13 @@ mod widget_tests {
                     .show(ui, |ui| draw_active(ui, state, &mut queue));
             });
             for command in &output.platform_output.commands {
-                if let egui::OutputCommand::CopyText(text) = command {
-                    self.copied.push(text.clone());
+                match command {
+                    egui::OutputCommand::CopyText(text) => self.copied.push(text.clone()),
+                    egui::OutputCommand::OpenUrl(open) => self.opened.push(open.url.clone()),
+                    _ => {}
                 }
             }
+            self.cursor = output.platform_output.cursor_icon;
             output.drop_without_applying_deltas();
             self.state.actions.append(&mut queue);
             dispatch_queued(&mut self.state, &self.ctx);
@@ -2290,5 +2548,533 @@ mod widget_tests {
         h.frames_until("the new generation", |h| generation(h) != before);
         h.frame(Vec::new());
         assert!(!h.tab(tab).ui.has_selection());
+    }
+
+    // ---- links and back/forward (WP-30) ----
+
+    use crate::action::OpenHow;
+    use crate::views::links::LinkState;
+
+    /// The y of the links on every page of [`link_document`].
+    const LINK_Y: f32 = 107.0;
+
+    /// Ten pages. Page 1 (index 0) has two links to page 5 and 3, an external https link, an
+    /// ftp link, a mailto link, a link to another document and a link over some text; page 5
+    /// links to page 9, page 9 to page 2. Landing places have distinct y values.
+    fn link_document(stem: &str, other: &str) -> TempPdf {
+        let mut b = PdfBuilder::new();
+        for i in 0..10usize {
+            b = b.page(595.0, 842.0, |p| {
+                p.text(
+                    72.0,
+                    110.0,
+                    12.0,
+                    &format!("Cross reference text on page {}", i + 1),
+                );
+                match i {
+                    0 => {
+                        p.link_to((72.0, 100.0, 260.0, 115.0), 5, Some((72.0, 40.0)));
+                        p.link_to((300.0, 100.0, 360.0, 115.0), 3, Some((72.0, 90.0)));
+                        p.link_uri((72.0, 200.0, 300.0, 214.0), "https://example.com/x");
+                        p.link_uri((72.0, 230.0, 300.0, 244.0), "ftp://example.com/x");
+                        p.link_uri((72.0, 260.0, 300.0, 274.0), "mailto:someone@example.com");
+                        p.link_uri((72.0, 290.0, 300.0, 304.0), &format!("{other}#page=3"));
+                    }
+                    4 => {
+                        p.link_to((72.0, 100.0, 260.0, 115.0), 9, Some((72.0, 30.0)));
+                    }
+                    8 => {
+                        p.link_to((72.0, 100.0, 260.0, 115.0), 2, Some((72.0, 60.0)));
+                    }
+                    _ => {}
+                }
+            });
+        }
+        b.outline("1 Introduction", 1, 0.0, |o| {
+            o.child("1.1 Scope", 5, 0.0);
+        })
+        .write_temp(stem)
+    }
+
+    struct Links {
+        h: Harness,
+        tab: TabId,
+        _pdf: TempPdf,
+        other: TempPdf,
+    }
+
+    fn links_harness(stem: &str) -> Links {
+        let other = document(4, &format!("{stem}-other"));
+        let name = other
+            .path()
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+        let pdf = link_document(stem, &name);
+        let mut h = Harness::new();
+        let tab = h.open(pdf.path());
+        h.frames_until("the first screen", |h| h.all_visible_rendered(tab));
+        Links {
+            h,
+            tab,
+            _pdf: pdf,
+            other,
+        }
+    }
+
+    impl Harness {
+        fn view_anchor(&self, tab: TabId) -> Location {
+            self.tab(tab).view.anchor
+        }
+
+        /// Frames until the links of `page` have arrived.
+        fn wait_links(&mut self, tab: TabId, page: u32) {
+            let doc = self.tab(tab).doc;
+            self.frames_until("the links of the page", |h| {
+                h.state
+                    .docs
+                    .get(doc)
+                    .is_some_and(|d| d.page_links(page).is_some())
+            });
+        }
+
+        /// The screen position of the middle of the first rectangle of link `index` on `page`.
+        fn link_pos(&self, tab: TabId, page: u32, index: usize) -> Pos2 {
+            let doc = self.state.docs.get(self.tab(tab).doc).expect("doc");
+            let links = doc.page_links(page).expect("links arrived");
+            let r = links[index].rects[0];
+            self.screen_of(tab, page, (r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
+        }
+
+        /// A press and release at `at` with the given button and modifiers, two frames.
+        fn click(&mut self, at: Pos2, button: egui::PointerButton, modifiers: Modifiers) {
+            let event = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button,
+                pressed,
+                modifiers,
+            };
+            self.frame(vec![egui::Event::PointerMoved(at), event(true)]);
+            self.frame(vec![event(false)]);
+        }
+
+        /// Follows link `index` of `page` with a plain click and lets the view settle.
+        fn follow(&mut self, tab: TabId, page: u32, index: usize) {
+            self.wait_links(tab, page);
+            let at = self.link_pos(tab, page, index);
+            self.click(at, egui::PointerButton::Primary, Modifiers::NONE);
+            self.frame(Vec::new());
+        }
+
+        fn key(&mut self, key: Key, modifiers: Modifiers) {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]);
+            self.frame(Vec::new());
+        }
+
+        fn history_len(&self, tab: TabId) -> usize {
+            self.tab(tab).view.history.len()
+        }
+
+        fn links(&self, tab: TabId) -> &LinkState {
+            &self.tab(tab).ui.links
+        }
+    }
+
+    fn near(loc: Location, page: u32, y: f32) -> bool {
+        loc.page == page && (loc.y - y).abs() < 0.05
+    }
+
+    fn same_place(a: Location, b: Location) -> bool {
+        a.page == b.page && (a.y - b.y).abs() < 0.05
+    }
+
+    #[test]
+    fn three_link_hops_and_back_return_to_the_exact_start_and_forward_to_the_end() {
+        let Links { mut h, tab, .. } = links_harness("link-trip");
+        let a0 = h.view_anchor(tab);
+        h.follow(tab, 0, 0);
+        let a1 = h.view_anchor(tab);
+        assert!(near(a1, 4, 40.0), "{a1:?}");
+        h.follow(tab, 4, 0);
+        let a2 = h.view_anchor(tab);
+        assert!(near(a2, 8, 30.0), "{a2:?}");
+        h.follow(tab, 8, 0);
+        let a3 = h.view_anchor(tab);
+        assert!(near(a3, 1, 60.0), "{a3:?}");
+        assert_eq!(h.history_len(tab), 4);
+
+        // Back three times, with the keyboard: each step returns to the place that was left.
+        h.key(Key::ArrowLeft, Modifiers::ALT);
+        assert!(
+            same_place(h.view_anchor(tab), a2),
+            "{:?}",
+            h.view_anchor(tab)
+        );
+        h.key(Key::ArrowLeft, Modifiers::ALT);
+        assert!(same_place(h.view_anchor(tab), a1));
+        h.key(Key::ArrowLeft, Modifiers::ALT);
+        assert!(
+            same_place(h.view_anchor(tab), a0),
+            "{:?} vs {a0:?}",
+            h.view_anchor(tab)
+        );
+        assert!(!h.tab(tab).view.history.can_back());
+        assert_eq!(h.history_len(tab), 4, "no entry was added");
+        // One more does nothing.
+        h.key(Key::ArrowLeft, Modifiers::ALT);
+        assert!(same_place(h.view_anchor(tab), a0));
+
+        // Forward three times: back to page 2 at the same place.
+        h.key(Key::ArrowRight, Modifiers::ALT);
+        assert!(same_place(h.view_anchor(tab), a1));
+        h.state.actions.push(Action::Forward(tab));
+        h.frame(Vec::new());
+        assert!(same_place(h.view_anchor(tab), a2));
+        h.key(Key::ArrowRight, Modifiers::ALT);
+        assert!(
+            same_place(h.view_anchor(tab), a3),
+            "{:?}",
+            h.view_anchor(tab)
+        );
+        assert!(!h.tab(tab).view.history.can_forward());
+        assert_eq!(h.history_len(tab), 4);
+    }
+
+    #[test]
+    fn scrolling_adds_no_history_entry_and_the_entry_follows_once_the_view_rests() {
+        let Links { mut h, tab, .. } = links_harness("link-rest");
+        h.follow(tab, 0, 0);
+        let landed = h.view_anchor(tab);
+        assert_eq!(h.history_len(tab), 2);
+        assert!(same_place(h.tab(tab).view.history.current().loc, landed));
+
+        // Scroll a screen or so.
+        h.frame(wheel(
+            vec2(0.0, -300.0),
+            pos2(400.0, 300.0),
+            Modifiers::NONE,
+        ));
+        for _ in 0..30 {
+            h.frame(Vec::new());
+        }
+        let read_on = h.view_anchor(tab);
+        assert!(read_on.y > landed.y + 50.0 || read_on.page > landed.page);
+        assert_eq!(h.history_len(tab), 2, "scrolling is not a jump");
+        // Not at rest yet: the entry still holds the landing place.
+        assert!(same_place(h.tab(tab).view.history.current().loc, landed));
+
+        // One second without moving: the entry takes over the new place.
+        h.time += 1.5;
+        h.frame(Vec::new());
+        assert!(
+            same_place(h.tab(tab).view.history.current().loc, read_on),
+            "{:?} vs {read_on:?}",
+            h.tab(tab).view.history.current().loc
+        );
+        assert_eq!(h.history_len(tab), 2);
+
+        // Back, then forward: the place where the reading stopped.
+        h.state.actions.push(Action::Back(tab));
+        h.frame(Vec::new());
+        assert!(near(h.view_anchor(tab), 0, h.view_anchor(tab).y));
+        assert_eq!(h.view_anchor(tab).page, 0);
+        h.state.actions.push(Action::Forward(tab));
+        h.frame(Vec::new());
+        assert!(same_place(h.view_anchor(tab), read_on));
+    }
+
+    #[test]
+    fn following_another_link_after_going_back_drops_the_way_forward() {
+        let Links { mut h, tab, .. } = links_harness("link-fork");
+        h.follow(tab, 0, 0);
+        h.state.actions.push(Action::Back(tab));
+        h.frame(Vec::new());
+        assert!(h.tab(tab).view.history.can_forward());
+        // The second link of page 1 leads to page 3.
+        h.follow(tab, 0, 1);
+        assert!(
+            near(h.view_anchor(tab), 2, 90.0),
+            "{:?}",
+            h.view_anchor(tab)
+        );
+        assert!(!h.tab(tab).view.history.can_forward());
+        assert_eq!(h.history_len(tab), 2);
+    }
+
+    #[test]
+    fn the_mouse_back_and_forward_buttons_step_through_the_history_over_the_view_only() {
+        let Links { mut h, tab, .. } = links_harness("link-mouse");
+        let a0 = h.view_anchor(tab);
+        h.follow(tab, 0, 0);
+        let a1 = h.view_anchor(tab);
+        let on_view = pos2(400.0, 300.0);
+        // A press and the release that follows it, as one frame's events: while a button is held
+        // down elsewhere egui does not report the view as hovered.
+        let button = |button, pos| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        // On the status bar: nothing.
+        h.frame(button(egui::PointerButton::Extra1, pos2(400.0, 595.0)));
+        h.frame(Vec::new());
+        assert!(same_place(h.view_anchor(tab), a1));
+        // On the view.
+        h.frame(button(egui::PointerButton::Extra1, on_view));
+        h.frame(Vec::new());
+        assert!(same_place(h.view_anchor(tab), a0));
+        // The press alone, the release a frame later (as a real mouse sends them).
+        h.frame(vec![
+            egui::Event::PointerMoved(on_view),
+            egui::Event::PointerButton {
+                pos: on_view,
+                button: egui::PointerButton::Extra2,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        h.frame(vec![egui::Event::PointerButton {
+            pos: on_view,
+            button: egui::PointerButton::Extra2,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(same_place(h.view_anchor(tab), a1));
+    }
+
+    #[test]
+    fn back_and_forward_commands_follow_the_history_and_the_menu_lists_them() {
+        let Links { mut h, tab, .. } = links_harness("link-commands");
+        let back = crate::commands::command("nav.back").expect("command");
+        let forward = crate::commands::command("nav.forward").expect("command");
+        assert!(back.run(&h.state).is_none() && forward.run(&h.state).is_none());
+        h.follow(tab, 0, 0);
+        assert_eq!(back.run(&h.state), Some(Action::Back(tab)));
+        assert!(forward.run(&h.state).is_none());
+        h.key(Key::ArrowLeft, Modifiers::ALT);
+        assert!(back.run(&h.state).is_none());
+        assert_eq!(forward.run(&h.state), Some(Action::Forward(tab)));
+    }
+
+    #[test]
+    fn dragging_from_a_link_selects_text_and_does_not_follow_it() {
+        let Links { mut h, tab, .. } = links_harness("link-drag");
+        h.wait_links(tab, 0);
+        let text = h.page_text(tab, 0);
+        assert!(text.chars.len() > 12);
+        let (from, to) = (h.char_pos(tab, 0, 0, false), h.char_pos(tab, 0, 8, true));
+        // The press is on the link.
+        let doc = h.state.docs.get(h.tab(tab).doc).expect("doc");
+        let links = doc.page_links(0).expect("links");
+        let (loc_x, loc_y) = {
+            let p = h.page_text(tab, 0).chars[0].quad.bounds();
+            (p.x0 + 0.3, (p.y0 + p.y1) / 2.0)
+        };
+        assert!(
+            links[0]
+                .rects
+                .iter()
+                .any(|r| r.contains(Point::new(loc_x, loc_y))),
+            "the first character lies under the link"
+        );
+        drag_select(&mut h, from, to);
+        assert!(h.tab(tab).ui.has_selection());
+        h.frame(Vec::new());
+        assert_eq!(h.view_anchor(tab).page, 0, "no jump");
+        assert_eq!(h.history_len(tab), 1);
+        assert!(h.links(tab).arrival.is_none());
+    }
+
+    #[test]
+    fn modifier_clicks_open_new_tabs_and_splits_and_leave_this_view_alone() {
+        let Links { mut h, tab, .. } = links_harness("link-modifiers");
+        h.wait_links(tab, 0);
+        let a0 = h.view_anchor(tab);
+        let at = h.link_pos(tab, 0, 0);
+
+        h.click(at, egui::PointerButton::Primary, Modifiers::CTRL);
+        h.frame(Vec::new());
+        assert_eq!(h.state.tabs.len(), 2);
+        let new_tab = h.state.focus.expect("focus");
+        assert_ne!(new_tab, tab);
+        assert!(near(h.view_anchor(new_tab), 4, 40.0));
+        assert!(same_place(h.view_anchor(tab), a0), "the asking view stays");
+
+        // The wheel button: another new tab. (Time passes, so that clicks at one spot are not
+        // taken for a double click.)
+        h.time += 2.0;
+        h.state.focus = Some(tab);
+        h.state.windows[0].dock.activate(tab);
+        h.frame(Vec::new());
+        h.click(at, egui::PointerButton::Middle, Modifiers::NONE);
+        h.frame(Vec::new());
+        assert_eq!(h.state.tabs.len(), 3);
+
+        // Ctrl+Shift: a split beside.
+        h.time += 2.0;
+        h.state.focus = Some(tab);
+        h.state.windows[0].dock.activate(tab);
+        h.frame(Vec::new());
+        assert_eq!(h.state.windows[0].dock.pane_count(), 1);
+        h.click(
+            at,
+            egui::PointerButton::Primary,
+            Modifiers::CTRL | Modifiers::SHIFT,
+        );
+        h.frame(Vec::new());
+        assert_eq!(h.state.tabs.len(), 4);
+        assert_eq!(h.state.windows[0].dock.pane_count(), 2);
+        assert!(same_place(h.view_anchor(tab), a0));
+        let _ = OpenHow::Here;
+    }
+
+    #[test]
+    fn external_links_open_only_for_allowed_schemes() {
+        let Links { mut h, tab, .. } = links_harness("link-external");
+        h.wait_links(tab, 0);
+        let doc = h.state.docs.get(h.tab(tab).doc).expect("doc");
+        let links = doc.page_links(0).expect("links");
+        let index_of = |url: &str| {
+            links
+                .iter()
+                .position(
+                    |l| matches!(&l.target, refdesk_core::LinkTarget::External(u) if u == url),
+                )
+                .expect("the link exists")
+        };
+        let (https, ftp, mailto) = (
+            index_of("https://example.com/x"),
+            index_of("ftp://example.com/x"),
+            index_of("mailto:someone@example.com"),
+        );
+        let (p_https, p_ftp, p_mailto) = (
+            h.link_pos(tab, 0, https),
+            h.link_pos(tab, 0, ftp),
+            h.link_pos(tab, 0, mailto),
+        );
+        h.click(p_https, egui::PointerButton::Primary, Modifiers::NONE);
+        assert_eq!(h.opened, vec!["https://example.com/x".to_owned()]);
+        h.click(p_ftp, egui::PointerButton::Primary, Modifiers::NONE);
+        assert_eq!(h.opened.len(), 1, "ftp is not opened");
+        // The status bar shows the address while the pointer is on it.
+        h.frame(vec![egui::Event::PointerMoved(p_ftp)]);
+        h.frame(Vec::new());
+        assert_eq!(
+            h.links(tab).hover_text.as_deref(),
+            Some("ftp://example.com/x")
+        );
+        h.click(p_mailto, egui::PointerButton::Primary, Modifiers::NONE);
+        assert_eq!(h.opened.len(), 2);
+        assert_eq!(h.opened[1], "mailto:someone@example.com");
+        assert_eq!(h.state.tabs.len(), 1);
+        assert_eq!(
+            h.view_anchor(tab).page,
+            0,
+            "an address does not scroll the view"
+        );
+    }
+
+    #[test]
+    fn a_link_to_another_document_opens_it_at_the_page() {
+        let Links {
+            mut h, tab, other, ..
+        } = links_harness("link-other");
+        h.wait_links(tab, 0);
+        let doc = h.state.docs.get(h.tab(tab).doc).expect("doc");
+        let links = doc.page_links(0).expect("links");
+        let index = links
+            .iter()
+            .position(|l| matches!(l.target, refdesk_core::LinkTarget::OtherDocument { .. }))
+            .expect("the link exists");
+        let at = h.link_pos(tab, 0, index);
+        h.click(at, egui::PointerButton::Primary, Modifiers::NONE);
+        h.frame(Vec::new());
+        assert_eq!(h.state.tabs.len(), 2);
+        let opened = h.state.focus.expect("focus");
+        let doc = h.state.docs.get(h.tab(opened).doc).expect("doc");
+        assert_eq!(
+            crate::state::normalize_path(doc.path()),
+            crate::state::normalize_path(other.path())
+        );
+        assert_eq!(h.view_anchor(opened).page, 2);
+    }
+
+    #[test]
+    fn over_a_link_the_cursor_is_a_hand_and_its_destination_is_shown() {
+        let Links { mut h, tab, .. } = links_harness("link-hover");
+        h.wait_links(tab, 0);
+        // Over text that is no link: the I-beam.
+        let text = h.char_pos(tab, 0, 20, false);
+        let on_text = pos2(text.x, text.y);
+        let off_link = h.screen_of(tab, 0, 450.0, LINK_Y);
+        let _ = (on_text, off_link);
+        let link = h.link_pos(tab, 0, 0);
+        h.frame(vec![egui::Event::PointerMoved(link)]);
+        assert_eq!(h.cursor, CursorIcon::PointingHand);
+        let expected = crate::i18n::tr("link.page_title")
+            .replace("{page}", "5")
+            .replace("{title}", "1.1 Scope");
+        assert_eq!(h.links(tab).hover_text.as_deref(), Some(expected.as_str()));
+        // The next frame the status bar has it.
+        h.frame(Vec::new());
+        // Away from the link: no text, no hand.
+        let away = h.screen_of(tab, 0, 450.0, 600.0);
+        h.frame(vec![egui::Event::PointerMoved(away)]);
+        assert_ne!(h.cursor, CursorIcon::PointingHand);
+        assert_eq!(h.links(tab).hover_text, None);
+    }
+
+    #[test]
+    fn the_arrival_mark_shows_after_a_jump_and_after_back_and_goes_after_eight_tenths_of_a_second()
+    {
+        let Links { mut h, tab, .. } = links_harness("link-arrival");
+        assert!(h.links(tab).arrival.is_none());
+        h.follow(tab, 0, 0);
+        assert!(h.links(tab).arrival.is_some(), "on after the jump");
+        h.time += 0.5;
+        h.frame(Vec::new());
+        assert!(h.links(tab).arrival.is_some(), "still on at 0.5 s");
+        h.time += 0.5;
+        h.frame(Vec::new());
+        assert!(h.links(tab).arrival.is_none(), "off after 0.8 s");
+
+        h.state.actions.push(Action::Back(tab));
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert!(h.links(tab).arrival.is_some(), "on after going back");
+        h.time += 1.0;
+        h.frame(Vec::new());
+        assert!(h.links(tab).arrival.is_none());
+        h.state.actions.push(Action::Forward(tab));
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert!(h.links(tab).arrival.is_some(), "on after going forward");
+    }
+
+    #[test]
+    fn frames_with_the_mark_and_the_hover_on_screen_do_not_panic() {
+        let Links { mut h, tab, .. } = links_harness("link-paint");
+        h.wait_links(tab, 0);
+        let link = h.link_pos(tab, 0, 0);
+        h.frame(vec![egui::Event::PointerMoved(link)]);
+        for _ in 0..5 {
+            h.frame(Vec::new());
+        }
+        h.click(link, egui::PointerButton::Primary, Modifiers::NONE);
+        for _ in 0..60 {
+            h.frame(Vec::new());
+        }
+        assert_eq!(h.view_anchor(tab).page, 4);
     }
 }
