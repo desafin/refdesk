@@ -315,9 +315,12 @@ pub struct TextBlock { pub lines: Range<u32>, pub bounds: Rect }
 pub struct PageText  { pub chars: Vec<TextChar>, pub lines: Vec<TextLine>, pub blocks: Vec<TextBlock> }
 
 impl PageText {
-    pub fn char_at(&self, p: Point) -> Option<u32>;               // 가장 가까운 글자. 너무 멀면 None
-    pub fn word_at(&self, ch: u32) -> Range<u32>;
+    pub fn char_at(&self, p: Point) -> Option<u32>;               // 글자 위(또는 그 줄의 가까운 여백)인가. 아니면 None
+    pub fn nearest_char(&self, p: Point) -> Option<u32>;          // 글자가 있으면 항상 가장 가까운 글자
+    pub fn caret_at(&self, p: Point) -> Option<u32>;              // 드래그 선택용 경계 위치(0 ..= 글자 수)
+    pub fn word_at(&self, ch: u32) -> Range<u32>;                 // "7.3.2", "SWS_EM_01004" 는 한 단어
     pub fn line_of(&self, ch: u32) -> Range<u32>;
+    pub fn block_of(&self, ch: u32) -> Range<u32>;                // 문단
     pub fn rects(&self, range: Range<u32>) -> Vec<Rect>;          // 줄마다 합쳐진 사각형
     pub fn text(&self, range: Range<u32>, opts: CopyOptions) -> String;
 }
@@ -325,6 +328,9 @@ impl PageText {
 pub struct TextPos { pub page: u32, pub ch: u32 }
 pub struct Selection { pub anchor: TextPos, pub focus: TextPos }  // 쪽을 넘어갈 수 있음
 pub struct CopyOptions { pub join_lines: bool, pub dehyphenate: bool }
+
+// Selection: ordered(), is_empty(), pages(), range_on(page, page_chars). TextPos.ch 는 경계 위치다.
+pub fn selection_text(sel: &Selection, page: impl Fn(u32) -> Option<Arc<PageText>>, opts: CopyOptions) -> String;
 ```
 
 글자 순서는 MuPDF 가 준 읽기 순서를 그대로 쓴다. 선택은 글자 색인 범위다(화면 사각형으로 고르지 않는다 — 2단 문서에서 한 단만 선택되게).
