@@ -11,6 +11,7 @@ use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, Rect,
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::overlays::capture;
 use crate::overlays::palette::{self, PaletteMode};
+use crate::overlays::translate;
 use crate::panels::explorer;
 use crate::panels::global_search;
 use crate::panels::search;
@@ -89,6 +90,18 @@ pub enum Action {
     /// Set the scroll speed multiplier, or `None` to go back to the value of `config.toml`
     /// (VIEW-12). The choice is kept in `prefs.json`.
     SetScrollSpeed(Option<f32>),
+    /// Switch translation mode on or off (TR-1). The choice is kept in `prefs.json`; switching
+    /// on loads the model, switching off closes the translation popups.
+    ToggleTranslateMode,
+    /// Translate the selected text of a PDF tab once, in translation mode or not (TR-2).
+    TranslateSelection(TabId),
+    /// Use this translation model, or `None` for the one of `config.toml` (TR-12). The choice is
+    /// kept in `prefs.json`.
+    SetTranslateModel(Option<String>),
+    /// Fetch the model list of the translation server again (TR-12).
+    RefreshTranslateModels,
+    /// A translation was asked for while loading the model had failed: try loading it again.
+    RetryTranslateWarmUp,
     /// Show a short message at the right end of the status bar for a few seconds.
     ShowNotice(String),
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
@@ -407,6 +420,11 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             _ => {}
         },
         Action::SetScrollSpeed(speed) => set_scroll_speed(state, speed, ctx),
+        Action::ToggleTranslateMode => translate::toggle_mode(state, ctx),
+        Action::TranslateSelection(tab) => translate::translate_selection(state, tab, ctx),
+        Action::SetTranslateModel(model) => translate::set_model(state, model, ctx),
+        Action::RefreshTranslateModels => translate::refresh_models(state, ctx),
+        Action::RetryTranslateWarmUp => translate::retry_warm_up(state, ctx),
         Action::ShowNotice(text) => {
             state.status_notice = Some(StatusNotice {
                 text,

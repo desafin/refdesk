@@ -175,6 +175,13 @@ fn has_selection(state: &AppState) -> bool {
     }
 }
 
+/// The focused tab is a PDF tab with selected text (translation works in PDF tabs only).
+fn has_pdf_selection(state: &AppState) -> bool {
+    state
+        .focused_pdf()
+        .is_some_and(|(_, pdf)| pdf.ui.has_selection())
+}
+
 /// The focused PDF view has an earlier history entry.
 fn can_go_back(state: &AppState) -> bool {
     state
@@ -292,6 +299,15 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_selection,
         action: |s| s.focus.map(Action::CopySelection),
+    },
+    Command {
+        id: "edit.translate_selection",
+        name_key: "cmd.edit.translate_selection",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::F2)),
+        aliases: &[],
+        enabled: has_pdf_selection,
+        action: |s| s.focus.map(Action::TranslateSelection),
     },
     Command {
         id: "edit.clear_search_history",
@@ -517,6 +533,15 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_workspace,
         action: |_| Some(Action::RefreshWorkspace),
+    },
+    Command {
+        id: "view.translate_mode",
+        name_key: "cmd.view.translate_mode",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F2)),
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ToggleTranslateMode),
     },
     Command {
         id: "view.toggle_breadcrumb",
@@ -795,6 +820,12 @@ fn tab_has_selection(tab: &PdfTab) -> bool {
     tab.ui.has_selection()
 }
 
+/// The view has a selection and translation is set up for it (the window sets it up for PDF
+/// tabs only, not for the sides of a comparison).
+fn tab_can_translate(tab: &PdfTab) -> bool {
+    tab.ui.has_selection() && tab.ui.translate.env.is_some()
+}
+
 /// The selection menu, in display order.
 pub static SELECTION_MENU: &[SelectionMenuEntry] = &[
     SelectionMenuEntry {
@@ -808,6 +839,12 @@ pub static SELECTION_MENU: &[SelectionMenuEntry] = &[
         command_id: None,
         enabled: tab_has_selection,
         action: Action::FindSelection,
+    },
+    SelectionMenuEntry {
+        name_key: "cmd.edit.translate",
+        command_id: Some("edit.translate_selection"),
+        enabled: tab_can_translate,
+        action: Action::TranslateSelection,
     },
 ];
 

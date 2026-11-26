@@ -30,6 +30,7 @@ use crate::commands;
 use crate::i18n::tr;
 use crate::overlays::capture::CaptureState;
 use crate::overlays::link_preview::{self, ShowEnv, UpdateEnv};
+use crate::overlays::translate_popup::{self, TranslateView};
 use crate::panels::global_search::DocMarks;
 use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
@@ -200,6 +201,8 @@ pub struct PdfViewUiState {
     pub search: Box<SearchState>,
     /// The capture mode and the notice of the last capture (SHOT-1). Boxed to keep tabs small.
     pub capture: Box<CaptureState>,
+    /// The translation popup of this view (TR-2 .. TR-4). Boxed to keep tabs small.
+    pub translate: Box<TranslateView>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -824,6 +827,23 @@ fn show_document(
         }
     }
     autoscroll_and_follow(ui, view_rect, state, &texts);
+    // The translation popup (TR-2, TR-3): after the pointer, so that a finished drag counts.
+    let translate_blocked =
+        capturing || state.search.open || state.goto.is_some() || ui.ctx().any_popup_open();
+    translate_popup::update(
+        ui,
+        state,
+        &translate_popup::UpdateEnv {
+            view_rect,
+            now,
+            hovered: response.hovered(),
+            over_link: hover.is_some(),
+            blocked: translate_blocked,
+            texts: &texts,
+            doc_generation: info.generation,
+        },
+        cx.queue,
+    );
     scroll_bars(ui, id, outer, view_rect, state);
     state.scroll_motion.note(state.scroll().y, now);
     state.commit(&mut tab.view);
@@ -874,6 +894,7 @@ fn show_document(
     paint_link_hover(ui, view_rect, state, hover.as_ref());
     paint_arrival(ui, view_rect, state, now);
     show_copy_notice(ui, view_rect, state, now);
+    translate_popup::show(ui, state, view_rect, cx.tab_id);
     link_preview::show(
         ui,
         state,

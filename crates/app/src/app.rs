@@ -83,6 +83,7 @@ fn start_prefs(state: &mut AppState, ctx: &egui::Context) {
     }
     crate::panels::search_history::load_into(state);
     apply_scroll_speed(state, ctx);
+    crate::overlays::translate::start(state, ctx);
 }
 
 /// Applies the `theme` setting.
@@ -126,6 +127,8 @@ impl eframe::App for RefdeskApp {
         preload::step(ctx, &mut self.state);
         // WP-55: the search in all open documents follows the open documents and its jobs.
         global_search::tick(&mut self.state, ctx);
+        // WP-81: the model warm-up, the model list and the delayed save of translations.
+        crate::overlays::translate::tick(&mut self.state, ctx);
         // WP-41: save the session two seconds after it last changed.
         self.tick_saver(ctx);
     }
@@ -148,6 +151,7 @@ impl eframe::App for RefdeskApp {
 
     fn on_exit(&mut self) {
         self.saver.save_now(&mut self.state);
+        crate::overlays::translate::save_now(&mut self.state);
     }
 }
 

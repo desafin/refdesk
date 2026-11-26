@@ -190,6 +190,10 @@ fn menu_bar(ui: &mut Ui, state: &AppState, index: usize, queue: &mut Vec<Action>
                     if command.id == "view.scroll_slower" {
                         scroll_speed_menu(ui, state, queue);
                     }
+                    // The model list sits under translation mode (TR-12).
+                    if command.id == "view.translate_mode" {
+                        crate::overlays::translate::model_menu(ui, state, queue);
+                    }
                 }
                 if group == MenuGroup::Window {
                     ui.separator();
@@ -336,6 +340,7 @@ pub fn show_window(
 
     let show_breadcrumb = state.show_breadcrumb;
     let overlay_open = state.palette.open.is_some();
+    let translate = state.translate.view_env(overlay_open);
     let AppState {
         windows,
         tabs,
@@ -361,6 +366,7 @@ pub fn show_window(
         show_breadcrumb,
         overlay_open,
         search_history,
+        translate,
         queue,
     };
     CentralPanel::default().show(ui, |ui| {
@@ -568,6 +574,8 @@ struct WindowHost<'a> {
     overlay_open: bool,
     /// The searches made, for the search bars (FIND-13).
     search_history: &'a refdesk_core::SearchHistory,
+    /// What the PDF views need for translation (WP-81).
+    translate: crate::overlays::translate::ViewEnv,
     queue: &'a mut Vec<Action>,
 }
 
@@ -609,6 +617,7 @@ impl DockHost for WindowHost<'_> {
                     };
                     let (breadcrumb, overlay) = (self.show_breadcrumb, self.overlay_open);
                     let history = self.search_history;
+                    pdf.ui.translate.env = Some(self.translate.clone());
                     draw_pdf_tab_marked(ui, pdf, doc, cx, breadcrumb, overlay, history, marks);
                 }
                 None => {

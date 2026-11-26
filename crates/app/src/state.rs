@@ -15,6 +15,7 @@ use refdesk_core::{
 use crate::action::Action;
 use crate::overlays::capture::Clipboard;
 use crate::overlays::palette::PaletteState;
+use crate::overlays::translate::TranslateApp;
 use crate::panels::explorer::ExplorerState;
 use crate::panels::global_search::GlobalSearch;
 use crate::panels::sidebar::{DEFAULT_SPLIT, SidebarView};
@@ -392,6 +393,8 @@ pub struct AppState {
     pub show_breadcrumb: bool,
     /// Where captures put their image. `None` uses the system clipboard; tests set a fake (WP-54).
     pub capture_clipboard: Option<Arc<dyn Clipboard>>,
+    /// Translation mode, backend, cache and model list (WP-81). Only `dispatch` changes it.
+    pub translate: TranslateApp,
     /// Session bookkeeping: focus order, fingerprints, window sizes (WP-41).
     pub memory: Memory,
     next_window: u64,
@@ -434,6 +437,7 @@ impl AppState {
             search_history: SearchHistory::default(),
             show_breadcrumb: true,
             capture_clipboard: None,
+            translate: TranslateApp::default(),
             memory: Memory::default(),
             next_window: 1,
         }
