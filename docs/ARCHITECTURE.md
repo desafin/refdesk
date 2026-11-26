@@ -774,7 +774,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 - 상태는 앱 전체에 하나다: `AppState.global_search: GlobalSearch`(`panels/global_search.rs`). 검색어와 옵션, 문서마다의 `SearchJob`·스냅숏·`PageIndex`, 지금 결과 `(DocId, MatchKey)`. 저장하지 않는다.
 - 대상은 "PDF 탭에 열린 문서"다(같은 문서는 한 번). 비교 탭의 문서는 대상이 아니다. 문서의 순서는 파일 이름의 자연 순서(`natural_cmp`), 같으면 경로.
 - 프레임마다 `logic()` 에서 `global_search::tick` 을 한 번 부른다: 대상 목록을 다시 구해 새 문서의 작업을 시작하고 닫힌 문서의 작업을 버리며, 세대가 바뀐 문서는 다시 찾고(R-7), 입력 지연이 끝난 검색어를 시작하고, 작업의 스냅숏을 받아 온다. core 의 `SearchJob` 을 문서마다 하나씩 그대로 쓴다(core 는 바꾸지 않는다). UI 스레드는 기다리지 않는다(R-1).
-- 사이드바에는 보기가 둘이다: `WindowState.sidebar_view` = `Files`(탐색기 + 목차, 기본) | `Search`. 보기는 창마다 따로지만 검색 상태는 하나라, 어느 창의 검색 보기도 같은 결과를 보인다. 탐색기·목차를 보이는 명령은 보기를 `Files` 로 돌린다.
+- 사이드바에는 보기가 여럿이다: `WindowState.sidebar_view` = `Files`(탐색기 + 목차, 기본) | `Search` | `Pages`(썸네일, `panels/thumbnails.rs` — 텍스처 캐시의 미리보기를 그대로 쓴다) | `Marks`(책갈피·하이라이트, WP-74). 보기는 창마다 따로지만 검색 상태는 하나라, 어느 창의 검색 보기도 같은 결과를 보인다. 탐색기·목차를 보이는 명령은 보기를 `Files` 로 돌린다.
 - 결과 목록은 줄 높이가 일정하고 보이는 줄만 그린다(문서당 일치 10만 개까지 올 수 있다). 줄에는 접근성 이름을 단다.
 - 강조: PDF 뷰는 자기 문서의 전체 검색 일치를 문서 내 검색 강조 **아래**에 다른 색으로 그린다. 보이는 쪽의 사각형만 계산한다(`search::match_rects` 재사용).
 - 결과로 가기(`GlobalSearchGoTo`, `GlobalSearchStep`)는 dispatch 가 한다(R-6): 탭을 고르고(포커스된 탭이 그 문서면 그것, 아니면 동작이 일어난 창의 탭, 아니면 다른 창의 탭) → `FocusTab` 과 같은 방식으로 포커스 → 뷰를 옮기고 히스토리에 긴 점프로 남긴다.
@@ -795,6 +795,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 - 링크 위에서는 링크 미리보기(§5.5)가 우선이고 단어 팝업은 뜨지 않는다. 끄는 중, 메뉴·검색 입력·명령 팔레트가 열려 있을 때도 뜨지 않는다.
 - 캐시에 있으면 작업을 만들지 않고 바로 보인다. 끝난 번역은 캐시에 넣고, 캐시는 바뀐 뒤 몇 초 묶어서 저장한다.
 - 비교 탭의 뷰에서는 동작하지 않는다(P2).
+
+### 5.13 키를 가져가는 모드
+
+- `AppState.key_grab: Option<KeyGrab>` 이 서 있는 동안 단축키 표는 아무 키도 가져가지 않는다(명령 팔레트가 열려 있을 때와 같다). 다음 키 입력을 기다리는 기능이 쓴다: 마크의 글자(`SetMark`, `GoToMark`), 링크 힌트의 글자(`LinkHints`). 세운 기능이 키를 직접 읽고, 끝나면(Esc 포함) 반드시 내린다. 탭이 닫히거나 포커스가 다른 탭으로 가도 내린다.
 
 ### 5.8 세션
 
