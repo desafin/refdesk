@@ -800,6 +800,12 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 
 - `AppState.key_grab: Option<KeyGrab>` 이 서 있는 동안 단축키 표는 아무 키도 가져가지 않는다(명령 팔레트가 열려 있을 때와 같다). 다음 키 입력을 기다리는 기능이 쓴다: 마크의 글자(`SetMark`, `GoToMark`), 링크 힌트의 글자(`LinkHints`). 세운 기능이 키를 직접 읽고, 끝나면(Esc 포함) 반드시 내린다. 탭이 닫히거나 포커스가 다른 탭으로 가도 내린다.
 
+### 5.15 표시: 책갈피, 마크, 하이라이트 (WP-74)
+
+- 저장은 core 의 `store/annotations.rs`(`state_dir/annotations.json`): 문서별 기록을 `DocStateDb` 와 같은 규칙(경로 또는 내용 지문, 최근 것 우선)으로 찾고, 파일이 옮겨지면 지문으로 따라가 경로를 고친다. 하이라이트는 쪽마다 조각 하나, 같은 `group` 으로 묶인다. 원본 PDF 는 건드리지 않는다.
+- app: `panels/marks.rs`(동작 `Action::Marks(MarksAction)`, 사이드바 "표시" 보기, 바뀐 뒤 2초 묶어 저장)와 `views/highlights.rs`(칠하기, 포인터 아래 찾기, 우클릭 메뉴). 하이라이트는 쪽 그림 위, 선택·검색 강조 아래에 칠한다.
+- 마크의 글자는 `key_grab`(§5.13)이 서 있는 동안 `views/highlights.rs::handle_keys` 가 뷰를 그릴 때 읽는다. 시간 초과·탭 닫힘·포커스 이동으로 인한 취소는 `marks::tick` 이 한다.
+
 ### 5.14 뷰 위의 도구 (WP-33)
 
 - `overlays/region_zoom.rs`: 영역 확대(Z)와 가운데 버튼 끌기. 확대하기 전의 배율 방식과 자리를 뷰 상태에 기억하고 "이전 배율로"(Shift+Z)가 되돌린다. 히스토리는 배율을 되돌리지 않는다.
