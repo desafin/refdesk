@@ -2312,7 +2312,8 @@ mod tests {
         state: AppState,
         time: f64,
         /// Seconds of egui time one frame takes. Tests about the two seconds of settling move
-        /// `time` by hand and make this small so that frames do not add up to them by accident.
+        /// `time` by hand and set this to 0: frames run as often as the search asks for them
+        /// (more often on a busy machine), and they must not add up to those seconds.
         step: f64,
     }
 
@@ -2427,6 +2428,12 @@ mod tests {
             self.frame(vec![Event::Text(text.to_owned())]);
         }
 
+        /// Moves the clock past the input delay, so that a typed query is searched in the next
+        /// frame whatever `step` is.
+        fn pass_input_delay(&mut self) {
+            self.time += INPUT_DELAY_SECS + 0.05;
+        }
+
         /// One frame like [`Rig::frame`], returning the buttons of the accessibility tree:
         /// label, bounds and whether they are disabled.
         fn button_nodes(&mut self) -> Vec<(String, Rect, bool)> {
@@ -2513,6 +2520,7 @@ mod tests {
         /// Types a query and runs frames until the search finished and chose a current match.
         fn search_for(&mut self, tab: TabId, text: &str) {
             self.type_text(text);
+            self.pass_input_delay();
             self.frames_until("the search to finish", |rig| {
                 let s = rig.search(tab);
                 s.live && s.snapshot().finished && !s.is_searching()
@@ -3195,7 +3203,7 @@ mod tests {
     fn enter_records_the_query_but_typing_alone_does_not() {
         let pdf = needle_doc("wp56-enter", &[(1, 100.0), (3, 100.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         rig.search_for(tab, "needle");
@@ -3214,7 +3222,7 @@ mod tests {
     fn closing_the_bar_records_a_query_that_was_searched_but_not_an_empty_one() {
         let pdf = needle_doc("wp56-close", &[(1, 100.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         rig.key(Key::Escape, Modifiers::NONE);
@@ -3246,7 +3254,7 @@ mod tests {
     fn a_click_in_the_result_list_records_the_query() {
         let pdf = needle_doc("wp56-list", &[(1, 100.0), (4, 100.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         rig.search_for(tab, "needle");
@@ -3264,7 +3272,7 @@ mod tests {
     fn f3_records_the_query_and_does_not_rewrite_the_history_each_time() {
         let pdf = needle_doc("wp56-f3", &[(1, 100.0), (3, 100.0), (5, 100.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         rig.search_for(tab, "needle");
@@ -3301,7 +3309,7 @@ mod tests {
     fn a_query_that_stays_with_results_is_recorded_after_two_seconds_and_a_beginning_is_replaced() {
         let pdf = needle_doc("wp56-settle", &[(1, 100.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         rig.search_for(tab, "nee");
@@ -3309,6 +3317,7 @@ mod tests {
         rig.frames(3);
         assert_eq!(rig.history_texts(), ["nee"]);
         rig.type_text("dle");
+        rig.pass_input_delay();
         rig.frames_until("the search", |rig| {
             let s = rig.search(tab);
             s.query.text == "needle" && s.live && s.snapshot().finished && !s.is_searching()
@@ -3323,6 +3332,7 @@ mod tests {
         );
         // A query without results is never recorded.
         rig.type_text("zzz");
+        rig.pass_input_delay();
         rig.frames_until("the search", |rig| {
             let s = rig.search(tab);
             s.query.text == "needlezzz" && s.no_match()
@@ -3336,7 +3346,7 @@ mod tests {
     fn ctrl_f_in_a_tab_that_never_searched_takes_the_newest_history_entry() {
         let pdf = needle_doc("wp56-fill", &[(1, 100.0), (3, 100.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.state.search_history.record(&hist_q("other", false), 1);
         rig.state.search_history.record(&hist_q("needle", true), 2);
@@ -3358,7 +3368,7 @@ mod tests {
     fn ctrl_f_with_an_empty_history_or_a_selected_word_or_an_old_query_does_not_take_it() {
         let pdf = needle_doc("wp56-fill2", &[(0, 150.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         // No history: an empty field, nothing started.
         rig.open_bar(tab);
@@ -3392,7 +3402,7 @@ mod tests {
     fn up_and_down_in_the_field_walk_through_the_history_without_scrolling_the_view() {
         let pdf = needle_doc("wp56-recall", &[(0, 150.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.state.search_history.record(&hist_q("alpha", false), 1);
         rig.state.search_history.record(&hist_q("beta", true), 2);
@@ -3439,7 +3449,7 @@ mod tests {
     fn up_and_down_scroll_the_view_when_the_field_does_not_have_the_keyboard() {
         let pdf = needle_doc("wp56-view-keys", &[(0, 150.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.state.search_history.record(&hist_q("alpha", false), 1);
         // The bar is closed: ↓ is the view's.
@@ -3455,7 +3465,7 @@ mod tests {
         use crate::panels::sidebar::SidebarView;
         let pdf = needle_doc("wp57-keys", &[(0, 150.0), (1, 150.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         // Ctrl+Shift+F in the field of the bar is not Ctrl+F: it shows the search view.
@@ -3494,7 +3504,7 @@ mod tests {
     fn the_history_button_has_a_name_is_disabled_when_empty_and_its_list_works() {
         let pdf = needle_doc("wp56-button", &[(0, 150.0)]);
         let mut rig = Rig::new();
-        rig.step = 0.001;
+        rig.step = 0.0;
         let tab = rig.open(&pdf);
         rig.open_bar(tab);
         // Empty history: the button is there and disabled.
