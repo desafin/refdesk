@@ -19,26 +19,31 @@ use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::geom::Size;
+use crate::geom::{Point, Size};
 use crate::text::{PageText, TextPos};
 
+use super::margins::Margins;
 use super::noise;
 
 /// How [`extract`] reads a document.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExtractOptions {
     /// Drop header and footer lines that repeat over the pages ([`noise`]).
     pub skip_repeated_lines: bool,
     /// Compare words without regard to case (keys are lowercased).
     pub ignore_case: bool,
+    /// Page edges that are left out: a word whose box centre lies in one is dropped before the
+    /// repeated lines are looked for.
+    pub margins: Margins,
 }
 
 impl Default for ExtractOptions {
-    /// Skip repeated lines, keep case.
+    /// Skip repeated lines, keep case, leave no margin out.
     fn default() -> Self {
         Self {
             skip_repeated_lines: true,
             ignore_case: false,
+            margins: Margins::default(),
         }
     }
 }
@@ -353,11 +358,45 @@ fn to_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// Turns the pages of one document into words and paragraphs, dropping repeated header and
-/// footer lines when `opts.skip_repeated_lines` is set. Pure: no IO, no engine access.
+/// Flags the characters of the words of `src` that lie in an excluded margin: one flag per
+/// character of the page. A word is the run of non-whitespace characters on a line; it is left
+/// out when the centre of the union of its character boxes lies in a band of `margins`.
+fn excluded_chars(src: &PageSource, margins: &Margins) -> Vec<bool> {
+    let pt = &src.text;
+    let mut flags = vec![false; pt.chars.len()];
+    for line in &pt.lines {
+        for piece in line_pieces(pt, &line.chars) {
+            let boxes = chars_of(pt, &piece.chars).iter().map(|c| c.quad.bounds());
+            let Some(bounds) = boxes.reduce(|a, b| a.union(&b)) else {
+                continue;
+            };
+            let centre = Point::new((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+            if margins.excludes(src.size, centre) {
+                let end = (piece.chars.end as usize).min(flags.len());
+                let start = (piece.chars.start as usize).min(end);
+                flags[start..end].fill(true);
+            }
+        }
+    }
+    flags
+}
+
+/// Turns the pages of one document into words and paragraphs, dropping the words in the excluded
+/// margins first and then repeated header and footer lines when `opts.skip_repeated_lines` is
+/// set. With no margin excluded the result is the same as before margins existed. Pure: no IO,
+/// no engine access.
 pub fn extract(pages: &[PageSource], opts: &ExtractOptions) -> DocTokens {
+    let excluded: Vec<Vec<bool>> = if opts.margins.is_zero() {
+        Vec::new()
+    } else {
+        pages
+            .iter()
+            .map(|src| excluded_chars(src, &opts.margins))
+            .collect()
+    };
+    let flags_of = |page: usize| excluded.get(page).map(Vec::as_slice).unwrap_or(&[]);
     let noise = if opts.skip_repeated_lines {
-        noise::repeated_lines(pages)
+        noise::repeated_lines_without(pages, &excluded)
     } else {
         Vec::new()
     };
@@ -376,7 +415,9 @@ pub fn extract(pages: &[PageSource], opts: &ExtractOptions) -> DocTokens {
                 removed_lines.push(RemovedLine {
                     page: to_u32(p),
                     line: to_u32(l),
-                    text: noise::line_text(&src.text, line).trim().to_owned(),
+                    text: noise::line_text_without(&src.text, line, flags_of(p))
+                        .trim()
+                        .to_owned(),
                 });
             }
         }
@@ -398,7 +439,13 @@ pub fn extract(pages: &[PageSource], opts: &ExtractOptions) -> DocTokens {
             let start = (block.lines.start as usize).min(end);
             let lines: Vec<Vec<Piece>> = (start..end)
                 .filter(|&l| !is_noise(p, l))
-                .map(|l| line_pieces(pt, &pt.lines[l].chars))
+                .map(|l| {
+                    let mut pieces = line_pieces(pt, &pt.lines[l].chars);
+                    let flags = flags_of(p);
+                    pieces
+                        .retain(|pc| !flags.get(pc.chars.start as usize).copied().unwrap_or(false));
+                    pieces
+                })
                 .filter(|pieces| !pieces.is_empty())
                 .collect();
             let Some(first) = lines.first().and_then(|l| l.first()) else {
@@ -434,6 +481,12 @@ mod tests {
     const KEEP_NOISE: ExtractOptions = ExtractOptions {
         skip_repeated_lines: false,
         ignore_case: false,
+        margins: Margins {
+            top: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+            right: 0.0,
+        },
     };
 
     fn run(pages: Vec<PageText>, opts: ExtractOptions) -> DocTokens {
@@ -458,6 +511,106 @@ mod tests {
         for w in &doc.words {
             assert_eq!(doc.word_text(w), w.key, "{w:?}");
         }
+    }
+
+    fn with_margins(margins: Margins) -> ExtractOptions {
+        ExtractOptions {
+            margins,
+            ..KEEP_NOISE
+        }
+    }
+
+    fn top(v: f32) -> Margins {
+        Margins {
+            top: v,
+            ..Margins::default()
+        }
+    }
+
+    #[test]
+    fn a_word_is_left_out_by_the_centre_of_its_box() {
+        // Page height 792, margin 0.25: the band ends at 198. Boxes are 12 high.
+        let page = |top: f32| vec![line_page(&[(top, "inside"), (400.0, "body")])];
+        let kept = |top: f32| keys(&run(page(top), with_margins(self::top(0.25)))).len() == 2;
+        assert!(!kept(191.9), "centre 197.9 is inside the band");
+        assert!(kept(192.1), "centre 198.1 is outside the band");
+        assert!(!kept(0.0) && !kept(-30.0), "beyond the page edge too");
+        // With no margin everything stays, also what lies beyond the page.
+        let all = run(page(-30.0), with_margins(Margins::default()));
+        assert_eq!(keys(&all), ["inside", "body"]);
+    }
+
+    #[test]
+    fn only_the_words_in_the_band_go_and_the_rest_of_the_line_stays() {
+        let mut pt = PageText::default();
+        crate::diff::test_pages::add_block_at(&mut pt, 5.0, 300.0, &["ab cd ef"]);
+        let left = Margins {
+            left: 0.04,
+            ..Margins::default()
+        };
+        // Widths 6: "ab" is centred at 11, "cd" at 29, the band ends at 24.48.
+        let doc = run(vec![pt], with_margins(left));
+        assert_eq!(keys(&doc), ["cd", "ef"]);
+        assert_eq!(doc.words[0].chars, 3..5, "positions still index the page");
+    }
+
+    #[test]
+    fn margins_are_fractions_of_each_pages_own_size() {
+        let a = source(line_page(&[(30.0, "head"), (400.0, "body")]));
+        let mut b = source(line_page(&[(30.0, "head"), (400.0, "body")]));
+        b.size = crate::geom::Size::new(612.0, 300.0);
+        let opts = with_margins(top(0.2));
+        let doc = extract(&[a, b], &opts);
+        // Page 0: band ends at 158, "head" (centre 36) goes. Page 1: band ends at 60, "head" goes
+        // too; "body" at 406 is outside on page 0 but below the page on page 1, and is kept.
+        assert_eq!(keys(&doc), ["body", "body"]);
+        let c = source(line_page(&[(55.0, "head"), (400.0, "body")]));
+        let mut d = c.clone();
+        d.size = crate::geom::Size::new(612.0, 100.0);
+        // Centre 61: inside 0.2 * 792 = 158.4, outside 0.2 * 100 = 20.
+        let doc = extract(&[c, d], &opts);
+        assert_eq!(keys(&doc), ["body", "head", "body"]);
+    }
+
+    #[test]
+    fn dropped_words_are_not_noise_candidates_and_the_rest_still_is() {
+        // Four pages with a running header in the top band and a footer in the bottom band.
+        let page = |n: usize| {
+            line_page(&[
+                (20.0, &format!("Guide page {n}")),
+                (300.0, &format!("Body of page {n} is unique")),
+                (740.0, &format!("Footer {n}")),
+            ])
+        };
+        let pages = || (1..=4).map(page).collect::<Vec<_>>();
+        let skip = ExtractOptions::default();
+        let plain = run(pages(), skip);
+        assert_eq!(plain.removed_lines.len(), 8, "header and footer are noise");
+        let cut = ExtractOptions {
+            margins: top(0.1),
+            ..skip
+        };
+        let doc = run(pages(), cut);
+        let removed: Vec<&str> = doc.removed_lines.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(removed, ["Footer 1", "Footer 2", "Footer 3", "Footer 4"]);
+        assert!(!keys(&doc).contains(&"Guide"));
+        assert!(keys(&doc).contains(&"Body"));
+    }
+
+    #[test]
+    fn a_paragraph_continues_over_a_page_break_when_the_header_is_left_out() {
+        let pages = vec![
+            line_page(&[(400.0, "the sentence starts here and")]),
+            line_page(&[(20.0, "Chapter two"), (100.0, "goes on to the end.")]),
+        ];
+        let doc = run(pages, with_margins(top(0.1)));
+        assert_eq!(doc.paragraphs.len(), 1);
+        assert_eq!(
+            keys(&doc),
+            [
+                "the", "sentence", "starts", "here", "and", "goes", "on", "to", "the", "end."
+            ]
+        );
     }
 
     #[test]
@@ -490,8 +643,8 @@ mod tests {
     fn ignore_case_lowercases_keys() {
         let page = || vec![line_page(&[(300.0, "Hello WORLD Straße")])];
         let opts = ExtractOptions {
-            skip_repeated_lines: false,
             ignore_case: true,
+            ..KEEP_NOISE
         };
         assert_eq!(keys(&run(page(), opts)), ["hello", "world", "straße"]);
         assert_eq!(keys(&run(page(), KEEP_NOISE)), ["Hello", "WORLD", "Straße"]);
@@ -720,8 +873,8 @@ mod tests {
             ])]
         };
         let opts = ExtractOptions {
-            skip_repeated_lines: false,
             ignore_case: true,
+            ..KEEP_NOISE
         };
         let doc = run(page(), opts);
         assert_eq!(doc.paragraphs[0].key, doc.paragraphs[1].key);

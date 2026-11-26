@@ -1118,6 +1118,10 @@ pub fn start(state: &mut AppState, startup: Startup, ctx: &egui::Context) -> Sav
     state.paths = startup.paths;
     state.config = startup.config;
     state.doc_db = startup.doc_db;
+    // Restored comparisons start with the margins the last one used (DIFF-11).
+    if let Some(paths) = &state.paths {
+        state.prefs = refdesk_core::Prefs::load(&paths.prefs_file());
+    }
     if restore {
         restore_session_logged(state, &startup.session, ctx);
     }
@@ -1615,6 +1619,54 @@ mod tests {
             SessionTab::Diff { left, right }
                 if left.ends_with("old.pdf") && right.ends_with("new.pdf")
         )));
+    }
+
+    #[test]
+    fn a_restored_comparison_starts_with_the_margins_of_the_last_one() {
+        let dir = TempDir::new("diff-margins");
+        let paths = Paths::under(&dir.0);
+        let margins = refdesk_core::diff::Margins {
+            top: 0.06,
+            bottom: 0.05,
+            ..Default::default()
+        };
+        refdesk_core::Prefs {
+            diff_margins: margins,
+            ..Default::default()
+        }
+        .save(&paths.prefs_file())
+        .expect("save prefs");
+        let mut session = one_tab_session(
+            Path::new("/refdesk-test/a.pdf"),
+            ViewState::new(PathBuf::from("/refdesk-test/a.pdf")),
+        );
+        session.tabs.insert(
+            "t1".into(),
+            SessionTab::Diff {
+                left: PathBuf::from("/refdesk-test/old.pdf"),
+                right: PathBuf::from("/refdesk-test/new.pdf"),
+            },
+        );
+        if let refdesk_core::LayoutNode::Tabs { tabs, .. } = &mut session.windows[0].layout {
+            tabs.push("t1".into());
+        }
+        session.save(&paths.session_file()).expect("save session");
+        let ctx = egui::Context::default();
+        let mut state = new_state();
+        let _saver = start(
+            &mut state,
+            Startup::load(paths, Config::default(), true),
+            &ctx,
+        );
+        let restored: Vec<_> = state
+            .tabs
+            .iter()
+            .filter_map(|(_, tab)| match tab {
+                Tab::Diff(d) => Some((d.options.margins, d.margins.shown())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored, vec![(margins, margins)]);
     }
 
     // --- start-up ----------------------------------------------------------------------------

@@ -15,13 +15,14 @@ use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Color32, Pos2, Rect, RichText, ScrollArea, Sense, Ui, pos2, vec2};
+use refdesk_core::diff::{MarginSide, Margins};
 use refdesk_core::{Change, ChangeKind, DiffResult, Location, Outline, Side, Size};
 
 use crate::action::Action;
 use crate::i18n::tr;
 use crate::panels::toc::scroll_target;
 use crate::state::TabId;
-use crate::views::diff_view::counts_text;
+use crate::views::diff_view::{counts_text, margin_side_key};
 
 /// The width of a panel that has not been resized.
 pub const DEFAULT_PANEL_WIDTH: f32 = 300.0;
@@ -709,6 +710,34 @@ impl ChangesState {
 // Drawing
 // ------------------------------------------------------------------------------------------------
 
+/// A fraction of a page as a percentage with at most one decimal: `0.06` is "6%", `0.065` is
+/// "6.5%".
+pub fn percent_text(ratio: f32) -> String {
+    let tenths = (ratio * 1000.0).round() as i32;
+    if tenths % 10 == 0 {
+        format!("{}%", tenths / 10)
+    } else {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    }
+}
+
+/// The line of the summary that says which page margins were left out: "Margins excluded: Top
+/// 6%, Bottom 5%". Sides that are 0 are not named; `None` when no margin is set.
+pub fn margins_summary(margins: &Margins) -> Option<String> {
+    let parts: Vec<String> = MarginSide::ALL
+        .into_iter()
+        .filter(|side| margins.get(*side) > 0.0)
+        .map(|side| {
+            format!(
+                "{} {}",
+                tr(margin_side_key(side)),
+                percent_text(margins.get(side))
+            )
+        })
+        .collect();
+    (!parts.is_empty()).then(|| tr("diff.margin_summary").replace("{}", &parts.join(", ")))
+}
+
 /// What the panel shows for a comparison tab.
 pub enum PanelContent<'a> {
     /// The comparison is running; the progress from 0.0 to 1.0.
@@ -725,6 +754,8 @@ pub enum PanelContent<'a> {
         right: &'a Outline,
         /// A document changed since: the list is dimmed and cannot be used to move.
         stale: bool,
+        /// The page margins left out of the comparison.
+        margins: Margins,
     },
 }
 
@@ -748,7 +779,7 @@ pub fn show(
 ) {
     ui.label(RichText::new(tr("changes.title")).strong());
     ui.separator();
-    let (result, left, right, stale) = match content {
+    let (result, left, right, stale, margins) = match content {
         PanelContent::Running(progress) => {
             ui.add(egui::ProgressBar::new(progress).show_percentage());
             hint(ui, tr("diff.running"));
@@ -763,13 +794,17 @@ pub fn show(
             left,
             right,
             stale,
-        } => (result, left, right, stale),
+            margins,
+        } => (result, left, right, stale, margins),
     };
     if stale {
         ui.set_opacity(0.45);
     }
     state.prepare(result, left, right);
     ui.label(counts_text(result));
+    if let Some(text) = margins_summary(&margins) {
+        ui.label(text);
+    }
     show_filter(ui, state);
     if result.changes.is_empty() {
         ui.add_space(4.0);
@@ -1333,6 +1368,53 @@ mod tests {
         assert!(!state.filter().added && !state.filter().modified && state.filter().removed);
         assert_eq!(counts_text(&result), before);
         assert!(before.contains('3') && before.contains('2') && before.contains('1'));
+    }
+
+    #[test]
+    fn percentages_have_at_most_one_decimal() {
+        assert_eq!(percent_text(0.06), "6%");
+        assert_eq!(percent_text(0.065), "6.5%");
+        assert_eq!(percent_text(0.005), "0.5%");
+        assert_eq!(percent_text(0.4), "40%");
+        assert_eq!(percent_text(0.125), "12.5%");
+        assert_eq!(percent_text(0.0), "0%");
+    }
+
+    #[test]
+    fn the_summary_names_only_the_margins_that_are_set() {
+        assert_eq!(margins_summary(&Margins::default()), None);
+        let margins = Margins {
+            top: 0.06,
+            bottom: 0.05,
+            ..Margins::default()
+        };
+        let list = format!(
+            "{} 6%, {} 5%",
+            tr("diff.margin_top"),
+            tr("diff.margin_bottom")
+        );
+        assert_eq!(
+            margins_summary(&margins),
+            Some(tr("diff.margin_summary").replace("{}", &list))
+        );
+        // Every side, in the order top, bottom, left, right.
+        let all = Margins {
+            top: 0.01,
+            bottom: 0.02,
+            left: 0.035,
+            right: 0.4,
+        };
+        let text = margins_summary(&all).expect("summary");
+        let at = |key: &str| text.find(tr(key)).expect(key);
+        assert!(at("diff.margin_top") < at("diff.margin_bottom"));
+        assert!(at("diff.margin_bottom") < at("diff.margin_left"));
+        assert!(at("diff.margin_left") < at("diff.margin_right"));
+        assert!(text.contains("3.5%") && text.contains("40%"), "{text}");
+        // Both languages have the line, and it takes the list.
+        for lang in [crate::i18n::Lang::Ko, crate::i18n::Lang::En] {
+            let line = crate::i18n::lookup(lang, "diff.margin_summary").expect("text");
+            assert!(line.contains("{}"));
+        }
     }
 
     #[test]

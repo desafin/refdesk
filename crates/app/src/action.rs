@@ -177,6 +177,9 @@ pub enum Action {
         /// The newer document.
         right: PathBuf,
     },
+    /// Show or hide the thin lines at the edges of the excluded margins of a comparison tab
+    /// while its options are closed (DIFF-11).
+    ToggleDiffMarginGuides(TabId),
     /// Open the dialog for choosing two documents to compare.
     ShowDiffDialog,
     /// Compare the documents of a comparison tab again (after a cancel, an error or a change).
@@ -468,6 +471,12 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             let tab = insert_diff_tab(state, &left, &right, ctx);
             place_new_tab(state, tab, None);
         }
+        Action::ToggleDiffMarginGuides(tab) => {
+            if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
+                diff.margin_guides = !diff.margin_guides;
+            }
+            ctx.request_repaint();
+        }
         Action::ShowDiffDialog => {
             let path = |id: DocId| state.docs.get(id).map(|d| d.path().to_path_buf());
             let dialog = match state.focus.and_then(|t| state.tabs.get(t)) {
@@ -490,6 +499,8 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::SetDiffOptions { tab, options } => {
             if let Some(Tab::Diff(diff)) = state.tabs.get_mut(tab) {
                 diff.set_options(options, &state.docs, notifier(ctx));
+                let margins = diff.options.margins;
+                diff_view::remember_margins(state, margins);
             }
         }
         Action::SwapDiffSides(tab) => {
@@ -919,6 +930,7 @@ pub fn insert_diff_tab(
         diff_view::side_tab(left_doc, normalize_path(left)),
         diff_view::side_tab(right_doc, normalize_path(right)),
     );
+    diff.start_with_margins(state.prefs.diff_margins);
     diff.start(&state.docs, notifier(ctx));
     state.tabs.insert(Tab::Diff(Box::new(diff)))
 }

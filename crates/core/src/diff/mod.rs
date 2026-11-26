@@ -5,7 +5,8 @@
 //! into that flow:
 //!
 //! 1. [`extract`] takes the text of every page ([`PageSource`]),
-//! 2. drops repeated header and footer lines ([`noise`]),
+//! 2. drops the words in excluded page margins ([`margins`]) and then repeated header and footer
+//!    lines ([`noise`]),
 //! 3. and produces normalised words and paragraphs ([`DocTokens`]) that still point at the
 //!    original characters, so a result can be drawn back onto the pages.
 //!
@@ -22,6 +23,7 @@
 mod align;
 pub mod extract;
 mod job;
+pub mod margins;
 pub mod noise;
 mod refine;
 mod result;
@@ -30,6 +32,7 @@ pub use extract::{
     DocTokens, ExtractOptions, PageSource, Paragraph, RemovedLine, Word, extract, normalize_key,
 };
 pub use job::DiffJob;
+pub use margins::{MARGIN_STEP, MARGIN_STEPS, MAX_MARGIN, MarginSide, Margins};
 pub use result::{
     Change, ChangeKind, DiffInput, DiffLimits, DiffOptions, DiffResult, Mark, MarkKind, Side, Span,
     diff_tokens,
@@ -54,13 +57,18 @@ pub(crate) mod test_pages {
 
     /// Appends one block with `lines`, the top of the first line at `top`.
     pub fn add_block(pt: &mut PageText, top: f32, lines: &[&str]) {
+        add_block_at(pt, 72.0, top, lines);
+    }
+
+    /// [`add_block`] with the left end of the lines at `left`.
+    pub fn add_block_at(pt: &mut PageText, left: f32, top: f32, lines: &[&str]) {
         let first_line = pt.lines.len() as u32;
         let mut bounds: Option<Rect> = None;
         for (i, text) in lines.iter().enumerate() {
             let y = top + i as f32 * PITCH;
             let first = pt.chars.len() as u32;
             for (k, ch) in text.chars().enumerate() {
-                let x = 72.0 + k as f32 * CW;
+                let x = left + k as f32 * CW;
                 pt.chars.push(TextChar {
                     ch,
                     quad: Quad {
@@ -73,7 +81,7 @@ pub(crate) mod test_pages {
                 });
             }
             let width = text.chars().count() as f32 * CW;
-            let line_bounds = Rect::new(72.0, y, 72.0 + width, y + BOX_H);
+            let line_bounds = Rect::new(left, y, left + width, y + BOX_H);
             bounds = Some(bounds.map_or(line_bounds, |b| b.union(&line_bounds)));
             pt.lines.push(TextLine {
                 chars: first..pt.chars.len() as u32,

@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
+use refdesk_core::diff::{MAX_MARGIN, MarginSide, Margins};
 use refdesk_core::{
     DiffJob, DiffOptions, DiffResult, DocStatus, DocumentHandle, DocumentInfo, Location, Mark,
     MarkKind, Notifier, Outline, PageLayout, Point, Rect, SessionTab, Side, Size, ViewState,
@@ -34,7 +35,7 @@ use crate::action::Action;
 use crate::commands;
 use crate::i18n::tr;
 use crate::panels::changes::{self, ChangesState, Overview, PanelContent, STRIP_WIDTH};
-use crate::state::{DocId, DocStore, PdfTab, TabId};
+use crate::state::{AppState, DocId, DocStore, PdfTab, TabId};
 use crate::views::pdf_view::{self, PdfViewUiState, ViewContext, anchor_at};
 
 /// The reference line of synchronized scrolling, as a fraction of the viewport height from its
@@ -106,6 +107,11 @@ pub struct DiffTab {
     pub notice: Option<&'static str>,
     /// The change list on the right of the tab (DIFF-5) and what the position strips draw from.
     pub changes: ChangesState,
+    /// The excluded margins as the controls show them, which may be ahead of
+    /// `options.margins` while one is being dragged (DIFF-11).
+    pub margins: MarginEdit,
+    /// Keep a thin line at the edge of the excluded margins while the options are closed.
+    pub margin_guides: bool,
     /// The reference locations ([`SYNC_LINE`]) of both sides as of the last frame, to see which
     /// side moved. `None` until both views are laid out.
     last_ref: Option<(Location, Location)>,
@@ -165,6 +171,8 @@ impl DiffTab {
             active: Side::Left,
             notice: None,
             changes: ChangesState::default(),
+            margins: MarginEdit::new(Margins::default()),
+            margin_guides: true,
             last_ref: None,
             nav_anchor: None,
         }
@@ -259,10 +267,27 @@ impl DiffTab {
 
     /// Changes the options and compares again when they differ from the current ones.
     pub fn set_options(&mut self, options: DiffOptions, docs: &DocStore, notifier: Notifier) {
+        let mut options = options;
+        options.margins = options.margins.clamped();
         if options != self.options {
             self.options = options;
+            self.margins.follow(options.margins);
             self.start(docs, notifier);
         }
+    }
+
+    /// Makes `margins` the excluded margins before the first comparison (a new tab starts with
+    /// the ones used last). They are limited to the allowed range.
+    pub fn start_with_margins(&mut self, margins: Margins) {
+        let margins = margins.snapped();
+        self.options.margins = margins;
+        self.margins = MarginEdit::new(margins);
+    }
+
+    /// The excluded margins to compare with now, if the controls moved on from the ones in use:
+    /// see [`MarginEdit::due`]. `now` is the time of the frame in seconds.
+    pub fn margins_due(&self, now: f64) -> Option<Margins> {
+        self.margins.due(self.options.margins, now)
     }
 
     /// Exchanges the two sides (older becomes newer) and compares again.
@@ -690,6 +715,177 @@ pub fn status_text(tab: &DiffTab, docs: &DocStore) -> String {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Excluded margins (DIFF-11)
+// ------------------------------------------------------------------------------------------------
+
+/// How long a value dragged in the margin controls must stay as it is before the comparison runs
+/// without waiting for the button to be let go (seconds).
+pub const MARGIN_SETTLE: f64 = 0.4;
+
+/// The excluded margins as the controls show them. While one is dragged the comparison is not
+/// run again: the bands that would be left out are painted on the pages instead, and the
+/// comparison runs when the drag ends or the value has stayed put for [`MARGIN_SETTLE`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarginEdit {
+    shown: Margins,
+    /// When `shown` last changed (seconds).
+    changed_at: f64,
+    /// A control is being dragged right now (set by the drawing each frame).
+    pub dragging: bool,
+    /// The options menu with the controls is open (set by the drawing each frame).
+    pub open: bool,
+}
+
+impl MarginEdit {
+    /// Controls showing `margins`, which are the ones in use.
+    pub fn new(margins: Margins) -> MarginEdit {
+        MarginEdit {
+            shown: margins,
+            changed_at: 0.0,
+            dragging: false,
+            open: false,
+        }
+    }
+
+    /// The margins the controls show.
+    pub fn shown(&self) -> Margins {
+        self.shown
+    }
+
+    /// Sets one side to `ratio` (a fraction of the page, snapped to the control step and
+    /// limited to the allowed range). Returns whether the value changed.
+    pub fn set(&mut self, side: MarginSide, ratio: f32, now: f64) -> bool {
+        let mut next = self.shown;
+        next.set(side, ratio);
+        self.replace(next.snapped(), now)
+    }
+
+    /// Sets every side to 0. Returns whether anything changed.
+    pub fn reset(&mut self, now: f64) -> bool {
+        self.replace(Margins::default(), now)
+    }
+
+    fn replace(&mut self, next: Margins, now: f64) -> bool {
+        if next == self.shown {
+            return false;
+        }
+        self.shown = next;
+        self.changed_at = now;
+        true
+    }
+
+    /// The options changed from outside: show the margins now in use.
+    pub fn follow(&mut self, applied: Margins) {
+        self.shown = applied;
+    }
+
+    /// Whether the controls are ahead of the margins `applied` by the comparison.
+    pub fn is_pending(&self, applied: Margins) -> bool {
+        self.shown != applied
+    }
+
+    /// The margins to compare with now: `None` while they are the ones in use (the same values
+    /// never compare again) or while a drag is going on and the value moved less than
+    /// [`MARGIN_SETTLE`] ago.
+    pub fn due(&self, applied: Margins, now: f64) -> Option<Margins> {
+        if !self.is_pending(applied) {
+            return None;
+        }
+        (!self.dragging || now - self.changed_at >= MARGIN_SETTLE).then_some(self.shown)
+    }
+
+    /// Seconds until a drag that stands still makes [`MarginEdit::due`] answer, when one is
+    /// waiting for that.
+    pub fn wait(&self, applied: Margins, now: f64) -> Option<f64> {
+        (self.is_pending(applied) && self.dragging)
+            .then(|| (self.changed_at + MARGIN_SETTLE - now).max(0.0))
+    }
+}
+
+/// What is painted of the excluded margins on the pages.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MarginPaint {
+    /// The margins to show.
+    pub margins: Margins,
+    /// Paint the bands pale as well as their edges: the margins are being set.
+    pub fill: bool,
+}
+
+/// What to paint for a tab: while the controls are ahead of the comparison or the options menu is
+/// open, the bands and their edges; otherwise only a thin line at their edges when the guides
+/// are on. Nothing when no margin is set.
+pub fn margin_paint(edit: &MarginEdit, applied: Margins, guides: bool) -> Option<MarginPaint> {
+    let margins = edit.shown();
+    if margins.is_zero() {
+        return None;
+    }
+    let fill = edit.is_pending(applied) || edit.open;
+    (fill || guides).then_some(MarginPaint { margins, fill })
+}
+
+/// A band of an excluded margin placed on the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenBand {
+    /// Which edge of the page.
+    pub side: MarginSide,
+    /// Relative to the top-left corner of the view, in logical pixels.
+    pub rect: Rect,
+}
+
+/// The bands of `margins` on the visible pages of a view, relative to its top-left corner. The
+/// fractions apply to each page's own size, so pages of different sizes get proportional bands.
+pub fn margin_bands(
+    layout: &PageLayout,
+    scroll: Point,
+    viewport: Size,
+    margins: &Margins,
+) -> Vec<ScreenBand> {
+    let mut out = Vec::new();
+    for page in layout.visible_pages(scroll, viewport) {
+        let page_rect = layout.page_rect(page);
+        let (ox, oy) = (page_rect.x0 - scroll.x, page_rect.y0 - scroll.y);
+        let size = Size::new(page_rect.width(), page_rect.height());
+        for (side, r) in margins.bands(size) {
+            out.push(ScreenBand {
+                side,
+                rect: Rect::new(ox + r.x0, oy + r.y0, ox + r.x1, oy + r.y1),
+            });
+        }
+    }
+    out
+}
+
+/// The edge of a band that faces the text: the line that is kept when the controls are closed.
+pub fn band_edge(side: MarginSide, rect: Rect) -> (Point, Point) {
+    match side {
+        MarginSide::Top => (Point::new(rect.x0, rect.y1), Point::new(rect.x1, rect.y1)),
+        MarginSide::Bottom => (Point::new(rect.x0, rect.y0), Point::new(rect.x1, rect.y0)),
+        MarginSide::Left => (Point::new(rect.x1, rect.y0), Point::new(rect.x1, rect.y1)),
+        MarginSide::Right => (Point::new(rect.x0, rect.y0), Point::new(rect.x0, rect.y1)),
+    }
+}
+
+/// The translucent fill of an excluded band: a pale gray-blue over white pages.
+pub const MARGIN_FILL: [u8; 4] = [90, 110, 150, 45];
+
+/// The line along the inner edge of an excluded band.
+pub const MARGIN_LINE: [u8; 4] = [70, 100, 190, 190];
+
+/// Keeps `margins` as the ones new comparisons start with (`prefs.json`). A failed save is only
+/// logged: the margins still apply until the app ends.
+pub fn remember_margins(state: &mut AppState, margins: Margins) {
+    if state.prefs.diff_margins == margins {
+        return;
+    }
+    state.prefs.diff_margins = margins;
+    if let Some(paths) = &state.paths
+        && let Err(err) = state.prefs.save(&paths.prefs_file())
+    {
+        log::warn!("could not save {}: {err}", paths.prefs_file().display());
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 // Drawing
 // ------------------------------------------------------------------------------------------------
 
@@ -740,6 +936,7 @@ pub fn show(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, cx: ViewContext<'_>
     let overlay = Overlay {
         marks: result.as_deref().map(|r| (r, tab.current)),
         overview: overview.as_deref(),
+        margins: margin_paint(&tab.margins, tab.options.margins, tab.margin_guides),
     };
 
     // The driver takes its input first; the follower is then placed and drawn in the same frame.
@@ -842,6 +1039,7 @@ fn show_changes_panel(
             left: outline_of(&left),
             right: outline_of(&right),
             stale: false,
+            margins: tab.options.margins,
         },
         Phase::Stale => match &stale {
             Some(result) => PanelContent::Result {
@@ -849,6 +1047,7 @@ fn show_changes_panel(
                 left: outline_of(&left),
                 right: outline_of(&right),
                 stale: true,
+                margins: tab.options.margins,
             },
             None => PanelContent::Unavailable,
         },
@@ -870,6 +1069,7 @@ fn show_changes_panel(
 struct Overlay<'a> {
     marks: Option<(&'a DiffResult, Option<usize>)>,
     overview: Option<&'a Overview>,
+    margins: Option<MarginPaint>,
 }
 
 /// Draws one side: the PDF view, then the marks over it, then the position strip beside its
@@ -883,7 +1083,11 @@ fn draw_side(
     cx: ViewContext<'_>,
     overlay: Overlay<'_>,
 ) {
-    let Overlay { marks, overview } = overlay;
+    let Overlay {
+        marks,
+        overview,
+        margins,
+    } = overlay;
     let salt = match side {
         Side::Left => "diff-left",
         Side::Right => "diff-right",
@@ -904,9 +1108,6 @@ fn draw_side(
     };
     pdf_view::show(&mut child, pdf, doc, cx);
 
-    let Some((result, current)) = marks else {
-        return;
-    };
     if !matches!(doc.status(), DocStatus::Ready) {
         return;
     }
@@ -916,6 +1117,19 @@ fn draw_side(
     let viewport = pdf.ui.viewport();
     let view_rect = egui::Rect::from_min_size(rect.min, vec2(viewport.w, viewport.h));
     let painter = child.painter_at(view_rect);
+    if let Some(paint) = margins {
+        paint_margins(
+            &painter,
+            view_rect.min,
+            layout,
+            pdf.ui.scroll(),
+            viewport,
+            paint,
+        );
+    }
+    let Some((result, current)) = marks else {
+        return;
+    };
     let outline = Stroke::new(2.0, color(CURRENT_OUTLINE));
     for mark in mark_rects(layout, pdf.ui.scroll(), viewport, |p| result.marks(side, p)) {
         let r = to_screen(mark.rect, view_rect.min);
@@ -940,6 +1154,26 @@ fn draw_side(
         );
         let id = ui.scope_id().with(("diff-strip", tab_id, salt));
         draw_strip(ui, id, strip, side, overview, pdf);
+    }
+}
+
+/// Paints the excluded margins over the visible pages of a view: the pale bands while they are
+/// being set, and a thin line along the inner edge of each band.
+fn paint_margins(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    layout: &PageLayout,
+    scroll: Point,
+    viewport: Size,
+    paint: MarginPaint,
+) {
+    let line = Stroke::new(1.0, color(MARGIN_LINE));
+    for band in margin_bands(layout, scroll, viewport, &paint.margins) {
+        if paint.fill {
+            painter.rect_filled(to_screen(band.rect, origin), 0.0, color(MARGIN_FILL));
+        }
+        let (a, b) = band_edge(band.side, band.rect);
+        painter.line_segment([origin + vec2(a.x, a.y), origin + vec2(b.x, b.y)], line);
     }
 }
 
@@ -985,6 +1219,52 @@ fn nav_button(ui: &mut Ui, enabled: bool, symbol: &str, command_id: &str) -> boo
         .on_hover_text(hint.clone())
         .on_disabled_hover_text(hint)
         .clicked()
+}
+
+/// The "excluded margins" section of the options menu: one control per page edge, in percent of
+/// the page height (top, bottom) or width (left, right), and a button that clears them all.
+fn margin_controls(ui: &mut Ui, edit: &mut MarginEdit, now: f64) {
+    ui.separator();
+    ui.strong(tr("diff.margins"));
+    ui.weak(tr("diff.margins_hint"));
+    for side in MarginSide::ALL {
+        let mut percent = edit.shown().get(side) * 100.0;
+        let response = ui.add(
+            egui::DragValue::new(&mut percent)
+                .range(0.0..=(MAX_MARGIN * 100.0))
+                .speed(0.25)
+                .max_decimals(1)
+                .prefix(format!("{} ", tr(margin_side_key(side))))
+                .suffix("%"),
+        );
+        // The accessible name is the edge alone; its value reads "Top 6.0%".
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_label(tr(margin_side_key(side)));
+        });
+        if response.dragged() {
+            edit.dragging = true;
+        }
+        if response.changed() {
+            edit.set(side, percent / 100.0, now);
+        }
+    }
+    let any = !edit.shown().is_zero();
+    if ui
+        .add_enabled(any, egui::Button::new(tr("diff.margin_reset")))
+        .clicked()
+    {
+        edit.reset(now);
+    }
+}
+
+/// The i18n key of the name of a page edge.
+pub fn margin_side_key(side: MarginSide) -> &'static str {
+    match side {
+        MarginSide::Top => "diff.margin_top",
+        MarginSide::Bottom => "diff.margin_bottom",
+        MarginSide::Left => "diff.margin_left",
+        MarginSide::Right => "diff.margin_right",
+    }
 }
 
 /// The band above the views: names, counts, navigation, switches, and a line about the state of
@@ -1046,7 +1326,9 @@ fn band(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, tab_id: TabId, queue: &
         {
             queue.push(Action::ToggleChangesPanel(tab_id));
         }
-        ui.menu_button(tr("diff.options"), |ui| {
+        let now = ui.input(|i| i.time);
+        tab.margins.dragging = false;
+        let menu = ui.menu_button(tr("diff.options"), |ui| {
             let mut options = tab.options;
             let a = ui
                 .checkbox(
@@ -1063,7 +1345,21 @@ fn band(ui: &mut Ui, tab: &mut DiffTab, docs: &DocStore, tab_id: TabId, queue: &
                     options,
                 });
             }
+            margin_controls(ui, &mut tab.margins, now);
         });
+        tab.margins.open = menu.inner.is_some();
+        if let Some(margins) = tab.margins_due(now) {
+            queue.push(Action::SetDiffOptions {
+                tab: tab_id,
+                options: DiffOptions {
+                    margins,
+                    ..tab.options
+                },
+            });
+        } else if let Some(wait) = tab.margins.wait(tab.options.margins, now) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
         if ui.button(tr("diff.swap")).clicked() {
             queue.push(Action::SwapDiffSides(tab_id));
         }
@@ -2648,5 +2944,484 @@ mod tests {
             toggle.run(&fx.state),
             Some(Action::ToggleChangesPanel(fx.tab))
         );
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // Excluded margins (DIFF-11)
+    // --------------------------------------------------------------------------------------------
+
+    fn top(v: f32) -> Margins {
+        Margins {
+            top: v,
+            ..Margins::default()
+        }
+    }
+
+    #[test]
+    fn dragging_a_margin_does_not_compare_until_it_is_let_go_or_stands_still() {
+        let applied = Margins::default();
+        let mut edit = MarginEdit::new(applied);
+        assert_eq!(edit.due(applied, 1.0), None, "nothing changed");
+        edit.dragging = true;
+        assert!(edit.set(MarginSide::Top, 0.06, 1.0));
+        assert!(edit.is_pending(applied));
+        // Each change of the value starts the wait again.
+        assert_eq!(edit.due(applied, 1.0), None);
+        assert!(edit.set(MarginSide::Top, 0.065, 1.2));
+        assert_eq!(edit.due(applied, 1.5), None, "0.3 s after the last change");
+        assert!(
+            edit.wait(applied, 1.5)
+                .is_some_and(|w| (w - 0.1).abs() < 1e-9)
+        );
+        assert_eq!(edit.due(applied, 1.6), Some(top(0.065)));
+        // Let go before that: at once.
+        edit.set(MarginSide::Top, 0.07, 2.0);
+        assert_eq!(edit.due(applied, 2.0), None);
+        edit.dragging = false;
+        assert_eq!(edit.due(applied, 2.0), Some(top(0.07)));
+        assert_eq!(edit.wait(applied, 2.0), None, "nothing to wait for");
+    }
+
+    #[test]
+    fn the_same_margins_never_compare_again() {
+        let applied = top(0.06);
+        let mut edit = MarginEdit::new(applied);
+        edit.dragging = true;
+        assert!(!edit.set(MarginSide::Top, 0.06, 1.0), "no change");
+        assert!(!edit.set(MarginSide::Top, 0.0612, 1.0), "snaps to the same");
+        assert_eq!(edit.due(applied, 9.0), None);
+        // Away and back to the margins in use before the comparison started again.
+        assert!(edit.set(MarginSide::Top, 0.1, 2.0));
+        assert!(edit.set(MarginSide::Top, 0.06, 2.1));
+        edit.dragging = false;
+        assert_eq!(edit.due(applied, 3.0), None);
+        // Following the options in use (changed from outside) drops what was pending.
+        edit.set(MarginSide::Left, 0.2, 4.0);
+        edit.follow(applied);
+        assert!(!edit.is_pending(applied));
+        // "Reset all" goes to zero in one step, once.
+        assert!(edit.reset(5.0));
+        assert!(!edit.reset(5.1));
+        assert_eq!(edit.due(applied, 5.1), Some(Margins::default()));
+    }
+
+    #[test]
+    fn values_of_the_controls_are_snapped_and_limited() {
+        let mut edit = MarginEdit::new(Margins::default());
+        edit.set(MarginSide::Bottom, 0.0537, 0.0);
+        assert!((edit.shown().bottom - 0.055).abs() < 1e-6);
+        edit.set(MarginSide::Left, 0.9, 0.0);
+        assert_eq!(edit.shown().left, MAX_MARGIN);
+        edit.set(MarginSide::Right, -0.2, 0.0);
+        assert_eq!(edit.shown().right, 0.0);
+        edit.set(MarginSide::Right, f32::NAN, 0.0);
+        assert_eq!(edit.shown().right, 0.0);
+    }
+
+    #[test]
+    fn the_pages_show_bands_while_setting_and_lines_afterwards() {
+        let none = Margins::default();
+        let m = top(0.1);
+        let settled = MarginEdit::new(m);
+        // In use, options closed: only lines, and only with the guides on.
+        assert_eq!(
+            margin_paint(&settled, m, true),
+            Some(MarginPaint {
+                margins: m,
+                fill: false
+            })
+        );
+        assert_eq!(margin_paint(&settled, m, false), None);
+        // Nothing set: nothing to draw.
+        assert_eq!(margin_paint(&MarginEdit::new(none), none, true), None);
+        // The controls are ahead of the comparison: bands, guides or not.
+        let mut dragged = MarginEdit::new(none);
+        dragged.set(MarginSide::Top, 0.1, 0.0);
+        let paint = margin_paint(&dragged, none, false).expect("painted");
+        assert!(paint.fill && paint.margins == m);
+        // The options are open: bands too.
+        let mut open = MarginEdit::new(m);
+        open.open = true;
+        assert!(margin_paint(&open, m, false).is_some_and(|p| p.fill));
+        // Dragged down to nothing: nothing.
+        let mut cleared = MarginEdit::new(m);
+        cleared.reset(0.0);
+        assert_eq!(margin_paint(&cleared, m, true), None);
+    }
+
+    #[test]
+    fn bands_follow_each_pages_size_zoom_and_scroll() {
+        let sizes = vec![Size::new(600.0, 800.0), Size::new(300.0, 400.0)];
+        let viewport = Size::new(700.0, 1500.0);
+        let margins = Margins {
+            top: 0.1,
+            bottom: 0.05,
+            left: 0.2,
+            right: 0.0,
+        };
+        for zoom in [0.5, 1.0, 2.0] {
+            let l = layout(&sizes, zoom, viewport);
+            let scroll = Point::new(0.0, 0.0);
+            let bands = margin_bands(&l, scroll, viewport, &margins);
+            let visible = l.visible_pages(scroll, viewport);
+            // Three bands per visible page; the right margin is 0.
+            assert_eq!(bands.len(), 3 * visible.len() as usize);
+            for (i, page) in visible.enumerate() {
+                let pr = l.page_rect(page);
+                let (w, h) = (pr.width(), pr.height());
+                let of = |side| {
+                    bands[3 * i..3 * i + 3]
+                        .iter()
+                        .find(|b| b.side == side)
+                        .unwrap()
+                        .rect
+                };
+                let top_band = of(MarginSide::Top);
+                assert!(close(top_band.x0, pr.x0) && close(top_band.x1, pr.x1));
+                assert!(close(top_band.y0, pr.y0) && close(top_band.y1, pr.y0 + 0.1 * h));
+                let bottom_band = of(MarginSide::Bottom);
+                assert!(close(bottom_band.y0, pr.y1 - 0.05 * h) && close(bottom_band.y1, pr.y1));
+                let left_band = of(MarginSide::Left);
+                assert!(close(left_band.x0, pr.x0) && close(left_band.x1, pr.x0 + 0.2 * w));
+                assert!(close(left_band.y0, top_band.y1) && close(left_band.y1, bottom_band.y0));
+            }
+        }
+        // Scrolled down: the same bands, shifted up by the scroll.
+        let l = layout(&sizes, 1.0, viewport);
+        let at_top = margin_bands(&l, Point::new(0.0, 0.0), viewport, &margins);
+        let scrolled = margin_bands(&l, Point::new(0.0, 100.0), viewport, &margins);
+        assert!(close(scrolled[0].rect.y0, at_top[0].rect.y0 - 100.0));
+        // No margins: no bands. Pages outside the viewport: none either.
+        assert!(margin_bands(&l, Point::new(0.0, 0.0), viewport, &Margins::default()).is_empty());
+        let small = Size::new(700.0, 100.0);
+        let first_only = margin_bands(&l, Point::new(0.0, 0.0), small, &margins);
+        assert_eq!(first_only.len(), 3);
+    }
+
+    #[test]
+    fn the_line_of_a_band_is_the_edge_facing_the_text() {
+        let r = Rect::new(10.0, 20.0, 110.0, 70.0);
+        let edge = |s| band_edge(s, r);
+        assert_eq!(
+            edge(MarginSide::Top),
+            (Point::new(10.0, 70.0), Point::new(110.0, 70.0))
+        );
+        assert_eq!(
+            edge(MarginSide::Bottom),
+            (Point::new(10.0, 20.0), Point::new(110.0, 20.0))
+        );
+        assert_eq!(
+            edge(MarginSide::Left),
+            (Point::new(110.0, 20.0), Point::new(110.0, 70.0))
+        );
+        assert_eq!(
+            edge(MarginSide::Right),
+            (Point::new(10.0, 20.0), Point::new(10.0, 70.0))
+        );
+    }
+
+    /// A document of `pages` pages, each with a header that differs from page to page (it starts
+    /// with `header`) and the same body, with `body_word` in the body of the second page.
+    fn margin_doc(header: &str, body_word: &str, stem: &str) -> TempPdf {
+        let words = ["red", "green", "blue", "gold"];
+        let mut pdf = refdesk_core::testutil::PdfBuilder::new();
+        for (n, word) in words.iter().enumerate() {
+            pdf = pdf.page(612.0, 792.0, |p| {
+                p.text(72.0, 40.0, 10.0, &format!("{header} chapter {word} title"));
+                let mid = if n == 1 { body_word } else { "steady" };
+                p.text(
+                    72.0,
+                    300.0,
+                    10.0,
+                    &format!("The {mid} body text of page {n} stays here."),
+                );
+                p.text(
+                    72.0,
+                    400.0,
+                    10.0,
+                    &format!("A second paragraph of page {n} follows below."),
+                );
+            });
+        }
+        pdf.write_temp(stem)
+    }
+
+    fn compare_margin_docs() -> Fixture {
+        let lf = margin_doc("Alpha", "quick", "wp64-left");
+        let rf = margin_doc("Beta", "lazy", "wp64-right");
+        let (l, r) = (lf.path().to_path_buf(), rf.path().to_path_buf());
+        start(&l, &r, vec![lf, rf])
+    }
+
+    /// The text of every node of the accessibility tree of one frame.
+    fn tree_texts(fx: &mut Fixture) -> Vec<String> {
+        fx.ctx.enable_accesskit();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(1200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let state = &mut fx.state;
+        let mut queue = Vec::new();
+        let output = fx.ctx.run_ui(input, |ui| {
+            crate::windows::show_window(ui, state, 0, &mut queue)
+        });
+        let update = output.platform_output.accesskit_update.clone();
+        output.drop_without_applying_deltas();
+        update
+            .map(|u| u.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(_, n)| [n.label().map(str::to_owned), n.value().map(str::to_owned)])
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn changing_the_margins_compares_again_with_fewer_changes_and_says_so() {
+        let mut fx = compare_margin_docs();
+        let before = fx.result().changes.len();
+        assert!(before >= 5, "four headers and a body change: {before}");
+        let tab = fx.tab;
+        let options = DiffOptions {
+            margins: top(0.1),
+            ..fx.diff().options
+        };
+        fx.dispatch(Action::SetDiffOptions { tab, options });
+        assert!(fx.diff().job.is_some(), "compares again");
+        assert_eq!(fx.diff().margins.shown(), top(0.1), "the controls follow");
+        let after = fx.result();
+        assert_eq!(after.changes.len(), 1, "{:?}", after.changes);
+        assert_eq!(after.changes[0].kind, ChangeKind::Modified);
+        // The same margins again do not start another comparison.
+        fx.dispatch(Action::SetDiffOptions { tab, options });
+        assert!(fx.diff().job.is_none());
+
+        // The summary of the change list names the margins; the panel is open.
+        for _ in 0..2 {
+            fx.frame();
+        }
+        let want = changes::margins_summary(&top(0.1)).expect("summary");
+        assert!(want.contains("10%"), "{want}");
+        let texts = tree_texts(&mut fx);
+        assert!(texts.contains(&want), "{want} not in {texts:?}");
+
+        // Navigation still works on the shorter list.
+        fx.dispatch(Action::NextChange(tab));
+        assert_eq!(fx.diff().current, Some(0));
+    }
+
+    #[test]
+    fn a_frame_after_dragging_asks_to_compare_with_the_dragged_margins() {
+        let mut fx = compare_margin_docs();
+        fx.result();
+        for _ in 0..2 {
+            assert!(fx.frame().is_empty(), "nothing yet");
+        }
+        // While a drag is on (the control sets this each frame) nothing is asked for, but the
+        // pages are drawn with the bands.
+        fx.diff_mut().margins.set(MarginSide::Top, 0.1, 100.0);
+        assert!(fx.diff().margins.is_pending(fx.diff().options.margins));
+        let queue = fx.frame();
+        // The drawing resets "dragging" because no control is being dragged: let go.
+        let asked = queue.iter().find_map(|a| match a {
+            Action::SetDiffOptions { options, .. } => Some(options.margins),
+            _ => None,
+        });
+        assert_eq!(asked, Some(top(0.1)));
+        // Applying it makes the frames quiet again.
+        for a in queue {
+            fx.dispatch(a);
+        }
+        fx.result();
+        for _ in 0..3 {
+            assert!(fx.frame().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_guides_command_belongs_to_comparison_tabs_and_toggles_the_lines() {
+        let command = commands::command("diff.toggle_margin_guides").expect("command");
+        assert_eq!(command.menu, commands::MenuGroup::View);
+        assert!(command.shortcut.is_none());
+        assert!(commands::in_menu(commands::MenuGroup::View).any(|c| c.id == command.id));
+        let ctx = egui::Context::default();
+        let state = AppState::new();
+        assert!(!(command.enabled)(&state));
+        assert_eq!(command.run(&state), None);
+        let mut fx = compare_margin_docs();
+        assert!((command.enabled)(&fx.state));
+        let tab = fx.tab;
+        assert_eq!(
+            command.run(&fx.state),
+            Some(Action::ToggleDiffMarginGuides(tab))
+        );
+        assert!(fx.diff().margin_guides);
+        fx.dispatch(Action::ToggleDiffMarginGuides(tab));
+        assert!(!fx.diff().margin_guides);
+        fx.dispatch(Action::ToggleDiffMarginGuides(tab));
+        assert!(fx.diff().margin_guides);
+        drop(ctx);
+    }
+
+    #[test]
+    fn the_margins_are_remembered_for_new_comparisons_and_old_prefs_files_load() {
+        use crate::action::scroll_tests::ScratchDir;
+        let dir = ScratchDir::new("wp64-prefs");
+        let lf = margin_doc("Alpha", "quick", "wp64-pl");
+        let rf = margin_doc("Beta", "lazy", "wp64-pr");
+        let (l, r) = (lf.path().to_path_buf(), rf.path().to_path_buf());
+        let ctx = egui::Context::default();
+
+        // A prefs file from before the item existed: a comparison starts without margins.
+        let prefs_file = dir.paths().prefs_file();
+        std::fs::create_dir_all(prefs_file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&prefs_file, br#"{"version": 1, "scroll_speed": 3.0}"#).expect("write");
+        let mut state = AppState::new();
+        state.paths = Some(dir.paths());
+        state.prefs = refdesk_core::Prefs::load(&prefs_file);
+        let open = |state: &mut AppState| {
+            dispatch(
+                state,
+                Action::StartDiff {
+                    left: l.clone(),
+                    right: r.clone(),
+                },
+                &ctx,
+            );
+            state.focus.expect("tab")
+        };
+        let tab = open(&mut state);
+        assert!(diff(&state, tab).options.margins.is_zero());
+
+        // Change them: they are in `prefs.json` at once.
+        let margins = Margins {
+            top: 0.06,
+            bottom: 0.05,
+            ..Margins::default()
+        };
+        let options = DiffOptions {
+            margins,
+            ..diff(&state, tab).options
+        };
+        dispatch(&mut state, Action::SetDiffOptions { tab, options }, &ctx);
+        let saved = refdesk_core::Prefs::load(&prefs_file);
+        assert_eq!(saved.diff_margins, margins);
+        assert_eq!(saved.scroll_speed, Some(3.0), "the rest is kept");
+        drop(state);
+
+        // A new process: the next comparison starts with them, controls included.
+        let mut state = AppState::new();
+        state.paths = Some(dir.paths());
+        state.prefs = refdesk_core::Prefs::load(&prefs_file);
+        let tab = open(&mut state);
+        assert_eq!(diff(&state, tab).options.margins, margins);
+        assert_eq!(diff(&state, tab).margins.shown(), margins);
+        assert!(!diff(&state, tab).margins.is_pending(margins));
+        assert!(diff(&state, tab).job.is_some(), "and it compares with them");
+
+        // Margins that are not allowed are cut down before they are remembered.
+        let wild = DiffOptions {
+            margins: Margins {
+                top: 0.9,
+                ..Margins::default()
+            },
+            ..diff(&state, tab).options
+        };
+        dispatch(
+            &mut state,
+            Action::SetDiffOptions { tab, options: wild },
+            &ctx,
+        );
+        assert_eq!(diff(&state, tab).options.margins, top(0.4));
+        assert_eq!(state.prefs.diff_margins, top(0.4));
+    }
+
+    #[test]
+    fn the_margin_controls_and_the_bands_draw_without_a_window() {
+        let mut fx = compare_margin_docs();
+        fx.result();
+        let tab = fx.tab;
+        // Set and open: bands and lines on both sides, then the lines alone.
+        let options = DiffOptions {
+            margins: Margins {
+                top: 0.1,
+                bottom: 0.1,
+                left: 0.05,
+                right: 0.05,
+            },
+            ..fx.diff().options
+        };
+        fx.dispatch(Action::SetDiffOptions { tab, options });
+        fx.result();
+        for open in [true, false] {
+            fx.diff_mut().margins.open = open;
+            for _ in 0..3 {
+                fx.frame();
+            }
+        }
+        fx.dispatch(Action::ToggleDiffMarginGuides(tab));
+        for _ in 0..2 {
+            fx.frame();
+        }
+    }
+
+    #[test]
+    fn the_margin_controls_have_names_for_assistive_technology() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut edit = MarginEdit::new(Margins {
+            top: 0.06,
+            bottom: 0.055,
+            ..Margins::default()
+        });
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(400.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| margin_controls(ui, &mut edit, 0.0),
+        );
+        let update = output.platform_output.accesskit_update.clone();
+        output.drop_without_applying_deltas();
+        let nodes = update.expect("accessibility update").nodes;
+        let named = |name: &str| {
+            nodes
+                .iter()
+                .filter(|(_, n)| n.label() == Some(name) || n.value() == Some(name))
+                .count()
+        };
+        // Four controls, each with the name of its edge, and the button.
+        for key in [
+            "diff.margin_top",
+            "diff.margin_bottom",
+            "diff.margin_left",
+            "diff.margin_right",
+        ] {
+            let name = tr(key);
+            let found = nodes.iter().any(|(_, n)| {
+                n.role() == egui::accesskit::Role::SpinButton && n.label() == Some(name)
+            });
+            assert!(
+                found,
+                "no node named {name}: {:?}",
+                nodes
+                    .iter()
+                    .map(|(_, n)| (
+                        n.role(),
+                        n.label().map(str::to_owned),
+                        n.value().map(str::to_owned)
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(named(tr("diff.margin_reset")) >= 1);
+        assert!(named(tr("diff.margins")) >= 1);
+        assert!(!edit.dragging, "nothing was dragged");
     }
 }

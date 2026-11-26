@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::atomic::{Loaded, atomic_write, load_with};
 use super::config::{Config, TranslateConfig};
 use super::{FORMAT_VERSION, json_version, warn_if_newer};
+use crate::diff::{MarginSide, Margins};
 
 /// Smallest scroll speed multiplier that is accepted.
 pub const MIN_SCROLL_SPEED: f32 = 0.25;
@@ -44,6 +45,10 @@ pub struct Prefs {
     /// The translation model picked in the menu. `None` means "use `config.toml`".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translate_model: Option<String>,
+    /// The page margins a comparison leaves out, as last used. A new comparison starts with
+    /// these. All zero (the default) is not written.
+    #[serde(skip_serializing_if = "Margins::is_zero")]
+    pub diff_margins: Margins,
 }
 
 impl Default for Prefs {
@@ -53,6 +58,7 @@ impl Default for Prefs {
             scroll_speed: None,
             translate_mode: None,
             translate_model: None,
+            diff_margins: Margins::default(),
         }
     }
 }
@@ -97,12 +103,14 @@ impl Prefs {
                     None
                 }
             };
+            let diff_margins = load_margins(obj.get("diff_margins"));
             Ok(Loaded {
                 value: Prefs {
                     version: FORMAT_VERSION,
                     scroll_speed,
                     translate_mode,
                     translate_model,
+                    diff_margins,
                 },
                 dropped: None,
             })
@@ -116,6 +124,38 @@ impl Prefs {
         let bytes = serde_json::to_vec_pretty(&out).map_err(io::Error::other)?;
         atomic_write(path, &bytes)
     }
+}
+
+/// The margins of a comparison from the `diff_margins` entry: a missing entry gives none; an
+/// entry that is not an object, or a side that is not a number, is logged and read as 0.
+/// Values are limited to the allowed range.
+fn load_margins(value: Option<&serde_json::Value>) -> Margins {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Margins::default();
+    };
+    let Some(obj) = value.as_object() else {
+        log::warn!("prefs: diff_margins: expected an object, got {value}; ignored");
+        return Margins::default();
+    };
+    let mut margins = Margins::default();
+    for side in MarginSide::ALL {
+        let key = match side {
+            MarginSide::Top => "top",
+            MarginSide::Bottom => "bottom",
+            MarginSide::Left => "left",
+            MarginSide::Right => "right",
+        };
+        match obj.get(key) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(v) => match v.as_f64().filter(|n| n.is_finite()) {
+                Some(n) => margins.set(side, n as f32),
+                None => {
+                    log::warn!("prefs: diff_margins.{key}: expected a number, got {v}; ignored")
+                }
+            },
+        }
+    }
+    margins.clamped()
 }
 
 /// `speed` limited to [`MIN_SCROLL_SPEED`]..=[`MAX_SCROLL_SPEED`]; something that is not a

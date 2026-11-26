@@ -11,26 +11,31 @@ use std::time::{Duration, Instant};
 
 use super::align::{Segment, align_paragraphs};
 use super::extract::{DocTokens, ExtractOptions, PageSource, Paragraph, extract};
+use super::margins::Margins;
 use super::refine::{Item, refine_region, word_span};
 use crate::geom::{Rect, Size};
 use crate::model::Location;
 use crate::text::TextPos;
 
 /// What the user can switch in a comparison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiffOptions {
     /// Ignore header and footer lines that repeat over the pages.
     pub skip_repeated_lines: bool,
     /// Compare words without regard to case.
     pub ignore_case: bool,
+    /// Page edges that are left out of the comparison (zero: nothing). Values are limited to
+    /// `0.0 ..= 0.4` when the documents are read.
+    pub margins: Margins,
 }
 
 impl Default for DiffOptions {
-    /// Skip repeated lines, keep case.
+    /// Skip repeated lines, keep case, leave no margin out.
     fn default() -> Self {
         Self {
             skip_repeated_lines: true,
             ignore_case: false,
+            margins: Margins::default(),
         }
     }
 }
@@ -41,6 +46,7 @@ impl DiffOptions {
         ExtractOptions {
             skip_repeated_lines: self.skip_repeated_lines,
             ignore_case: self.ignore_case,
+            margins: self.margins.clamped(),
         }
     }
 }
@@ -772,6 +778,12 @@ mod tests {
     const KEEP: ExtractOptions = ExtractOptions {
         skip_repeated_lines: false,
         ignore_case: false,
+        margins: Margins {
+            top: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+            right: 0.0,
+        },
     };
 
     /// One document from pages of blocks; each block is a list of lines.

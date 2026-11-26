@@ -432,7 +432,7 @@ mod tests {
             &pages,
             &ExtractOptions {
                 skip_repeated_lines: false,
-                ignore_case: false,
+                ..ExtractOptions::default()
             },
         )
     }

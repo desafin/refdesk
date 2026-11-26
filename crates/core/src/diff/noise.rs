@@ -121,6 +121,23 @@ pub fn line_text(page: &PageText, line: &TextLine) -> String {
     page.chars[start..end].iter().map(|c| c.ch).collect()
 }
 
+/// The characters of `line` as a string, with every character flagged in `excluded` (one flag
+/// per character of the page) replaced by a space.
+pub fn line_text_without(page: &PageText, line: &TextLine, excluded: &[bool]) -> String {
+    let len = page.chars.len();
+    let end = (line.chars.end as usize).min(len);
+    let start = (line.chars.start as usize).min(end);
+    (start..end)
+        .map(|i| {
+            if excluded.get(i).copied().unwrap_or(false) {
+                ' '
+            } else {
+                page.chars[i].ch
+            }
+        })
+        .collect()
+}
+
 /// What groups candidate lines: band, shape and font size in half points.
 type Key = (Band, String, i32);
 
@@ -149,6 +166,14 @@ fn is_noise(on: &[usize], n: usize) -> bool {
 /// Which lines are repeated headers or footers: `result[page][line]` is `true` for a noise line.
 /// The result has one entry per page and, for each page, one entry per line of its text.
 pub fn repeated_lines(pages: &[PageSource]) -> Vec<Vec<bool>> {
+    repeated_lines_without(pages, &[])
+}
+
+/// [`repeated_lines`] for pages of which some words are left out (excluded margins):
+/// `excluded[page]` has one flag per character of the page; characters flagged there do not
+/// count towards the shape of a line, so a line that is left out entirely is never noise. A page
+/// without flags (the slice may be shorter than `pages`) has all its characters read.
+pub fn repeated_lines_without(pages: &[PageSource], excluded: &[Vec<bool>]) -> Vec<Vec<bool>> {
     let mut noise: Vec<Vec<bool>> = pages
         .iter()
         .map(|p| vec![false; p.text.lines.len()])
@@ -161,13 +186,15 @@ pub fn repeated_lines(pages: &[PageSource]) -> Vec<Vec<bool>> {
     // The candidate key of every line (`None` outside the bands or without visible text).
     let keys: Vec<Vec<Option<Key>>> = pages
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(index, p)| {
+            let flags = excluded.get(index).map(Vec::as_slice).unwrap_or(&[]);
             p.text
                 .lines
                 .iter()
                 .map(|line| {
                     let band = line_band(line, p.size.h)?;
-                    let shape = line_shape(&line_text(&p.text, line));
+                    let shape = line_shape(&line_text_without(&p.text, line, flags));
                     (!shape.is_empty()).then(|| (band, shape, size_bucket(&p.text, line)))
                 })
                 .collect()

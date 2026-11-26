@@ -607,6 +607,15 @@ pub static COMMANDS: &[Command] = &[
         action: |s| s.focus.map(Action::ToggleChangesPanel),
     },
     Command {
+        id: "diff.toggle_margin_guides",
+        name_key: "cmd.diff.toggle_margin_guides",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_diff_focus,
+        action: |s| s.focus.map(Action::ToggleDiffMarginGuides),
+    },
+    Command {
         id: "tab.next",
         name_key: "cmd.tab.next",
         menu: MenuGroup::Tab,
