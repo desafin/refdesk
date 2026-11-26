@@ -225,6 +225,14 @@ fn has_ready_pdf_focus(state: &AppState) -> bool {
         .is_some_and(|doc| doc.info().is_some())
 }
 
+/// The focused PDF view has a table of contents with places in it (copying the text of a section,
+/// searching in a chapter).
+fn has_sections_focus(state: &AppState) -> bool {
+    state
+        .focus
+        .is_some_and(|tab| crate::views::copy_text::has_sections(state, tab))
+}
+
 fn zoom_action(state: &AppState, change: fn(ZoomMode, Option<f32>) -> ZoomMode) -> Option<Action> {
     let (tab, zoom, effective) = focused_zoom(state)?;
     Some(Action::SetZoom {
@@ -310,6 +318,42 @@ pub static COMMANDS: &[Command] = &[
         action: |s| s.focus.map(Action::TranslateSelection),
     },
     Command {
+        id: "edit.copy_location",
+        name_key: "cmd.edit.copy_location",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::L)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| s.focus.map(Action::CopyLocation),
+    },
+    Command {
+        id: "edit.copy_citation",
+        name_key: "cmd.edit.copy_citation",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| s.focus.map(Action::CopyCitation),
+    },
+    Command {
+        id: "edit.copy_section_text",
+        name_key: "cmd.edit.copy_section_text",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_sections_focus,
+        action: |s| s.focus.map(Action::CopySectionText),
+    },
+    Command {
+        id: "edit.copy_chapter_text",
+        name_key: "cmd.edit.copy_chapter_text",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_sections_focus,
+        action: |s| s.focus.map(Action::CopyChapterText),
+    },
+    Command {
         id: "edit.clear_search_history",
         name_key: "cmd.edit.clear_search_history",
         menu: MenuGroup::Edit,
@@ -326,6 +370,15 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_pdf_focus,
         action: |s| s.focus.map(Action::Find),
+    },
+    Command {
+        id: "edit.find_in_chapter",
+        name_key: "cmd.edit.find_in_chapter",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_sections_focus,
+        action: |s| s.focus.map(Action::FindInChapter),
     },
     Command {
         id: "edit.find_all",
@@ -814,6 +867,12 @@ pub static TAB_MENU: &[TabMenuEntry] = &[
         },
     },
     TabMenuEntry {
+        name_key: "cmd.edit.copy_location",
+        command_id: Some("edit.copy_location"),
+        enabled: is_pdf_tab,
+        action: Action::CopyLocation,
+    },
+    TabMenuEntry {
         name_key: "cmd.window.detach_tab",
         command_id: Some("window.detach_tab"),
         enabled: is_document_tab,
@@ -865,6 +924,15 @@ pub static SELECTION_MENU: &[SelectionMenuEntry] = &[
         action: Action::TranslateSelection,
     },
 ];
+
+/// The menu entries of a right click in a PDF view that need no selected text. They are shown
+/// after [`SELECTION_MENU`] and act on the clicked view.
+pub static VIEW_MENU: &[SelectionMenuEntry] = &[SelectionMenuEntry {
+    name_key: "cmd.edit.copy_location",
+    command_id: Some("edit.copy_location"),
+    enabled: |_| true,
+    action: Action::CopyLocation,
+}];
 
 /// The command with this identifier.
 pub fn command(id: &str) -> Option<&'static Command> {
@@ -1139,6 +1207,7 @@ mod tests {
                 "cmd.tab.pin",
                 "cmd.tab.split_right",
                 "cmd.tab.split_down",
+                "cmd.edit.copy_location",
                 "cmd.window.detach_tab",
             ]
         );
@@ -1165,7 +1234,10 @@ mod tests {
         );
         let (a, _) = state.focused_pdf().expect("pdf tab");
         let enabled: Vec<bool> = TAB_MENU.iter().map(|e| (e.enabled)(&state, a)).collect();
-        assert_eq!(enabled, vec![true, false, true, false, true, true, true]);
+        assert_eq!(
+            enabled,
+            vec![true, false, true, false, true, true, true, true]
+        );
         assert_eq!((TAB_MENU[0].action)(a), Action::CloseTab(a));
         dispatch(&mut state, Action::DuplicateTab(a), &ctx);
         assert!((TAB_MENU[1].enabled)(&state, a));

@@ -2726,10 +2726,11 @@ mod tests {
             None,
             "nothing to clear"
         );
-        // "Find in All Documents" comes right after "Find".
+        // "Find in All Documents" comes right after "Find" and "Find in This Chapter".
         let ids: Vec<&str> = edit.iter().map(|c| c.id).collect();
         let at = ids.iter().position(|i| *i == "edit.find").expect("find");
-        assert_eq!(ids[at + 1], "edit.find_all");
+        assert_eq!(ids[at + 1], "edit.find_in_chapter");
+        assert_eq!(ids[at + 2], "edit.find_all");
     }
 
     #[test]

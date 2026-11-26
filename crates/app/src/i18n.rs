@@ -183,6 +183,73 @@ pub const TABLE: &[Row] = &[
         "Search history cleared",
     ),
     ("find.hint", "문서에서 찾기", "Find in document"),
+    (
+        "cmd.edit.find_in_chapter",
+        "지금 장에서 찾기",
+        "Find in This Chapter",
+    ),
+    ("cmd.edit.copy_location", "위치 복사", "Copy Location"),
+    ("cmd.edit.copy_citation", "인용 복사", "Copy Citation"),
+    (
+        "cmd.edit.copy_section_text",
+        "지금 절의 글 복사",
+        "Copy Section Text",
+    ),
+    (
+        "cmd.edit.copy_chapter_text",
+        "지금 장의 글 복사",
+        "Copy Chapter Text",
+    ),
+    ("status.copied_text", "복사함: {}", "Copied: {}"),
+    (
+        "status.range_copied",
+        "{title} — {chars}자 복사",
+        "{title} — {chars} characters copied",
+    ),
+    (
+        "status.range_copied_pages",
+        "{title} — {chars}자 복사 ({pages}쪽)",
+        "{title} — {chars} characters copied ({pages} pages)",
+    ),
+    (
+        "status.range_empty",
+        "{title} — 복사할 글이 없습니다",
+        "{title} — no text to copy",
+    ),
+    (
+        "status.no_section",
+        "지금 위치에는 목차의 절이 없습니다",
+        "There is no section of the table of contents here",
+    ),
+    (
+        "toc.copy_section_text",
+        "이 절의 글 복사",
+        "Copy Text of This Section",
+    ),
+    ("find.scope", "범위", "Scope"),
+    ("find.scope_label", "찾기 범위", "Search scope"),
+    (
+        "find.scope_hint",
+        "찾을 범위를 고릅니다 (문서 전체, 지금 장·절)",
+        "Choose where to search (whole document, this chapter or section)",
+    ),
+    (
+        "find.scope_no_outline",
+        "이 문서에는 목차가 없어 범위를 나눌 수 없습니다",
+        "This document has no table of contents to take a scope from",
+    ),
+    ("find.scope_all", "문서 전체", "Whole document"),
+    ("find.scope_chip", "범위: {}", "Scope: {}"),
+    (
+        "find.scope_clear_label",
+        "찾기 범위 풀기",
+        "Clear search scope",
+    ),
+    (
+        "find.scope_clear_hint",
+        "문서 전체에서 찾기",
+        "Search the whole document",
+    ),
     ("find.count", "{n} / {total}", "{n} / {total}"),
     (
         "find.count_searching",

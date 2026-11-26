@@ -19,19 +19,21 @@ use std::time::Duration;
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Color32, Frame, Id, Key, Modifiers, Panel, Pos2, RichText, ScrollArea, Sense, Stroke, TextEdit,
-    TextStyle, Ui, vec2,
+    Button, Color32, Frame, Id, Key, Modifiers, Panel, Popup, PopupCloseBehavior, Pos2, RichText,
+    ScrollArea, Sense, Stroke, TextEdit, TextStyle, Ui, WidgetInfo, vec2,
 };
 use refdesk_core::{
-    DocumentHandle, Location, Notifier, Outline, PageLayout, Place, Point, Rect as PageRect,
-    SearchError, SearchHistory, SearchJob, SearchMatch, SearchQuery, SearchSnapshot, Size,
-    selection_text,
+    DocumentHandle, DocumentInfo, Location, Notifier, Outline, PageLayout, Place, Point,
+    Rect as PageRect, ScopeChoice, SearchError, SearchHistory, SearchJob, SearchMatch, SearchQuery,
+    SearchSnapshot, Size, scope_choices, selection_text,
 };
 
 use crate::action::Action;
 use crate::i18n::tr;
+use crate::panels::breadcrumb::{SEPARATOR, ellipsize};
 use crate::panels::search_history::{self, HistoryEvent, Recall, Settle, SettleStep};
 use crate::state::{AppState, DocStore, PdfTab, Tab, TabId, TabStore, WindowId};
+use crate::views::copy_text::{self, Part};
 use crate::views::links::page_label;
 use crate::views::pdf_view::anchor_at;
 use crate::views::selection::COPY_OPTIONS;
@@ -533,6 +535,9 @@ pub struct SearchState {
     pub list_open: bool,
     /// The query as typed and the three options. It is remembered when the bar is closed.
     pub query: SearchQuery,
+    /// The part of the document searched, `None` for all of it (FIND-16). It is picked at a
+    /// place and does not follow the view; closing the bar and reloading the document lift it.
+    scope: Option<ScopeChoice>,
     /// The input field takes the keyboard focus and selects all its text in the next frame.
     pub focus_input: bool,
     /// The first move away from where the search began was written to the history already.
@@ -588,6 +593,27 @@ impl SearchState {
     /// The text in the input field is not empty.
     pub fn has_query(&self) -> bool {
         !self.query.text.trim().is_empty()
+    }
+
+    /// The part of the document the search is limited to, if it is.
+    pub fn scope(&self) -> Option<&ScopeChoice> {
+        self.scope.as_ref()
+    }
+
+    /// Limits the search to `choice` (`None`, or the whole-document choice, lifts the limit) and
+    /// searches again at once. Which match is current is chosen anew, from where the view is.
+    /// Nothing happens when the scope is the one that is set.
+    pub fn set_scope(&mut self, choice: Option<ScopeChoice>) {
+        let choice = choice.filter(|c| c.scope.is_some());
+        if self.scope == choice {
+            return;
+        }
+        self.scope = choice;
+        self.current = None;
+        self.current_idx = None;
+        self.current_pos = None;
+        self.departed = false;
+        self.options_changed();
     }
 
     /// The matches shown, in document order.
@@ -708,6 +734,7 @@ impl SearchState {
         self.focus_input = false;
         self.error = None;
         self.wrap_notice = None;
+        self.scope = None;
         self.clear_results();
     }
 
@@ -725,7 +752,14 @@ impl SearchState {
         self.error = None;
         self.generation = generation;
         let from = self.current_pos.unwrap_or(anchor);
-        match SearchJob::start(doc.clone(), self.query.clone(), from.page, notifier.clone()) {
+        let scope = self.scope.as_ref().and_then(|c| c.scope);
+        match SearchJob::start_in(
+            doc.clone(),
+            self.query.clone(),
+            from.page,
+            scope,
+            notifier.clone(),
+        ) {
             Ok(job) => {
                 self.starts += 1;
                 self.job = Some(Arc::new(job));
@@ -761,7 +795,11 @@ impl SearchState {
         let mut out = Tick::default();
         if self.running.is_some() {
             match (self.generation, generation) {
-                (Some(old), Some(new)) if old != new => self.due = Some(Due::Now),
+                (Some(old), Some(new)) if old != new => {
+                    // The places of the scope belong to the old text of the document.
+                    self.scope = None;
+                    self.due = Some(Due::Now);
+                }
                 (None, Some(_)) => self.generation = generation,
                 _ => {}
             }
@@ -1084,9 +1122,168 @@ pub fn find(state: &mut AppState, tab: TabId, from_menu: bool, ctx: &egui::Conte
     }
 }
 
+/// "Find in This Chapter" for the tab `tab`: opens the search bar like Ctrl+F does and limits the
+/// search to the top-level chapter the view is in (FIND-16). Before the first chapter the bar
+/// opens without a limit and the status bar says why.
+pub fn find_in_chapter(state: &mut AppState, tab: TabId, ctx: &egui::Context) {
+    let AppState {
+        docs,
+        tabs,
+        search_history,
+        ..
+    } = state;
+    let Some(Tab::Pdf(pdf)) = tabs.get_mut(tab) else {
+        return;
+    };
+    let Some(doc) = docs.get(pdf.doc) else {
+        return;
+    };
+    let Some(info) = doc.info() else {
+        return;
+    };
+    let pages = u32::try_from(info.page_sizes.len()).unwrap_or(u32::MAX);
+    let choice = copy_text::choice_at(
+        &info.outline,
+        copy_text::reading_place(pdf),
+        pages,
+        Part::Chapter,
+    );
+    let found = choice.is_some();
+    // The scope is set first, so that the search the bar starts is the limited one.
+    if choice.is_some() {
+        pdf.ui.search.set_scope(choice);
+    }
+    find_in(
+        pdf,
+        doc,
+        &crate::action::notifier(ctx),
+        true,
+        search_history,
+    );
+    if !found {
+        crate::action::dispatch(
+            state,
+            Action::ShowNotice(tr("status.no_section").into()),
+            ctx,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Drawing: the search bar
 // ---------------------------------------------------------------------------------------------
+
+/// The longest the chip of the scope gets before its text is cut with "…".
+const CHIP_MAX_WIDTH: f32 = 200.0;
+
+/// The scope button beside the options, the chip that names the scope when there is one, and the
+/// × that lifts it. Returns what the user chose: `Some(None)` is the whole document. `place` is
+/// where the view is, which decides what the list offers.
+fn scope_controls(
+    ui: &mut Ui,
+    id: Id,
+    active: Option<&ScopeChoice>,
+    info: Option<&DocumentInfo>,
+    place: Location,
+) -> Option<Option<ScopeChoice>> {
+    let list_id = id.with("scope_list");
+    let has_sections = info.is_some_and(|i| i.outline.items.iter().any(|it| it.target.is_some()));
+    // A scope that is on can always be changed back, even if the outline is gone.
+    let enabled = has_sections || active.is_some();
+    let hint = if enabled {
+        tr("find.scope_hint")
+    } else {
+        tr("find.scope_no_outline")
+    };
+    let response = ui
+        .push_id(id, |ui| {
+            ui.add_enabled(
+                enabled,
+                Button::new(tr("find.scope")).selected(active.is_some()),
+            )
+            .on_hover_text(hint)
+            .on_disabled_hover_text(hint)
+        })
+        .inner;
+    response
+        .widget_info(|| WidgetInfo::labeled(egui::Role::Button, enabled, tr("find.scope_label")));
+
+    let mut event = None;
+    if enabled {
+        Popup::from_toggle_button_response(&response)
+            .id(list_id)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let pages =
+                    info.map_or(0, |i| u32::try_from(i.page_sizes.len()).unwrap_or(u32::MAX));
+                let choices = match info {
+                    Some(i) => scope_choices(&i.outline, place, pages),
+                    None => vec![ScopeChoice::whole_document()],
+                };
+                for (step, choice) in choices.into_iter().enumerate() {
+                    let selected = active.map(|a| a.item) == Some(choice.item);
+                    let title = if choice.item.is_none() {
+                        tr("find.scope_all").to_owned()
+                    } else {
+                        choice.title.clone()
+                    };
+                    // Each step of the path is indented under the one above it.
+                    let shown = format!("{}{title}", "  ".repeat(step.saturating_sub(1)));
+                    let row = ui.selectable_label(selected, shown);
+                    row.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, &title));
+                    if row.clicked() {
+                        event = Some(choice.scope.is_some().then_some(choice));
+                    }
+                }
+            });
+        if event.is_some() {
+            Popup::close_id(ui.ctx(), list_id);
+        }
+    } else {
+        Popup::close_id(ui.ctx(), list_id);
+    }
+
+    if let Some(choice) = active {
+        let full = choice.path.join(&format!(" {SEPARATOR} "));
+        let font = TextStyle::Body.resolve(ui.style());
+        let painter = ui.painter().clone();
+        let measure = |text: &str| {
+            painter
+                .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        };
+        let text = ellipsize(&choice.title, CHIP_MAX_WIDTH, &measure);
+        let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.5);
+        Frame::NONE
+            .fill(fill)
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::symmetric(6, 1))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let chip = ui.add(egui::Label::new(text).sense(Sense::hover()));
+                    chip.widget_info(|| {
+                        WidgetInfo::labeled(
+                            egui::Role::Label,
+                            true,
+                            tr("find.scope_chip").replace("{}", &full),
+                        )
+                    });
+                    chip.on_hover_text(&full);
+                    let clear = ui
+                        .small_button("×")
+                        .on_hover_text(tr("find.scope_clear_hint"));
+                    clear.widget_info(|| {
+                        WidgetInfo::labeled(egui::Role::Button, true, tr("find.scope_clear_label"))
+                    });
+                    if clear.clicked() {
+                        event = Some(None);
+                    }
+                });
+            });
+    }
+    event
+}
 
 fn input_id(tab: TabId) -> Id {
     Id::unique(("find_input", tab))
@@ -1194,6 +1391,8 @@ pub fn show_bar(
         }
     }
 
+    let place = copy_text::reading_place(pdf);
+    let info = doc.info();
     let search = &mut pdf.ui.search;
     if std::mem::take(&mut search.focus_input) {
         let mut state = TextEdit::load_state(&ctx, id).unwrap_or_default();
@@ -1212,6 +1411,7 @@ pub fn show_bar(
     let mut options_changed = false;
     let mut step_dir = None;
     let mut history_event = None;
+    let mut scope_event = None;
     let no_match = search.no_match();
     let error = search.error().map(str::to_owned);
     let dark = ui.visuals().dark_mode;
@@ -1270,6 +1470,8 @@ pub fn show_bar(
                         options_changed = true;
                     }
                 }
+                scope_event =
+                    scope_controls(ui, id.with("scope"), search.scope(), info.as_deref(), place);
                 if ui
                     .selectable_label(search.list_open, tr("find.list"))
                     .on_hover_text(tr("find.list_hint"))
@@ -1309,6 +1511,10 @@ pub fn show_bar(
         Some(HistoryEvent::Remove(index)) => queue.push(Action::RemoveSearchHistory(index)),
         Some(HistoryEvent::Clear) => queue.push(Action::ClearSearchHistory),
         None => {}
+    }
+    if let Some(choice) = scope_event {
+        pdf.ui.search.set_scope(choice);
+        ctx.request_repaint();
     }
     if edited || options_changed {
         // What is in the field is the user's own again: ↑ starts from the newest entry.
@@ -3589,5 +3795,349 @@ mod tests {
         state.search_history.record(&hist_q("x", false), 1);
         assert!((command.enabled)(&state));
         assert_eq!(command.run(&state), Some(Action::ClearSearchHistory));
+    }
+
+    // --- searching a part of the document (FIND-16) -----------------------------------------
+
+    /// Eight pages with "needle" at (page, y): chapter "A" runs from page 1 to the top of page 4
+    /// and holds the section "A.1" (page 2, 200 pt, to the top of page 4); chapter "B" starts on
+    /// page 5.
+    fn scoped_doc(stem: &str, with_outline: bool) -> TempPdf {
+        let places = [(1, 100.0), (2, 300.0), (3, 300.0), (5, 200.0), (6, 100.0)];
+        let mut b = PdfBuilder::new();
+        for page in 0..8usize {
+            b = b.page(595.0, 842.0, |p| {
+                p.text(72.0, 60.0, 12.0, &format!("heading {page}"));
+                for (at_page, y) in places {
+                    if at_page == page {
+                        p.text(72.0, y, 12.0, "a needle here");
+                    }
+                }
+            });
+        }
+        if with_outline {
+            b = b
+                .outline("A", 2, 60.0, |o| {
+                    o.child("A.1", 3, 200.0);
+                })
+                .outline_leaf("B", 6, 60.0);
+        }
+        b.write_temp(stem)
+    }
+
+    impl Rig {
+        /// Every node of the accessibility tree of a frame: role, name (the value of a label)
+        /// and whether it is disabled.
+        fn named_nodes(&mut self) -> Vec<(egui::accesskit::Role, String, bool)> {
+            self.ctx.enable_accesskit();
+            self.time += self.step;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1000.0, 700.0),
+                )),
+                time: Some(self.time),
+                ..Default::default()
+            };
+            let state = &mut self.state;
+            let mut queue = Vec::new();
+            let output = self.ctx.run_ui(input, |ui| {
+                queue.extend(commands::handle_shortcuts(ui.ctx(), state));
+                show_window(ui, state, 0, &mut queue);
+            });
+            let update = output.platform_output.accesskit_update.clone();
+            output.drop_without_applying_deltas();
+            self.state.actions.append(&mut queue);
+            dispatch_queued(&mut self.state, &self.ctx);
+            update
+                .map(|u| u.nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(_, n)| {
+                    let name = n.label().or_else(|| n.value())?.to_owned();
+                    Some((n.role(), name, n.is_disabled()))
+                })
+                .collect()
+        }
+
+        fn has_name(&mut self, name: &str) -> bool {
+            self.named_nodes().iter().any(|(_, n, _)| n == name)
+        }
+
+        /// Opens the scope list and clicks the entry called `entry`.
+        fn pick_scope(&mut self, entry: &str) {
+            let button = self.button_center(tr("find.scope_label"));
+            self.click(button);
+            self.frames(2);
+            let item = self.button_center(entry);
+            self.click(item);
+            self.frames(2);
+        }
+
+        fn wait_finished(&mut self, tab: TabId) {
+            self.frames_until("the search to finish", |rig| {
+                let s = rig.search(tab);
+                s.live && s.snapshot().finished && !s.is_searching()
+            });
+        }
+
+        fn match_pages(&self, tab: TabId) -> Vec<u32> {
+            self.search(tab)
+                .snapshot()
+                .matches
+                .iter()
+                .map(|m| m.page)
+                .collect()
+        }
+
+        /// Puts the view at `page`, `y` pt down, and lets a frame take it over.
+        fn read_at(&mut self, tab: TabId, page: u32, y: f32) {
+            let Some(Tab::Pdf(pdf)) = self.state.tabs.get_mut(tab) else {
+                panic!("pdf tab");
+            };
+            pdf.view.anchor = at(page, y);
+            self.frames(2);
+        }
+    }
+
+    #[test]
+    fn a_scope_cuts_the_results_shows_a_chip_and_is_lifted_with_its_cross() {
+        let pdf = scoped_doc("wp58-scope-bar", true);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        // Reading in section A.1.
+        rig.read_at(tab, 2, 250.0);
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        assert_eq!(rig.match_pages(tab), [1, 2, 3, 5, 6]);
+
+        // The scope button has its name; there is no chip yet.
+        let nodes = rig.named_nodes();
+        let button = nodes
+            .iter()
+            .find(|(_, n, _)| n == tr("find.scope_label"))
+            .expect("the scope button has a name");
+        assert!(!button.2, "enabled for a document with an outline");
+        assert!(!nodes.iter().any(|(_, n, _)| n.starts_with("Scope: ")));
+
+        // The list offers the document and each step of the path down to A.1.
+        let list = rig.button_center(tr("find.scope_label"));
+        rig.click(list);
+        rig.frames(2);
+        let names: Vec<String> = rig.button_nodes().into_iter().map(|(l, _, _)| l).collect();
+        for want in [tr("find.scope_all"), "A", "A.1"] {
+            assert!(names.iter().any(|n| n == want), "{want} in {names:?}");
+        }
+        assert!(
+            !names.iter().any(|n| n == "B"),
+            "B does not contain the place"
+        );
+
+        // Chapter A: the three matches inside it, a chip with its name.
+        let item = rig.button_center("A");
+        rig.click(item);
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [1, 2, 3]);
+        assert_eq!(rig.search(tab).scope().map(|c| c.title.as_str()), Some("A"));
+        let chip = tr("find.scope_chip").replace("{}", "A");
+        assert!(rig.has_name(&chip), "the chip says {chip}");
+        let count = count_text(
+            rig.search(tab).current_index(),
+            rig.search(tab).snapshot(),
+            None,
+        );
+        assert!(count.ends_with("/ 3"), "{count}");
+
+        // Section A.1 inside it: two matches, and the chip shows the whole path.
+        rig.pick_scope("A.1");
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [2, 3]);
+        let chip = tr("find.scope_chip").replace("{}", "A › A.1");
+        assert!(rig.has_name(&chip), "the chip says {chip}");
+
+        // The cross lifts the scope: every match again, no chip.
+        let cross = rig.button_center(tr("find.scope_clear_label"));
+        rig.click(cross);
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [1, 2, 3, 5, 6]);
+        assert!(rig.search(tab).scope().is_none());
+        let nodes = rig.named_nodes();
+        assert!(!nodes.iter().any(|(_, n, _)| n.starts_with("Scope: ")));
+        assert!(
+            !nodes
+                .iter()
+                .any(|(_, n, _)| n == tr("find.scope_clear_label")),
+            "the cross goes with the chip"
+        );
+
+        // "Whole document" in the list lifts it too.
+        rig.pick_scope("A");
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [1, 2, 3]);
+        rig.pick_scope(tr("find.scope_all"));
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [1, 2, 3, 5, 6]);
+        assert!(rig.search(tab).scope().is_none());
+    }
+
+    #[test]
+    fn next_and_previous_go_round_inside_the_scope_and_the_history_keeps_no_scope() {
+        let pdf = scoped_doc("wp58-scope-step", true);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.read_at(tab, 2, 250.0);
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        rig.pick_scope("A.1");
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [2, 3]);
+        let current = |rig: &Rig| rig.search(tab).current_match().map(|m| m.page);
+        // The first match from where the view is.
+        assert_eq!(current(&rig), Some(2));
+        rig.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(current(&rig), Some(3));
+        // Past the last match of the scope it wraps to its first, not to the document's.
+        rig.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(current(&rig), Some(2));
+        assert!(rig.search(tab).wrap_notice(rig.time).is_some());
+        rig.key(Key::Enter, Modifiers::SHIFT);
+        assert_eq!(
+            current(&rig),
+            Some(3),
+            "backwards from the first wraps to the last"
+        );
+        // The query is remembered, without a scope in it.
+        assert_eq!(rig.history_texts(), ["needle"]);
+    }
+
+    #[test]
+    fn the_scope_stays_where_it_was_picked_and_goes_with_the_bar_and_a_reload() {
+        let pdf = scoped_doc("wp58-scope-life", true);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.read_at(tab, 2, 250.0);
+        rig.open_bar(tab);
+        rig.search_for(tab, "needle");
+        rig.pick_scope("A");
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [1, 2, 3]);
+
+        // Scrolling into chapter B does not move the scope.
+        rig.read_at(tab, 6, 100.0);
+        rig.frames(3);
+        assert_eq!(rig.search(tab).scope().map(|c| c.title.as_str()), Some("A"));
+        assert_eq!(rig.match_pages(tab), [1, 2, 3]);
+
+        // Closing the bar lifts it; the next search is over the whole document.
+        rig.key(Key::Escape, Modifiers::NONE);
+        assert!(!rig.search(tab).open);
+        assert!(rig.search(tab).scope().is_none());
+        rig.open_bar(tab);
+        rig.frames_until("the search to finish", |rig| {
+            let s = rig.search(tab);
+            s.live && s.snapshot().finished && !s.is_searching()
+        });
+        assert_eq!(rig.match_pages(tab), [1, 2, 3, 5, 6]);
+
+        // A reloaded document lifts it and searches again.
+        rig.read_at(tab, 2, 250.0);
+        rig.pick_scope("A");
+        rig.wait_finished(tab);
+        assert!(rig.search(tab).scope().is_some());
+        let doc = rig.doc(tab);
+        let before = generation_of(&doc);
+        doc.reload();
+        rig.frames_until("the new generation", |_| generation_of(&doc) != before);
+        rig.wait_finished(tab);
+        assert!(rig.search(tab).scope().is_none());
+        assert_eq!(rig.match_pages(tab), [1, 2, 3, 5, 6]);
+    }
+
+    #[test]
+    fn the_scope_button_is_disabled_for_a_document_without_a_table_of_contents() {
+        let pdf = scoped_doc("wp58-scope-none", false);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        rig.open_bar(tab);
+        let nodes = rig.button_nodes();
+        let button = nodes
+            .iter()
+            .find(|(l, _, _)| l == tr("find.scope_label"))
+            .expect("the scope button");
+        assert!(button.2, "disabled");
+        rig.search_for(tab, "needle");
+        assert_eq!(rig.match_pages(tab), [1, 2, 3, 5, 6]);
+    }
+
+    #[test]
+    fn find_in_this_chapter_opens_the_bar_limited_to_the_top_level_chapter() {
+        let pdf = scoped_doc("wp58-scope-cmd", true);
+        let mut rig = Rig::new();
+        rig.step = 0.001;
+        let tab = rig.open(&pdf);
+        // Deep inside chapter A, in section A.1.
+        rig.read_at(tab, 3, 250.0);
+        let command = commands::command("edit.find_in_chapter").expect("command");
+        let action = command.run(&rig.state).expect("enabled with an outline");
+        assert_eq!(action, Action::FindInChapter(tab));
+        dispatch(&mut rig.state, action, &rig.ctx);
+        rig.frames(2);
+        assert!(rig.search(tab).open, "the bar opened");
+        let scope = rig.search(tab).scope().expect("a scope");
+        assert_eq!((scope.title.as_str(), scope.item), ("A", Some(0)));
+
+        // With a query it is searched in the chapter only.
+        rig.type_text("needle");
+        rig.wait_finished(tab);
+        assert_eq!(rig.match_pages(tab), [1, 2, 3]);
+
+        // Before the first chapter: the bar opens and nothing is limited; the status bar says why.
+        rig.key(Key::Escape, Modifiers::NONE);
+        rig.read_at(tab, 0, 5.0);
+        dispatch(&mut rig.state, Action::FindInChapter(tab), &rig.ctx);
+        rig.frames(2);
+        assert!(rig.search(tab).open);
+        assert!(rig.search(tab).scope().is_none());
+        assert_eq!(
+            rig.state.status_notice.as_ref().map(|n| n.text.as_str()),
+            Some(tr("status.no_section"))
+        );
+    }
+
+    #[test]
+    fn choosing_the_scope_that_is_set_does_not_start_another_search() {
+        let pdf = scoped_doc("wp58-scope-same", true);
+        let mut rig = Rig::new();
+        let tab = rig.open(&pdf);
+        let doc = rig.doc(tab);
+        let info = doc.info().expect("info");
+        let choice = ScopeChoice::section(&info.outline, 0, 8).expect("choice");
+        let (mut st, notifier) = state_on(&rig);
+        st.query.text = "needle".into();
+        st.set_scope(Some(choice.clone()));
+        finish(&mut st, &rig, &doc, &notifier, at(2, 0.0), 0.0);
+        assert_eq!(st.starts, 1);
+        st.set_scope(Some(choice));
+        finish(&mut st, &rig, &doc, &notifier, at(2, 0.0), 0.0);
+        assert_eq!(st.starts, 1, "the same scope changes nothing");
+        // The whole-document choice has no range: it lifts the scope.
+        st.set_scope(Some(ScopeChoice::whole_document()));
+        assert!(st.scope().is_none());
+        finish(&mut st, &rig, &doc, &notifier, at(2, 0.0), 0.0);
+        assert_eq!(st.starts, 2);
+        assert_eq!(st.snapshot().matches.len(), 5);
+        // A reload (a new generation) lifts a scope and searches again.
+        let generation = generation_of(&doc);
+        st.set_scope(ScopeChoice::section(&info.outline, 0, 8));
+        finish(&mut st, &rig, &doc, &notifier, at(2, 0.0), 0.0);
+        assert_eq!(st.snapshot().matches.len(), 3);
+        st.tick(&doc, &notifier, Some(generation + 1), at(2, 0.0), 0.0);
+        assert!(st.scope().is_none());
+        st.close();
+        assert!(st.scope().is_none());
     }
 }

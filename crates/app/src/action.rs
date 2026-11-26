@@ -22,6 +22,7 @@ use crate::session;
 use crate::state::{
     AppState, ClosedTab, DocId, PdfTab, StatusNotice, Tab, TabId, WindowId, normalize_path,
 };
+use crate::views::copy_text;
 use crate::views::diff_view::{self, DiffDialog, DiffTab};
 use crate::views::pdf_view::PdfViewUiState;
 use crate::windows::dock::SplitDir;
@@ -124,6 +125,24 @@ pub enum Action {
     Find(TabId),
     /// Search for the selected text of a PDF tab, even over several lines (FIND-6).
     FindSelection(TabId),
+    /// Copy `path#page=N` of the place of a PDF tab, where its selection starts or else where it
+    /// is being read (LINK-15).
+    CopyLocation(TabId),
+    /// Copy "file, p. 87 — section path" of the place of a PDF tab (LINK-15).
+    CopyCitation(TabId),
+    /// Copy the text of the section a PDF tab is in (SEL-5).
+    CopySectionText(TabId),
+    /// Copy the text of the top-level chapter a PDF tab is in (SEL-5).
+    CopyChapterText(TabId),
+    /// Copy the text of one entry of the table of contents of a PDF tab, by its index (SEL-5).
+    CopyOutlineItemText {
+        /// The tab whose document has the entry.
+        tab: TabId,
+        /// Index into `Outline::items`.
+        item: u32,
+    },
+    /// Open the search bar of a PDF tab and limit it to the chapter it is in (FIND-16).
+    FindInChapter(TabId),
     /// Turn the capture mode of a PDF tab on, or off when it is on: the next drag on a page
     /// captures that area (SHOT-1).
     StartCapture(TabId),
@@ -446,6 +465,18 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::ClearSearchHistory => crate::panels::search_history::clear(state, ctx),
         Action::Find(tab) => search::find(state, tab, false, ctx),
         Action::FindSelection(tab) => search::find(state, tab, true, ctx),
+        Action::CopyLocation(tab) => copy_text::copy_location(state, tab, ctx),
+        Action::CopyCitation(tab) => copy_text::copy_citation(state, tab, ctx),
+        Action::CopySectionText(tab) => {
+            copy_text::copy_section_text(state, tab, copy_text::Part::Section, ctx)
+        }
+        Action::CopyChapterText(tab) => {
+            copy_text::copy_section_text(state, tab, copy_text::Part::Chapter, ctx)
+        }
+        Action::CopyOutlineItemText { tab, item } => {
+            copy_text::copy_outline_item_text(state, tab, item, ctx)
+        }
+        Action::FindInChapter(tab) => search::find_in_chapter(state, tab, ctx),
         Action::StartCapture(tab) => capture::start(state, tab),
         Action::CapturePage(tab) => capture::capture_page(state, tab, ctx),
         Action::CaptureRegion {
@@ -643,6 +674,7 @@ fn quit(ctx: &egui::Context) {
 
 /// Dispatches everything in `state.actions`, in order.
 pub fn dispatch_queued(state: &mut AppState, ctx: &egui::Context) {
+    copy_text::finish_pending(state, ctx);
     let queue = std::mem::take(&mut state.actions);
     for action in queue {
         dispatch(state, action, ctx);

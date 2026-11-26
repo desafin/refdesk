@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use refdesk_core::testutil::{PdfBuilder, TempPdf};
 use refdesk_core::{
-    DocStatus, DocumentHandle, Notifier, SearchError, SearchJob, SearchOptions, SearchQuery,
-    SearchSnapshot,
+    DocStatus, DocumentHandle, Location, Notifier, SearchError, SearchJob, SearchOptions,
+    SearchQuery, SearchScope, SearchSnapshot,
 };
 
 /// Deadline for anything the worker or the search does.
@@ -493,4 +493,211 @@ fn large_document_timing() {
             );
         }
     }
+}
+
+// --- searching a part of the document (FIND-16) ----------------------------------------------
+
+/// Eight pages. "needle" stands at the given (page, baseline) places; every page also has a
+/// heading line that is not a match.
+fn scoped_doc(places: &[(usize, f32)]) -> PdfBuilder {
+    let mut pdf = PdfBuilder::new();
+    for page in 0..8usize {
+        pdf = pdf.page(612.0, 792.0, |p| {
+            p.text(72.0, 60.0, 12.0, &format!("heading {page}"));
+            for (at_page, y) in places {
+                if *at_page == page {
+                    p.text(72.0, *y, 12.0, "a needle here");
+                }
+            }
+        });
+    }
+    pdf
+}
+
+fn at(page: u32, y: f32) -> Location {
+    Location::new(page, 0.0, y)
+}
+
+impl Fixture {
+    fn start_in(&self, q: SearchQuery, start_page: u32, scope: Option<SearchScope>) -> SearchJob {
+        SearchJob::start_in(
+            self.doc.clone(),
+            q,
+            start_page,
+            scope,
+            Arc::clone(&self.notify),
+        )
+        .unwrap()
+    }
+}
+
+fn places(s: &SearchSnapshot) -> Vec<(u32, i32)> {
+    s.matches
+        .iter()
+        .map(|m| (m.page, m.rects[0].y1.round() as i32))
+        .collect()
+}
+
+#[test]
+fn a_scoped_search_finds_only_matches_that_start_inside_the_scope() {
+    let pdf = scoped_doc(&[(0, 300.0), (2, 200.0), (3, 300.0), (4, 200.0), (6, 300.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-inside");
+
+    // Pages 2 ..= 4, from the top of page 2 to the top of page 5.
+    let scope = SearchScope {
+        start: at(2, 0.0),
+        end: at(5, 0.0),
+    };
+    let job = fx.start_in(query("needle"), 0, Some(scope));
+    let s = fx.finish(&job);
+    let pages: Vec<u32> = s.matches.iter().map(|m| m.page).collect();
+    assert_eq!(pages, [2, 3, 4]);
+    assert!(s.finished && !s.truncated);
+
+    // Without a scope the same document has all five.
+    let all = fx.finish(&fx.start(query("needle"), 0));
+    assert_eq!(all.matches.len(), 5);
+
+    // A scope that holds no match finishes with an empty list.
+    let empty = SearchScope {
+        start: at(1, 0.0),
+        end: at(2, 0.0),
+    };
+    let s = fx.finish(&fx.start_in(query("needle"), 0, Some(empty)));
+    assert!(s.matches.is_empty() && s.finished);
+    assert_eq!(s.pages_total, 1);
+}
+
+#[test]
+fn the_first_and_last_page_of_a_scope_are_cut_at_its_places() {
+    // Page 2 has matches at 150 and 400, page 4 at 150 and 400.
+    let pdf = scoped_doc(&[(2, 150.0), (2, 400.0), (3, 300.0), (4, 150.0), (4, 400.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-edges");
+
+    // From page 2 at 300 (the match at 150 above it is out) to page 4 at 300 (the one at 400
+    // below it is out).
+    let scope = SearchScope {
+        start: at(2, 300.0),
+        end: at(4, 300.0),
+    };
+    let s = fx.finish(&fx.start_in(query("needle"), 0, Some(scope)));
+    // The matches' bottom edges are a little below their baselines.
+    let found: Vec<(u32, bool)> = s
+        .matches
+        .iter()
+        .map(|m| (m.page, m.rects[0].y1 > 300.0))
+        .collect();
+    assert_eq!(
+        found,
+        [(2, true), (3, true), (4, false)],
+        "{:?}",
+        places(&s)
+    );
+    assert_eq!(s.pages_total, 3);
+}
+
+#[test]
+fn a_match_on_the_line_a_scope_starts_at_is_inside_and_one_on_the_line_it_ends_at_is_not() {
+    // The scope is the section of a heading whose entry points at the baseline of its text.
+    let pdf = scoped_doc(&[(1, 200.0), (1, 500.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-heading-lines");
+    let scope = SearchScope {
+        start: at(1, 200.0),
+        end: at(1, 500.0),
+    };
+    let s = fx.finish(&fx.start_in(query("needle"), 0, Some(scope)));
+    assert_eq!(s.matches.len(), 1, "{:?}", places(&s));
+    assert!(s.matches[0].rects[0].y1 < 500.0);
+}
+
+#[test]
+fn a_scoped_search_does_not_read_the_pages_outside_the_scope() {
+    let pdf = scoped_doc(&[(0, 300.0), (3, 300.0), (7, 300.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-progress");
+    // Pages 3 and 4 only; the scope ends at the top of page 5, which is not read either.
+    let scope = SearchScope {
+        start: at(3, 0.0),
+        end: at(5, 0.0),
+    };
+    let job = fx.start_in(query("needle"), 0, Some(scope));
+    let s = fx.finish(&job);
+    assert_eq!((s.pages_done, s.pages_total), (2, 2));
+    assert_eq!(s.matches.len(), 1);
+
+    // The progress of a search that ends with the document counts the rest of the pages.
+    let to_end = SearchScope {
+        start: at(6, 0.0),
+        end: refdesk_core::document_end(8),
+    };
+    let s = fx.finish(&fx.start_in(query("needle"), 0, Some(to_end)));
+    assert_eq!((s.pages_done, s.pages_total), (2, 2));
+    assert_eq!(s.matches.len(), 1);
+    assert_eq!(s.matches[0].page, 7);
+}
+
+#[test]
+fn a_scoped_search_wraps_inside_the_scope_from_the_start_page() {
+    let pdf = scoped_doc(&[(2, 200.0), (3, 200.0), (4, 200.0), (6, 200.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-wrap");
+    let scope = SearchScope {
+        start: at(2, 0.0),
+        end: at(5, 0.0),
+    };
+    // Starting in the middle of the scope: read order 3, 4, 2; matches stay in document order.
+    let s = fx.finish(&fx.start_in(query("needle"), 3, Some(scope)));
+    let pages: Vec<u32> = s.matches.iter().map(|m| m.page).collect();
+    assert_eq!(pages, [2, 3, 4]);
+    assert_eq!(s.pages_done, 3);
+    // A start page outside the scope starts at its first page.
+    let s = fx.finish(&fx.start_in(query("needle"), 7, Some(scope)));
+    assert_eq!(s.matches.len(), 3);
+}
+
+#[test]
+fn a_scope_outside_the_document_or_empty_finishes_at_once() {
+    let pdf = scoped_doc(&[(1, 200.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-empty");
+    for scope in [
+        SearchScope {
+            start: at(20, 0.0),
+            end: at(30, 0.0),
+        },
+        SearchScope {
+            start: at(3, 100.0),
+            end: at(3, 0.0),
+        },
+    ] {
+        let s = fx.finish(&fx.start_in(query("needle"), 0, Some(scope)));
+        assert!(s.matches.is_empty() && s.finished);
+        assert_eq!((s.pages_done, s.pages_total), (0, 0));
+    }
+}
+
+#[test]
+fn a_phrase_that_starts_on_the_last_page_of_a_scope_is_found_whole() {
+    let pdf = PdfBuilder::new()
+        .page(612.0, 792.0, |p| {
+            p.text(72.0, 740.0, 12.0, "the quick brown");
+        })
+        .page(612.0, 792.0, |p| {
+            p.text(72.0, 60.0, 12.0, "fox jumps");
+        });
+    let (fx, _file) = Fixture::ready(&pdf, "scope-phrase");
+    let scope = SearchScope {
+        start: at(0, 0.0),
+        end: at(1, 0.0),
+    };
+    let s = fx.finish(&fx.start_in(query("brown fox"), 0, Some(scope)));
+    assert_eq!(s.matches.len(), 1);
+    assert!(s.matches[0].cont.is_some());
+}
+
+#[test]
+fn a_search_without_a_scope_is_the_same_as_before() {
+    let pdf = scoped_doc(&[(0, 300.0), (5, 300.0)]);
+    let (fx, _file) = Fixture::ready(&pdf, "scope-none");
+    let plain = fx.finish(&fx.start(query("needle"), 2));
+    let none = fx.finish(&fx.start_in(query("needle"), 2, None));
+    assert_eq!(plain.matches, none.matches);
+    assert_eq!((none.pages_done, none.pages_total), (8, 8));
 }

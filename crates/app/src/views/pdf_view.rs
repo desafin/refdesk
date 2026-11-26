@@ -917,23 +917,38 @@ fn show_document(
         response.clone().on_hover_text_at_pointer(text);
     }
 
-    // Right click: the menu of the selection, built from the command module's table.
-    if commands::SELECTION_MENU.iter().any(|e| (e.enabled)(tab)) {
-        response.context_menu(|ui| {
-            for entry in commands::SELECTION_MENU {
-                let mut button = egui::Button::new(tr(entry.name_key));
-                if let Some(keys) = entry
-                    .command_id
-                    .and_then(|id| commands::shortcut_text(ui.ctx(), id))
-                {
-                    button = button.shortcut_text(keys);
-                }
-                if ui.add_enabled((entry.enabled)(tab), button).clicked() {
-                    cx.queue.push((entry.action)(cx.tab_id));
-                    ui.close();
-                }
-            }
-        });
+    // Right click: the menu of the selection, then the entries that need no selection, built
+    // from the command module's tables.
+    let has_selection_entries = commands::SELECTION_MENU.iter().any(|e| (e.enabled)(tab));
+    response.context_menu(|ui| {
+        if has_selection_entries {
+            menu_entries(ui, commands::SELECTION_MENU, tab, cx.tab_id, cx.queue);
+            ui.separator();
+        }
+        menu_entries(ui, commands::VIEW_MENU, tab, cx.tab_id, cx.queue);
+    });
+}
+
+/// The buttons of a right-click menu table, for the view `tab_id`.
+fn menu_entries(
+    ui: &mut Ui,
+    table: &[commands::SelectionMenuEntry],
+    tab: &PdfTab,
+    tab_id: TabId,
+    queue: &mut Vec<Action>,
+) {
+    for entry in table {
+        let mut button = egui::Button::new(tr(entry.name_key));
+        if let Some(keys) = entry
+            .command_id
+            .and_then(|id| commands::shortcut_text(ui.ctx(), id))
+        {
+            button = button.shortcut_text(keys);
+        }
+        if ui.add_enabled((entry.enabled)(tab), button).clicked() {
+            queue.push((entry.action)(tab_id));
+            ui.close();
+        }
     }
 }
 
@@ -2634,7 +2649,7 @@ mod widget_tests {
     }
 
     #[test]
-    fn a_right_click_with_a_selection_opens_the_menu_and_without_one_does_not() {
+    fn a_right_click_opens_the_menu_with_the_selection_entries_only_when_text_is_selected() {
         let pdf = text_document("view-select-menu");
         let mut h = Harness::new();
         let tab = h.open(pdf.path());
@@ -2653,10 +2668,16 @@ mod widget_tests {
             h.frame(Vec::new());
         };
         right_click(&mut h);
+        // Nothing selected: the menu has "Copy Location" (LINK-15) and no selection entries.
+        assert!(egui::Popup::is_any_open(&h.ctx), "the location menu");
         assert!(
-            !egui::Popup::is_any_open(&h.ctx),
-            "nothing selected, no menu"
+            !commands::SELECTION_MENU
+                .iter()
+                .any(|e| (e.enabled)(h.tab(tab)))
         );
+        egui::Popup::close_all(&h.ctx);
+        h.frame(Vec::new());
+        assert!(!egui::Popup::is_any_open(&h.ctx));
 
         let (from, to) = (h.char_pos(tab, 0, 6, false), h.char_pos(tab, 0, 9, true));
         drag_select(&mut h, from, to);

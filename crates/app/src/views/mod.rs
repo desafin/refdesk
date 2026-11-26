@@ -1,6 +1,7 @@
 //! Tab contents: the PDF view, the texture cache it draws from, the page preloader, the
 //! comparison view and the start page.
 
+pub mod copy_text;
 pub mod diff_view;
 pub mod links;
 pub mod pdf_view;

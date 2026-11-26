@@ -6,16 +6,19 @@
 //! * [`matcher`] finds matches in that string (plain, whole word, regular expression), also
 //!   across a page boundary, and maps them back to character ranges and rectangles.
 //! * [`job`] runs the search on a background thread over a [`crate::DocumentHandle`].
+//! * [`scope`] narrows a search to a part of the document, such as a chapter (FIND-16).
 
 mod job;
 mod matcher;
 mod normalize;
+mod scope;
 
 use std::ops::Range;
 
 use crate::geom::Rect;
 
 pub use job::{SearchJob, SearchOptions};
+pub use scope::{ScopeChoice, SearchScope, document_end, scope_choices, section_scope};
 
 /// What to look for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -74,7 +77,8 @@ pub struct SearchSnapshot {
     pub matches: Vec<SearchMatch>,
     /// Pages processed so far (pages whose text could not be read count as processed).
     pub pages_done: u32,
-    /// Pages in the document; 0 until the document is known.
+    /// Pages to search: those of the document, or of the scope when the search has one; 0 until
+    /// the document is known.
     pub pages_total: u32,
     /// Every page has been processed (or the search stopped at the match limit).
     pub finished: bool,

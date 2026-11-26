@@ -418,6 +418,8 @@ pub struct AppState {
     pub doc_db: DocStateDb,
     /// The searches made, newest first (`search_history.json`, FIND-13). Only `dispatch` changes it.
     pub search_history: SearchHistory,
+    /// Where the threads that copy the text of a section leave it (SEL-5).
+    pub range_copies: crate::views::copy_text::Inbox,
     /// The section path line above PDF views is shown (TOC-6). Not saved.
     pub show_breadcrumb: bool,
     /// Where captures put their image. `None` uses the system clipboard; tests set a fake (WP-54).
@@ -465,6 +467,7 @@ impl AppState {
             status_notice: None,
             doc_db: DocStateDb::default(),
             search_history: SearchHistory::default(),
+            range_copies: crate::views::copy_text::Inbox::default(),
             show_breadcrumb: true,
             capture_clipboard: None,
             translate: TranslateApp::default(),

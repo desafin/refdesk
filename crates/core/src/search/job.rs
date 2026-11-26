@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::matcher::Matcher;
-use super::{MAX_MATCHES, SearchError, SearchMatch, SearchQuery, SearchSnapshot};
+use super::{MAX_MATCHES, SearchError, SearchMatch, SearchQuery, SearchScope, SearchSnapshot};
 use crate::engine::{DocStatus, DocumentHandle, Notifier};
 
 /// How often the thread looks at a document that is still opening.
@@ -86,11 +86,44 @@ impl SearchJob {
         SearchJob::start_with(doc, query, start_page, notifier, SearchOptions::default())
     }
 
+    /// [`SearchJob::start`] limited to `scope` (FIND-16): only the matches that start inside it
+    /// are found, and only its pages are read (plus the page after the last one, for a phrase
+    /// that runs over the page break). `pages_total` and `pages_done` count the pages of the
+    /// scope. The pages are read from `start_page` on when it lies in the scope, else from the
+    /// first page of the scope, and wrap around inside it. `None` searches the whole document.
+    pub fn start_in(
+        doc: DocumentHandle,
+        query: SearchQuery,
+        start_page: u32,
+        scope: Option<SearchScope>,
+        notifier: Notifier,
+    ) -> Result<SearchJob, SearchError> {
+        SearchJob::spawn(
+            doc,
+            query,
+            start_page,
+            scope,
+            notifier,
+            SearchOptions::default(),
+        )
+    }
+
     /// [`SearchJob::start`] with non-default options (used by tests).
     pub fn start_with(
         doc: DocumentHandle,
         query: SearchQuery,
         start_page: u32,
+        notifier: Notifier,
+        options: SearchOptions,
+    ) -> Result<SearchJob, SearchError> {
+        SearchJob::spawn(doc, query, start_page, None, notifier, options)
+    }
+
+    fn spawn(
+        doc: DocumentHandle,
+        query: SearchQuery,
+        start_page: u32,
+        scope: Option<SearchScope>,
         notifier: Notifier,
         options: SearchOptions,
     ) -> Result<SearchJob, SearchError> {
@@ -104,7 +137,14 @@ impl SearchJob {
             .name("refdesk-search".to_string())
             .spawn(move || {
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    run(&worker, &doc, &matcher, start_page, &notifier, options);
+                    run(
+                        &worker,
+                        &doc,
+                        &matcher,
+                        &Plan { start_page, scope },
+                        &notifier,
+                        options,
+                    );
                 }));
                 if outcome.is_err() {
                     // A bug must not leave the UI waiting for a search that never ends.
@@ -181,11 +221,17 @@ fn wait_until_open(shared: &Shared, doc: &DocumentHandle) -> bool {
     }
 }
 
+/// Where a search starts and what part of the document it covers.
+struct Plan {
+    start_page: u32,
+    scope: Option<SearchScope>,
+}
+
 fn run(
     shared: &Shared,
     doc: &DocumentHandle,
     matcher: &Matcher,
-    start_page: u32,
+    plan: &Plan,
     notifier: &Notifier,
     options: SearchOptions,
 ) {
@@ -208,21 +254,27 @@ fn run(
         }
         return;
     }
-    progress.total = doc
+    let doc_pages = doc
         .info()
         .map_or(0, |i| u32::try_from(i.page_sizes.len()).unwrap_or(u32::MAX));
+    // The pages to read: all of them, or those of the scope.
+    let range = plan.scope.map_or(0..doc_pages, |s| s.pages(doc_pages));
+    progress.total = range.end - range.start;
     progress.publish(shared);
 
-    let total = progress.total;
-    let start = if start_page < total { start_page } else { 0 };
-    for page in (start..total).chain(0..start) {
+    let start = if range.contains(&plan.start_page) {
+        plan.start_page
+    } else {
+        range.start
+    };
+    for page in (start..range.end).chain(range.start..start) {
         if shared.cancelled() {
             return;
         }
         let found = match doc.page_text_wait(page) {
             Ok(text) if !text.chars.is_empty() => {
                 // The next page of the document, for a phrase that runs over the page break.
-                let next = if page + 1 < total {
+                let next = if page + 1 < doc_pages {
                     doc.page_text_wait(page + 1).ok()
                 } else {
                     None
@@ -235,6 +287,9 @@ fn run(
         progress.done += 1;
 
         let mut found = found;
+        if let Some(scope) = &plan.scope {
+            found.retain(|m| scope.contains_match(m));
+        }
         if progress.count + found.len() > options.max_matches {
             found.truncate(options.max_matches.saturating_sub(progress.count));
             progress.truncated = true;

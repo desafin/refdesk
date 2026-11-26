@@ -468,6 +468,7 @@ enum RowEvent {
     Toggle(u32),
     Go(u32, OpenHow),
     CopyTitle(u32),
+    CopyText(u32),
     ExpandAll,
     CollapseAll,
 }
@@ -583,6 +584,7 @@ fn show_tree(
                     ui.ctx().copy_text(item.title.clone());
                 }
             }
+            RowEvent::CopyText(item) => queue.push(Action::CopyOutlineItemText { tab, item }),
             RowEvent::ExpandAll => toc.expand_all(),
             RowEvent::CollapseAll => toc.collapse_all(outline),
         }
@@ -707,6 +709,13 @@ fn show_row(
         }
         if ui.button(tr("toc.copy_title")).clicked() {
             events.push(RowEvent::CopyTitle(row.idx));
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_target, egui::Button::new(tr("toc.copy_section_text")))
+            .clicked()
+        {
+            events.push(RowEvent::CopyText(row.idx));
             ui.close();
         }
         ui.separator();

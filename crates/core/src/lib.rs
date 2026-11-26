@@ -39,7 +39,8 @@ pub use nav::dest::{DestKind, Destination};
 pub use nav::history::{History, Place};
 pub use outline::{Outline, OutlineItem, OutlineNode};
 pub use search::{
-    MatchPart, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery, SearchSnapshot,
+    MatchPart, ScopeChoice, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery,
+    SearchScope, SearchSnapshot, document_end, scope_choices, section_scope,
 };
 pub use store::{
     CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths, Prefs,
