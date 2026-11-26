@@ -1,14 +1,16 @@
-//! Translation through a model on a local server (`docs/ARCHITECTURE.md` §4.14, TR-5 ~ 8, 11 ~ 13).
+//! Translation through a model on a local server (`docs/ARCHITECTURE.md` §4.14, TR-5 ~ 8, 11 ~ 14).
 //!
 //! The app only knows [`TranslateBackend`]. Two implementations talk HTTP to a server on this
 //! machine: [`OllamaBackend`] (Ollama's own API) and [`OpenAiBackend`] (an OpenAI compatible
-//! API). [`backend_from_config`] picks one from `[translate]`.
+//! API). A third, [`EmbeddedBackend`], runs llama.cpp in the process on a GGUF file when the
+//! `embedded` build feature is on. [`backend_from_config`] picks one from `[translate]`.
 //!
 //! A backend blocks while it waits for the server, so it is only ever called from a
 //! [`TranslateJob`] thread (R-1). Prompts and output clean-up are pure functions in [`prompt`];
 //! [`TranslationCache`] remembers finished translations across runs (TR-6).
 
 pub mod cache;
+pub mod embedded;
 mod http;
 pub mod ollama;
 pub mod openai;
@@ -20,14 +22,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::engine::Notifier;
-use crate::store::{TranslateBackendKind, TranslateConfig};
+use crate::store::{Paths, TranslateBackendKind, TranslateConfig};
 
 pub use cache::{MAX_CACHE_ENTRIES, TranslationCache};
+pub use embedded::EmbeddedBackend;
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
 pub use prompt::{
     MAX_PASSAGE_CHARS, MAX_WORD_OUTPUT_CHARS, Prompts, clean_output, fill_passage_template,
-    fill_word_template, language_name, max_tokens, passage_prompt, prepare_passage,
+    fill_word_template, gemma_chat, language_name, max_tokens, passage_prompt, prepare_passage,
     sentence_around, word_prompt,
 };
 
@@ -101,6 +104,15 @@ pub enum TranslateError {
     /// The request was cancelled.
     #[error("cancelled")]
     Cancelled,
+    /// `backend = "embedded"` in an executable built without the `embedded` feature.
+    #[error(
+        "this executable has no embedded translation engine; build it with `cargo build --features embedded-vulkan`"
+    )]
+    NotBuilt,
+    /// The embedded engine failed: the model file could not be read (format, architecture,
+    /// memory) or the engine reported an error.
+    #[error("the embedded translation engine failed: {0}")]
+    Engine(String),
 }
 
 /// A translation server. Implementations block, so they are called from worker threads only.
@@ -123,14 +135,27 @@ pub trait TranslateBackend: Send + Sync {
 
     /// The name that goes into cache keys: model and target language.
     fn identity(&self) -> String;
+
+    /// Gives back the memory the model holds, now (translation mode off, another model picked).
+    /// The next request loads it again. Does not block. Server backends leave this to the
+    /// server's own keep-alive.
+    fn release(&self) {}
 }
 
 /// The backend `[translate]` asks for (`backend`, `endpoint`, `model`, ...). The caller applies
-/// the model picked in the app first (see `store::effective_translate_config`).
+/// the model picked in the app first (see `store::effective_translate_config`). The embedded
+/// backend without `models_dir` uses the models folder of [`Paths::from_env`].
 pub fn backend_from_config(config: &TranslateConfig) -> Arc<dyn TranslateBackend> {
     match config.backend {
         TranslateBackendKind::Ollama => Arc::new(OllamaBackend::new(config)),
         TranslateBackendKind::OpenAi => Arc::new(OpenAiBackend::new(config)),
+        TranslateBackendKind::Embedded => {
+            let dir = config
+                .models_dir
+                .clone()
+                .unwrap_or_else(|| Paths::from_env().models_dir());
+            Arc::new(EmbeddedBackend::new(config, dir))
+        }
     }
 }
 

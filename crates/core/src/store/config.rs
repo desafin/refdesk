@@ -154,6 +154,9 @@ pub enum TranslateBackendKind {
     /// `llama-server`, LM Studio, vLLM, ...
     #[serde(rename = "openai")]
     OpenAi,
+    /// The in-process engine (llama.cpp) reading a GGUF model file; an optional build feature
+    /// (`embedded`, `embedded-vulkan`).
+    Embedded,
 }
 
 impl TranslateBackendKind {
@@ -162,14 +165,16 @@ impl TranslateBackendKind {
         match self {
             TranslateBackendKind::Ollama => DEFAULT_OLLAMA_ENDPOINT,
             TranslateBackendKind::OpenAi => DEFAULT_OPENAI_ENDPOINT,
+            TranslateBackendKind::Embedded => EMBEDDED_ENDPOINT,
         }
     }
 
-    /// `"ollama"` or `"openai"`, as written in the file.
+    /// `"ollama"`, `"openai"` or `"embedded"`, as written in the file.
     pub fn name(self) -> &'static str {
         match self {
             TranslateBackendKind::Ollama => "ollama",
             TranslateBackendKind::OpenAi => "openai",
+            TranslateBackendKind::Embedded => "embedded",
         }
     }
 }
@@ -178,8 +183,54 @@ impl TranslateBackendKind {
 pub const DEFAULT_OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434";
 /// Default address of the OpenAI compatible backend (`llama-server`'s default port).
 pub const DEFAULT_OPENAI_ENDPOINT: &str = "http://127.0.0.1:8080";
+/// What [`TranslateConfig::endpoint`] gives for the embedded backend, which has no server.
+pub const EMBEDDED_ENDPOINT: &str = "in-process";
 /// Default translation model.
 pub const DEFAULT_TRANSLATE_MODEL: &str = "translategemma:4b";
+/// Default context size of the embedded engine, in tokens.
+pub const DEFAULT_CONTEXT_TOKENS: u32 = 4096;
+/// Smallest and largest accepted `context_tokens`.
+const MIN_CONTEXT_TOKENS: u32 = 256;
+const MAX_CONTEXT_TOKENS: u32 = 131_072;
+
+/// How many layers of the model the embedded engine puts on the GPU (`gpu_layers`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuLayers {
+    /// Every layer (`"all"`, the default). Falls back to the CPU when there is no usable GPU.
+    #[default]
+    All,
+    /// This many layers; 0 runs on the CPU only.
+    Count(u32),
+}
+
+impl Serialize for GpuLayers {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            GpuLayers::All => s.serialize_str("all"),
+            GpuLayers::Count(n) => s.serialize_u32(*n),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuLayers {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<GpuLayers, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Count(i64),
+            Text(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Count(n) => u32::try_from(n).map(GpuLayers::Count).map_err(|_| {
+                serde::de::Error::custom(format!("{n} is not a layer count (0 or more)"))
+            }),
+            Raw::Text(t) if t.trim().eq_ignore_ascii_case("all") => Ok(GpuLayers::All),
+            Raw::Text(t) => Err(serde::de::Error::custom(format!(
+                "{t:?} is not \"all\" or a number"
+            ))),
+        }
+    }
+}
 
 /// Settings of the translation feature (`[translate]`, `docs/ARCHITECTURE.md` §4.14).
 ///
@@ -188,17 +239,19 @@ pub const DEFAULT_TRANSLATE_MODEL: &str = "translategemma:4b";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranslateConfig {
-    /// `"ollama"` (default) or `"openai"`.
+    /// `"ollama"` (default), `"openai"` or `"embedded"`.
     pub backend: TranslateBackendKind,
     /// Server address, `http://` only (the feature is meant for a local server, so no TLS).
     /// `None` means the default of the backend (see [`TranslateConfig::endpoint`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     /// Model name as the server knows it. A model picked in the app (`prefs.json`) wins.
+    /// For the embedded backend: a file name in `models_dir` (`.gguf` may be left out) or an
+    /// absolute path.
     pub model: String,
     /// Target language code (`ko`, `en`, `ja`, ...).
     pub target: String,
-    /// How long the server keeps the model loaded after the last request (Ollama only).
+    /// How long the model stays loaded after the last request (Ollama and embedded).
     pub keep_alive_minutes: u32,
     /// The word popup also translates the sentence the word is in.
     pub word_with_sentence: bool,
@@ -209,6 +262,15 @@ pub struct TranslateConfig {
     /// is in, `{target}` the language name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub word_prompt: Option<String>,
+    /// Embedded backend: the folder of the GGUF files. `None` means [`Paths::models_dir`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_dir: Option<PathBuf>,
+    /// Embedded backend: layers on the GPU (`"all"` or a number, 0 = CPU only).
+    pub gpu_layers: GpuLayers,
+    /// Embedded backend: CPU threads; 0 picks half the logical cores, at most 16.
+    pub threads: u32,
+    /// Embedded backend: context size in tokens (prompt and answer together).
+    pub context_tokens: u32,
 }
 
 impl Default for TranslateConfig {
@@ -222,6 +284,10 @@ impl Default for TranslateConfig {
             word_with_sentence: true,
             passage_prompt: None,
             word_prompt: None,
+            models_dir: None,
+            gpu_layers: GpuLayers::All,
+            threads: 0,
+            context_tokens: DEFAULT_CONTEXT_TOKENS,
         }
     }
 }
@@ -245,9 +311,10 @@ impl TranslateConfig {
             Some(v) => match v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
                 Some("ollama") => TranslateBackendKind::Ollama,
                 Some("openai") => TranslateBackendKind::OpenAi,
+                Some("embedded") => TranslateBackendKind::Embedded,
                 _ => {
                     notes.push(format!(
-                        "translate.backend: {v} is not \"ollama\" or \"openai\""
+                        "translate.backend: {v} is not \"ollama\", \"openai\" or \"embedded\""
                     ));
                     d.backend
                 }
@@ -299,6 +366,23 @@ impl TranslateConfig {
         };
         let passage_prompt = prompt_from(t, "passage_prompt", "{text}", notes);
         let word_prompt = prompt_from(t, "word_prompt", "{word}", notes);
+        let models_dir = take::<Option<PathBuf>>(t, "models_dir", None, notes)
+            .filter(|p| !p.as_os_str().is_empty());
+        let threads = take::<i64>(t, "threads", i64::from(d.threads), notes);
+        let threads = u32::try_from(threads).unwrap_or_else(|_| {
+            notes.push(format!("translate.threads: {threads} is negative"));
+            d.threads
+        });
+        let context = take::<i64>(t, "context_tokens", i64::from(d.context_tokens), notes);
+        let context_tokens = match u32::try_from(context) {
+            Ok(c) if (MIN_CONTEXT_TOKENS..=MAX_CONTEXT_TOKENS).contains(&c) => c,
+            _ => {
+                notes.push(format!(
+                    "translate.context_tokens: {context} is not between {MIN_CONTEXT_TOKENS} and {MAX_CONTEXT_TOKENS}"
+                ));
+                d.context_tokens
+            }
+        };
         TranslateConfig {
             backend,
             endpoint,
@@ -308,7 +392,19 @@ impl TranslateConfig {
             word_with_sentence: take(t, "word_with_sentence", d.word_with_sentence, notes),
             passage_prompt,
             word_prompt,
+            models_dir,
+            gpu_layers: take(t, "gpu_layers", d.gpu_layers, notes),
+            threads,
+            context_tokens,
         }
+    }
+
+    /// The folder of the embedded backend's model files: `models_dir`, or
+    /// [`Paths::models_dir`] of `paths`.
+    pub fn models_dir_or(&self, paths: &Paths) -> PathBuf {
+        self.models_dir
+            .clone()
+            .unwrap_or_else(|| paths.models_dir())
     }
 }
 
@@ -825,10 +921,107 @@ mod tests {
                 word_with_sentence: false,
                 passage_prompt: Some("{text}".into()),
                 word_prompt: Some("{word}".into()),
+                models_dir: Some("/m".into()),
+                gpu_layers: GpuLayers::Count(20),
+                threads: 6,
+                context_tokens: 2048,
             },
             ..Config::default()
         };
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path), c);
+        let all = Config {
+            translate: TranslateConfig {
+                backend: TranslateBackendKind::Embedded,
+                ..TranslateConfig::default()
+            },
+            ..Config::default()
+        };
+        all.save(&path).unwrap();
+        assert_eq!(Config::load(&path), all);
+    }
+
+    #[test]
+    fn embedded_translate_defaults() {
+        let t = Config::default().translate;
+        assert_eq!(t.models_dir, None);
+        assert_eq!(t.gpu_layers, GpuLayers::All);
+        assert_eq!(t.threads, 0);
+        assert_eq!(t.context_tokens, 4096);
+        let paths = Paths::under(Path::new("/r"));
+        assert_eq!(t.models_dir_or(&paths), PathBuf::from("/r/data/models"));
+    }
+
+    #[test]
+    fn embedded_translate_items_are_read() {
+        let t = load_str(
+            r#"
+            [translate]
+            backend = "embedded"
+            models_dir = "/home/u/models"
+            model = "translategemma-4b-it.Q4_K_M"
+            gpu_layers = 0
+            threads = 12
+            context_tokens = 8192
+            "#,
+        )
+        .translate;
+        assert_eq!(t.backend, TranslateBackendKind::Embedded);
+        assert_eq!(t.backend.name(), "embedded");
+        assert_eq!(t.endpoint(), "in-process");
+        assert_eq!(t.models_dir, Some(PathBuf::from("/home/u/models")));
+        let paths = Paths::under(Path::new("/r"));
+        assert_eq!(t.models_dir_or(&paths), PathBuf::from("/home/u/models"));
+        assert_eq!(t.model, "translategemma-4b-it.Q4_K_M");
+        assert_eq!(t.gpu_layers, GpuLayers::Count(0));
+        assert_eq!(t.threads, 12);
+        assert_eq!(t.context_tokens, 8192);
+
+        let t = load_str("[translate]\nbackend = \"Embedded\"\ngpu_layers = \"ALL\"\n").translate;
+        assert_eq!(t.backend, TranslateBackendKind::Embedded);
+        assert_eq!(t.gpu_layers, GpuLayers::All);
+        let t = load_str("[translate]\ngpu_layers = 24\n").translate;
+        assert_eq!(t.gpu_layers, GpuLayers::Count(24));
+    }
+
+    #[test]
+    fn wrong_embedded_values_fall_back_one_by_one() {
+        let t = load_str(
+            r#"
+            [translate]
+            backend = "embedded"
+            models_dir = ""
+            gpu_layers = "most"
+            threads = -2
+            context_tokens = 10
+            target = "ja"
+            "#,
+        )
+        .translate;
+        assert_eq!(t.backend, TranslateBackendKind::Embedded);
+        assert_eq!(t.target, "ja");
+        assert_eq!(t.models_dir, None);
+        assert_eq!(t.gpu_layers, GpuLayers::All);
+        assert_eq!(t.threads, 0);
+        assert_eq!(t.context_tokens, 4096);
+        for bad in [
+            "gpu_layers = -1",
+            "gpu_layers = 1.5",
+            "gpu_layers = true",
+            "threads = \"many\"",
+            "context_tokens = 999999999",
+            "context_tokens = \"big\"",
+            "models_dir = 3",
+        ] {
+            let t = load_str(&format!("[translate]\nmodel = \"m\"\n{bad}\n")).translate;
+            assert_eq!(
+                t,
+                TranslateConfig {
+                    model: "m".into(),
+                    ..TranslateConfig::default()
+                },
+                "{bad}"
+            );
+        }
     }
 }

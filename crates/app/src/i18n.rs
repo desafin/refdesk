@@ -615,6 +615,26 @@ pub const TABLE: &[Row] = &[
     ),
     ("translate.err.cancelled", "취소됨", "Cancelled"),
     (
+        "translate.err.model_missing_embedded",
+        "모델 파일이 없습니다({model}). 모델 파일(.gguf)을 {endpoint} 에 두세요",
+        "No model file ({model}). Put a model file (.gguf) in {endpoint}",
+    ),
+    (
+        "translate.err.not_built",
+        "이 실행 파일에는 내장 번역 엔진이 들어 있지 않습니다. cargo build --features embedded-vulkan 으로 빌드하세요",
+        "This executable has no embedded translation engine. Build it with cargo build --features embedded-vulkan",
+    ),
+    (
+        "translate.err.engine",
+        "모델을 읽지 못했습니다: {message}",
+        "Could not load the model: {message}",
+    ),
+    (
+        "translate.tooltip_embedded",
+        "모델 파일: {model}\n엔진: 내장 (llama.cpp)\n모델 폴더: {dir}",
+        "Model file: {model}\nEngine: embedded (llama.cpp)\nModels folder: {dir}",
+    ),
+    (
         "cmd.view.toggle_page_colors",
         "쪽 색 바꾸기",
         "Toggle Page Colors",

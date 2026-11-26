@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use egui::Ui;
+use refdesk_core::translate::embedded::file_of_identity;
 use refdesk_core::{
     Paths, Prefs, TranslateBackend, TranslateBackendKind, TranslateConfig, TranslateError,
     TranslateJob, TranslateState, TranslationCache, atomic_write, backend_from_config,
@@ -54,7 +55,7 @@ pub enum Readiness {
 pub struct FailureHint {
     /// Which API.
     pub backend: TranslateBackendKind,
-    /// The server address.
+    /// The server address; for the embedded backend, the models folder.
     pub endpoint: String,
     /// The model in use.
     pub model: String,
@@ -62,9 +63,13 @@ pub struct FailureHint {
 
 impl FailureHint {
     fn of(config: &TranslateConfig) -> FailureHint {
+        let endpoint = match (&config.backend, &config.models_dir) {
+            (TranslateBackendKind::Embedded, Some(dir)) => dir.display().to_string(),
+            _ => config.endpoint(),
+        };
         FailureHint {
             backend: config.backend,
-            endpoint: config.endpoint(),
+            endpoint,
             model: config.model.clone(),
         }
     }
@@ -77,6 +82,7 @@ pub fn error_text(e: &TranslateError, hint: &FailureHint) -> String {
             .replace("{endpoint}", &hint.endpoint)
             .replace("{model}", &hint.model)
     };
+    let engine = |message: &str| tr("translate.err.engine").replace("{message}", message);
     match (e, hint.backend) {
         (TranslateError::Unreachable(_), TranslateBackendKind::Ollama) => {
             fill("translate.err.unreachable_ollama")
@@ -90,6 +96,12 @@ pub fn error_text(e: &TranslateError, hint: &FailureHint) -> String {
         (TranslateError::ModelMissing(_), TranslateBackendKind::OpenAi) => {
             fill("translate.err.model_missing_openai")
         }
+        (TranslateError::ModelMissing(_), TranslateBackendKind::Embedded) => {
+            fill("translate.err.model_missing_embedded")
+        }
+        (TranslateError::Unreachable(message), TranslateBackendKind::Embedded) => engine(message),
+        (TranslateError::NotBuilt, _) => tr("translate.err.not_built").to_owned(),
+        (TranslateError::Engine(message), _) => engine(message),
         (TranslateError::Http { status, message }, _) => tr("translate.err.http")
             .replace("{status}", &status.to_string())
             .replace("{message}", message),
@@ -345,11 +357,30 @@ impl TranslateApp {
     /// Builds the backend for `config` and `prefs`.
     fn rebuild(&mut self, config: &TranslateConfig, prefs: &Prefs) {
         self.settings = effective_translate_config(prefs, config);
-        self.backend = (self.factory)(&self.settings);
+        if self.settings.backend == TranslateBackendKind::Embedded
+            && self.settings.models_dir.is_none()
+        {
+            // Settled once so that texts can name the folder the backend reads.
+            self.settings.models_dir = Some(Paths::from_env().models_dir());
+        }
+        let old = std::mem::replace(&mut self.backend, (self.factory)(&self.settings));
+        drop_in_background(old);
         self.generation += 1;
         self.warm_up = None;
         self.models_job = None;
         self.models = ModelList::NotLoaded;
+    }
+}
+
+/// Drops a replaced backend on a helper thread: the embedded engine waits there until its model
+/// is freed (R-1). Other jobs may still hold it; then it goes when they end.
+fn drop_in_background(backend: Arc<dyn TranslateBackend>) {
+    let spawned = std::thread::Builder::new()
+        .name("refdesk-translate-drop".into())
+        .spawn(move || drop(backend));
+    // Without a thread the backend went with the closure, here.
+    if let Err(e) = spawned {
+        log::warn!("cannot start a thread to drop the old translation backend: {e}");
     }
 }
 
@@ -434,6 +465,8 @@ pub fn toggle_mode(state: &mut AppState, ctx: &egui::Context) {
         state.translate.readiness = Readiness::Off;
         state.translate.warm_up = None;
         close_all_popups(state);
+        // The embedded engine gives its GPU memory back now (TR-14).
+        state.translate.backend.release();
         notice(state, tr("status.translate_off").to_owned(), ctx);
     }
 }
@@ -480,6 +513,7 @@ pub fn set_model(state: &mut AppState, model: Option<String>, ctx: &egui::Contex
     state.prefs.translate_model = model.filter(|m| !m.trim().is_empty());
     save_prefs(state);
     let (config, prefs) = (state.config.translate.clone(), state.prefs.clone());
+    state.translate.backend.release();
     state.translate.rebuild(&config, &prefs);
     close_all_popups(state);
     if state.translate.mode {
@@ -602,8 +636,26 @@ pub fn save_now(state: &mut AppState) {
 // egui
 // ------------------------------------------------------------------------------------------------
 
-/// The hover text of the status bar button: the model, the backend and its address.
+/// The model the menu marks as in use: for the embedded backend the file it loads (which may
+/// differ from the configured name), else the configured name.
+pub fn current_model(t: &TranslateApp) -> String {
+    let identity = t.backend.identity();
+    match t.settings.backend {
+        TranslateBackendKind::Embedded => {
+            file_of_identity(&identity).map_or_else(|| t.settings.model.clone(), str::to_string)
+        }
+        _ => t.settings.model.clone(),
+    }
+}
+
+/// The hover text of the status bar button: the model, the backend and its address; for the
+/// embedded backend the model file and its folder.
 pub fn button_tooltip(t: &TranslateApp) -> String {
+    if t.settings.backend == TranslateBackendKind::Embedded {
+        return tr("translate.tooltip_embedded")
+            .replace("{model}", &current_model(t))
+            .replace("{dir}", &t.hint().endpoint);
+    }
     tr("translate.tooltip")
         .replace("{model}", &t.settings.model)
         .replace("{backend}", t.settings.backend.name())
@@ -660,7 +712,7 @@ pub fn model_menu(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
             queue.push(Action::RefreshTranslateModels);
         }
         let picked = state.prefs.translate_model.is_some();
-        for row in model_menu_rows(&t.models, &t.settings.model, picked) {
+        for row in model_menu_rows(&t.models, &current_model(t), picked) {
             match row {
                 ModelRow::Model { name, checked } => {
                     let button =
@@ -728,6 +780,8 @@ pub(crate) mod fake {
         pub requests: Vec<(String, TranslateRequest)>,
         /// The models warmed up, in order.
         pub warm_ups: Vec<String>,
+        /// The models released, in order.
+        pub releases: Vec<String>,
         /// Requests that saw their cancel flag.
         pub cancelled: usize,
         /// `translate` waits for pieces from `feed` instead of answering at once.
@@ -756,6 +810,7 @@ pub(crate) mod fake {
                 inner: Mutex::new(Inner {
                     requests: Vec::new(),
                     warm_ups: Vec::new(),
+                    releases: Vec::new(),
                     cancelled: 0,
                     manual: false,
                     feed: VecDeque::new(),
@@ -902,6 +957,10 @@ pub(crate) mod fake {
         fn identity(&self) -> String {
             format!("{}|ko", self.model)
         }
+
+        fn release(&self) {
+            self.log.set(|i| i.releases.push(self.model.clone()));
+        }
     }
 
     /// Backends that share `log`, one per configuration (named after its model).
@@ -1032,6 +1091,55 @@ mod tests {
         let protocol = error_text(&TranslateError::Protocol("cut".into()), &h);
         assert!(protocol.contains("cut"), "{protocol}");
         assert!(!error_text(&TranslateError::Cancelled, &h).is_empty());
+    }
+
+    #[test]
+    fn embedded_error_texts_say_how_to_fix_them() {
+        let h = FailureHint {
+            backend: TranslateBackendKind::Embedded,
+            endpoint: "/home/u/.local/share/refdesk/models".into(),
+            model: "translategemma:4b".into(),
+        };
+        let missing = error_text(&TranslateError::ModelMissing("m".into()), &h);
+        assert!(
+            missing.contains("/home/u/.local/share/refdesk/models")
+                && missing.contains(".gguf")
+                && !missing.contains("ollama pull"),
+            "{missing}"
+        );
+        let not_built = error_text(&TranslateError::NotBuilt, &h);
+        assert!(
+            not_built.contains("cargo build --features embedded-vulkan"),
+            "{not_built}"
+        );
+        // The same text whatever the configured backend.
+        assert_eq!(error_text(&TranslateError::NotBuilt, &hint()), not_built);
+        let engine = error_text(&TranslateError::Engine("not a GGUF file".into()), &h);
+        assert!(engine.contains("not a GGUF file"), "{engine}");
+        assert_eq!(
+            engine,
+            tr("translate.err.engine").replace("{message}", "not a GGUF file")
+        );
+        let (text, why) = readiness_text(&Readiness::Failed(TranslateError::NotBuilt), &h).unwrap();
+        assert_eq!(text, tr("translate.unavailable"));
+        assert_eq!(why.as_deref(), Some(not_built.as_str()));
+    }
+
+    #[test]
+    fn the_embedded_tooltip_names_the_model_file_and_the_folder() {
+        let log = Log::new();
+        let mut t = TranslateApp::new(fake::factory(&log));
+        let config = TranslateConfig {
+            backend: TranslateBackendKind::Embedded,
+            models_dir: Some("/m".into()),
+            model: "tg.gguf".into(),
+            ..TranslateConfig::default()
+        };
+        t.rebuild(&config, &Prefs::default());
+        assert_eq!(t.hint().endpoint, "/m");
+        let tip = button_tooltip(&t);
+        assert!(tip.contains("tg.gguf") && tip.contains("/m"), "{tip}");
+        assert!(!tip.contains("in-process"), "{tip}");
     }
 
     #[test]
@@ -1167,6 +1275,36 @@ mod tests {
         assert!(state.translate.mode);
         assert_eq!(state.translate.readiness, Readiness::Loading);
         log2.wait("the warm-up after the restart", |i| i.warm_ups.len() == 1);
+    }
+
+    #[test]
+    fn switching_off_releases_the_model() {
+        let log = Log::new();
+        let ctx = egui::Context::default();
+        let mut state = state_with(&log, None, &ctx);
+        dispatch(&mut state, Action::ToggleTranslateMode, &ctx);
+        assert!(log.get(|i| i.releases.is_empty()));
+        dispatch(&mut state, Action::ToggleTranslateMode, &ctx);
+        assert_eq!(log.get(|i| i.releases.clone()), ["translategemma:4b"]);
+    }
+
+    #[test]
+    fn choosing_another_model_releases_the_previous_one() {
+        let log = Log::new();
+        let ctx = egui::Context::default();
+        let mut state = state_with(&log, None, &ctx);
+        dispatch(&mut state, Action::ToggleTranslateMode, &ctx);
+        dispatch(
+            &mut state,
+            Action::SetTranslateModel(Some("qwen2.5:7b".into())),
+            &ctx,
+        );
+        assert_eq!(log.get(|i| i.releases.clone()), ["translategemma:4b"]);
+        dispatch(&mut state, Action::SetTranslateModel(None), &ctx);
+        assert_eq!(
+            log.get(|i| i.releases.clone()),
+            ["translategemma:4b", "qwen2.5:7b"]
+        );
     }
 
     #[test]

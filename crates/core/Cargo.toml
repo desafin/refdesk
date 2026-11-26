@@ -22,11 +22,19 @@ unicode-normalization.workspace = true
 png.workspace = true
 regex.workspace = true
 ureq.workspace = true
+# Optional: compiles llama.cpp (needs cmake, libclang and a C++ compiler). Off by default.
+llama-cpp-2 = { workspace = true, optional = true }
 
 [features]
 # Test PDF generator (`testutil` module). Enabled for this crate's own tests through the
 # self dev-dependency below, so `cargo test --workspace` needs no extra flags.
 testutil = []
+# In-process translation engine (`translate::embedded`), CPU only.
+embedded = ["dep:llama-cpp-2"]
+# The same with the Vulkan GPU backend (needs glslc, libvulkan-dev and SPIRV-Headers).
+embedded-vulkan = ["embedded", "llama-cpp-2/vulkan"]
+# The same with CUDA. The executable grows by 0.7 ~ 1 GB (static cuBLAS); not checked here.
+embedded-cuda = ["embedded", "llama-cpp-2/cuda"]
 
 [dev-dependencies]
 refdesk-core = { path = ".", features = ["testutil"] }

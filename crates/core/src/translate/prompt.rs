@@ -56,6 +56,12 @@ pub fn passage_prompt(model: &str, target: &str, text: &str) -> String {
     }
 }
 
+/// One user turn in Gemma's chat format, ready for the model's answer. The embedded engine uses
+/// it when the model file carries no chat template it can apply.
+pub fn gemma_chat(user: &str) -> String {
+    format!("<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n")
+}
+
 /// The instruction asking what `word` means in `sentence`, in one or two words of `target`.
 /// An empty sentence asks about the word alone.
 pub fn word_prompt(target: &str, word: &str, sentence: &str) -> String {

@@ -44,6 +44,7 @@ pub use search::{
     MatchPart, ScopeChoice, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery,
     SearchScope, SearchSnapshot, document_end, scope_choices, section_scope,
 };
+pub use store::config::GpuLayers;
 pub use store::{
     Annotations, Bookmark, DocAnnotations, GlobalMark, Highlight, HighlightColor, Item, ItemKind,
 };
@@ -59,8 +60,9 @@ pub use text::{
     CopyOptions, PageText, Selection, TextBlock, TextChar, TextLine, TextPos, selection_text,
 };
 pub use translate::{
-    OllamaBackend, OpenAiBackend, TranslateBackend, TranslateError, TranslateJob, TranslateKind,
-    TranslateRequest, TranslateSnapshot, TranslateState, TranslationCache, backend_from_config,
+    EmbeddedBackend, OllamaBackend, OpenAiBackend, TranslateBackend, TranslateError, TranslateJob,
+    TranslateKind, TranslateRequest, TranslateSnapshot, TranslateState, TranslationCache,
+    backend_from_config,
 };
 pub use workspace::{
     EntryKind, ScanLimits, WorkspaceEntry, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher,

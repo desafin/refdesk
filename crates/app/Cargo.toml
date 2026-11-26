@@ -21,6 +21,12 @@ png.workspace = true
 # Local time for capture file names; pure Rust, reads the system time zone itself.
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 
+[features]
+# Forwarded to refdesk-core: the in-process translation engine (`backend = "embedded"`).
+embedded = ["refdesk-core/embedded"]
+embedded-vulkan = ["refdesk-core/embedded-vulkan"]
+embedded-cuda = ["refdesk-core/embedded-cuda"]
+
 [dev-dependencies]
 egui_kittest.workspace = true
 refdesk-core = { workspace = true, features = ["testutil"] }

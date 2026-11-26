@@ -13,12 +13,14 @@ pub struct Paths {
     pub socket_path: PathBuf,
     /// Default folder for saved screen captures.
     pub capture_dir: PathBuf,
+    /// Holds `models/` (`<data_home>/refdesk`, else `<home>/.local/share/refdesk`).
+    pub data_dir: PathBuf,
 }
 
 impl Paths {
-    /// Reads `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR` and `HOME` and resolves the
-    /// paths with [`Paths::from_values`]. This is the only function in the store that reads the
-    /// environment.
+    /// Reads `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME` and `HOME`
+    /// and resolves the paths with [`Paths::from_values`] and [`Paths::with_data_home`]. This is
+    /// the only function in the store that reads the environment.
     pub fn from_env() -> Paths {
         let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
         Paths::from_values(
@@ -27,6 +29,16 @@ impl Paths {
             var("XDG_RUNTIME_DIR"),
             var("HOME"),
         )
+        .with_data_home(var("XDG_DATA_HOME"))
+    }
+
+    /// Puts `data_dir` at `<data_home>/refdesk` when `data_home` is an absolute path; otherwise
+    /// it stays where [`Paths::from_values`] put it (`<home>/.local/share/refdesk`).
+    pub fn with_data_home(mut self, data_home: Option<PathBuf>) -> Paths {
+        if let Some(dir) = data_home.filter(|p| p.is_absolute()) {
+            self.data_dir = dir.join("refdesk");
+        }
+        self
     }
 
     /// Resolves the paths from already-read values. A value that is empty or not an absolute
@@ -37,6 +49,7 @@ impl Paths {
     /// * `config_dir`: `<config_home>/refdesk`, else `<home>/.config/refdesk`
     /// * `socket_path`: `<runtime_dir>/refdesk.sock`, else `<state_dir>/refdesk.sock`
     /// * `capture_dir`: `<home>/Pictures/refdesk`
+    /// * `data_dir`: `<home>/.local/share/refdesk` (see [`Paths::with_data_home`])
     pub fn from_values(
         state_home: Option<PathBuf>,
         config_home: Option<PathBuf>,
@@ -60,6 +73,7 @@ impl Paths {
             config_dir,
             socket_path,
             capture_dir: home.join("Pictures/refdesk"),
+            data_dir: home.join(".local/share/refdesk"),
         }
     }
 
@@ -70,6 +84,7 @@ impl Paths {
             config_dir: root.join("config"),
             socket_path: root.join("refdesk.sock"),
             capture_dir: root.join("captures"),
+            data_dir: root.join("data"),
         }
     }
 
@@ -101,6 +116,11 @@ impl Paths {
     /// `<state_dir>/annotations.json`: bookmarks, marks and highlights (ETC-2, ETC-3, ETC-5).
     pub fn annotations_file(&self) -> PathBuf {
         self.state_dir.join("annotations.json")
+    }
+
+    /// `<data_dir>/models`: the GGUF model files of the embedded translation engine.
+    pub fn models_dir(&self) -> PathBuf {
+        self.data_dir.join("models")
     }
 
     /// `<config_dir>/config.toml`.
@@ -172,9 +192,32 @@ mod tests {
             &paths.config_dir,
             &paths.socket_path,
             &paths.capture_dir,
+            &paths.data_dir,
         ] {
             assert!(dir.starts_with(root), "{dir:?}");
         }
+    }
+
+    #[test]
+    fn the_models_folder_is_under_the_data_home() {
+        let paths = Paths::from_values(None, None, None, p("/home/u"));
+        assert_eq!(
+            paths.models_dir(),
+            PathBuf::from("/home/u/.local/share/refdesk/models")
+        );
+        let paths = paths.with_data_home(p("/x/data"));
+        assert_eq!(paths.models_dir(), PathBuf::from("/x/data/refdesk/models"));
+        let unchanged = Paths::from_values(None, None, None, p("/home/u"))
+            .with_data_home(p("relative"))
+            .with_data_home(None);
+        assert_eq!(
+            unchanged.models_dir(),
+            PathBuf::from("/home/u/.local/share/refdesk/models")
+        );
+        assert_eq!(
+            Paths::under(Path::new("/r")).models_dir(),
+            PathBuf::from("/r/data/models")
+        );
     }
 
     #[test]
