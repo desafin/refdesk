@@ -45,6 +45,9 @@ pub use search::{
     SearchScope, SearchSnapshot, document_end, scope_choices, section_scope,
 };
 pub use store::{
+    Annotations, Bookmark, DocAnnotations, GlobalMark, Highlight, HighlightColor, Item, ItemKind,
+};
+pub use store::{
     CaptureConfig, Config, DefaultZoom, DocRecord, DocStateDb, Language, LayoutNode, Paths, Prefs,
     RecentFolder, ScrollSpeedItem, SearchHistory, SearchHistoryEntry, Session, SessionTab,
     SessionWindow, SessionWorkspace, Theme, TranslateBackendKind, TranslateConfig, atomic_write,

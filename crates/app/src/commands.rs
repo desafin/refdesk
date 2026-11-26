@@ -6,10 +6,11 @@
 //! written down elsewhere.
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use refdesk_core::ZoomMode;
+use refdesk_core::{ItemKind, ZoomMode};
 
 use crate::action::Action;
 use crate::overlays::palette::PaletteMode;
+use crate::panels::marks::MarksAction;
 use crate::panels::sidebar::SidebarSection;
 use crate::state::{AppState, PdfTab, Tab, TabId};
 use crate::windows::dock::SplitDir;
@@ -262,6 +263,15 @@ fn toggle_page_colors(state: &AppState) -> Option<Action> {
     )))
 }
 
+/// "Next/Previous Bookmark" and "Next/Previous Highlight" for the focused PDF tab (ETC-2, ETC-3).
+fn marks_step(state: &AppState, kind: ItemKind, forward: bool) -> Option<Action> {
+    let (tab, _) = state.focused_pdf()?;
+    Some(Action::Marks(match kind {
+        ItemKind::Bookmark => MarksAction::StepBookmark { tab, forward },
+        ItemKind::Highlight => MarksAction::StepHighlight { tab, forward },
+    }))
+}
+
 /// The command table. Order is the order within each menu.
 pub static COMMANDS: &[Command] = &[
     Command {
@@ -308,6 +318,108 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::Quit),
+    },
+    Command {
+        id: "edit.add_bookmark",
+        name_key: "cmd.edit.add_bookmark",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::D)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| s.focus.map(|t| Action::Marks(MarksAction::AddBookmark(t))),
+    },
+    Command {
+        id: "edit.next_bookmark",
+        name_key: "cmd.edit.next_bookmark",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: |s| crate::panels::marks::focused_has(s, ItemKind::Bookmark),
+        action: |s| marks_step(s, ItemKind::Bookmark, true),
+    },
+    Command {
+        id: "edit.prev_bookmark",
+        name_key: "cmd.edit.prev_bookmark",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: |s| crate::panels::marks::focused_has(s, ItemKind::Bookmark),
+        action: |s| marks_step(s, ItemKind::Bookmark, false),
+    },
+    Command {
+        id: "edit.set_mark",
+        name_key: "cmd.edit.set_mark",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::M)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| {
+            s.focus
+                .map(|tab| Action::Marks(MarksAction::StartMark { tab, go: false }))
+        },
+    },
+    Command {
+        id: "edit.go_to_mark",
+        name_key: "cmd.edit.go_to_mark",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::Quote)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| {
+            s.focus
+                .map(|tab| Action::Marks(MarksAction::StartMark { tab, go: true }))
+        },
+    },
+    Command {
+        id: "edit.highlight",
+        name_key: "cmd.edit.highlight",
+        menu: MenuGroup::Edit,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::H)),
+        aliases: &[],
+        enabled: has_pdf_selection,
+        action: |s| {
+            s.focus
+                .map(|tab| Action::Marks(MarksAction::Highlight { tab, color: None }))
+        },
+    },
+    Command {
+        id: "edit.next_highlight",
+        name_key: "cmd.edit.next_highlight",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: |s| crate::panels::marks::focused_has(s, ItemKind::Highlight),
+        action: |s| marks_step(s, ItemKind::Highlight, true),
+    },
+    Command {
+        id: "edit.prev_highlight",
+        name_key: "cmd.edit.prev_highlight",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: |s| crate::panels::marks::focused_has(s, ItemKind::Highlight),
+        action: |s| marks_step(s, ItemKind::Highlight, false),
+    },
+    Command {
+        id: "edit.copy_highlights",
+        name_key: "cmd.edit.copy_highlights",
+        menu: MenuGroup::Edit,
+        shortcut: None,
+        aliases: &[],
+        enabled: |s| crate::panels::marks::focused_has(s, ItemKind::Highlight),
+        action: |s| {
+            s.focus
+                .map(|t| Action::Marks(MarksAction::CopyAllHighlights(t)))
+        },
+    },
+    Command {
+        id: "view.show_marks",
+        name_key: "cmd.view.show_marks",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::Marks(MarksAction::Show)),
     },
     Command {
         id: "edit.copy",

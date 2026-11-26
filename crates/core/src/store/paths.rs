@@ -98,6 +98,11 @@ impl Paths {
         self.state_dir.join("translations.json")
     }
 
+    /// `<state_dir>/annotations.json`: bookmarks, marks and highlights (ETC-2, ETC-3, ETC-5).
+    pub fn annotations_file(&self) -> PathBuf {
+        self.state_dir.join("annotations.json")
+    }
+
     /// `<config_dir>/config.toml`.
     pub fn config_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")
@@ -181,5 +186,9 @@ mod tests {
             PathBuf::from("/r/state/documents.json")
         );
         assert_eq!(paths.config_file(), PathBuf::from("/r/config/config.toml"));
+        assert_eq!(
+            paths.annotations_file(),
+            PathBuf::from("/r/state/annotations.json")
+        );
     }
 }

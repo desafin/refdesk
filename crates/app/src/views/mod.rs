@@ -3,6 +3,7 @@
 
 pub mod copy_text;
 pub mod diff_view;
+pub mod highlights;
 pub mod links;
 pub mod pdf_view;
 pub mod preload;

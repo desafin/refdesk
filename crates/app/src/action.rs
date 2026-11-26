@@ -113,6 +113,8 @@ pub enum Action {
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
     /// clipboard (SEL-2).
     CopySelection(TabId),
+    /// Bookmarks, marks and highlights (ETC-2, ETC-3, ETC-5; `panels/marks.rs`).
+    Marks(crate::panels::marks::MarksAction),
     /// Remember a search in the search history (FIND-14). `replaces` is the query a search box
     /// recorded by settling just before; it is dropped when it is only the beginning of `query`.
     RecordSearch {
@@ -479,6 +481,7 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             ctx.request_repaint();
         }
         Action::CopySelection(tab) => copy_selection(state, tab, ctx),
+        Action::Marks(action) => crate::panels::marks::dispatch(state, action, ctx),
         Action::RecordSearch { query, replaces } => {
             crate::panels::search_history::record(state, &query, replaces.as_ref())
         }

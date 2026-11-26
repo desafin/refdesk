@@ -37,6 +37,7 @@ use crate::panels::global_search::DocMarks;
 use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
 use crate::state::{DocId, PdfTab, TabId};
+use crate::views::highlights::{self, HighlightView};
 use crate::views::links::{self, ClickButton, ClickMods, LinkAction, LinkHit, LinkState};
 use crate::views::selection::{self, Released, SelectionState};
 use crate::views::textures::{Pick, TextureCache};
@@ -207,6 +208,9 @@ pub struct PdfViewUiState {
     pub translate: Box<TranslateView>,
     /// The region zoom and the middle-button pan (VIEW-14, VIEW-6). Boxed to keep tabs small.
     pub region_zoom: Box<RegionZoom>,
+    /// The highlights of the document and the mark letter's wait (ETC-3, ETC-5). Boxed to keep
+    /// tabs small.
+    pub highlights: Box<HighlightView>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -723,6 +727,7 @@ fn show_document(
     let state = &mut tab.ui;
     state.sync(&tab.view, &info.page_sizes, info.generation, viewport);
     state.selection.sync_generation(info.generation);
+    highlights::handle_keys(ui, &state.highlights, cx.tab_id, cx.queue);
     // In capture mode a drag draws a rectangle and a click follows no link.
     let capturing = state.capture_input(ui, &response, view_rect, cx.focused, cx.tab_id, cx.queue);
     let capturing = region_zoom::input(
@@ -898,6 +903,7 @@ fn show_document(
         pixels,
         cx.textures,
     );
+    highlights::paint(ui, &response, view_rect, state, hover.is_some());
     paint_global_search(ui, view_rect, state, marks.as_ref());
     paint_search(ui, view_rect, state);
     paint_selection(ui, view_rect, state, &texts, cx.textures.page_colors());
@@ -946,6 +952,7 @@ fn show_document(
             menu_entries(ui, commands::SELECTION_MENU, tab, cx.tab_id, cx.queue);
             ui.separator();
         }
+        highlights::context_menu(ui, &tab.ui, cx.tab_id, cx.queue);
         menu_entries(ui, commands::VIEW_MENU, tab, cx.tab_id, cx.queue);
     });
 }

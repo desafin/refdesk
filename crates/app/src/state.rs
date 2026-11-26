@@ -264,6 +264,8 @@ pub struct WindowState {
     pub explorer: ExplorerState,
     /// The Pages view of the sidebar: thumbnail width, filter and scroll (WP-73). Not saved.
     pub thumbnails: ThumbState,
+    /// The Marks view of the sidebar: scope, filter, the row being edited (WP-74). Not saved.
+    pub marks: crate::panels::marks::MarksView,
 }
 
 impl WindowState {
@@ -280,6 +282,7 @@ impl WindowState {
             sidebar_split: DEFAULT_SPLIT,
             explorer: ExplorerState::default(),
             thumbnails: ThumbState::default(),
+            marks: crate::panels::marks::MarksView::default(),
         }
     }
 }
@@ -428,6 +431,8 @@ pub struct AppState {
     pub translate: TranslateApp,
     /// Session bookkeeping: focus order, fingerprints, window sizes (WP-41).
     pub memory: Memory,
+    /// Bookmarks, marks and highlights (`annotations.json`, WP-74). Only `dispatch` changes them.
+    pub marks: crate::panels::marks::MarksApp,
     next_window: u64,
 }
 
@@ -472,6 +477,7 @@ impl AppState {
             capture_clipboard: None,
             translate: TranslateApp::default(),
             memory: Memory::default(),
+            marks: crate::panels::marks::MarksApp::default(),
             next_window: 1,
         }
     }

@@ -210,7 +210,6 @@ impl Memory {
     }
 
     /// The fingerprint computed for `path` this run.
-    #[cfg(test)]
     pub fn fingerprint_of(&self, path: &Path) -> Option<&str> {
         self.fingerprints
             .get(&normalize_path(path))

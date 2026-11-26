@@ -13,6 +13,7 @@
 //!   default, and a file with a higher version is read as far as it can be understood.
 //! * No function here starts a thread. Running them in the background is the caller's job.
 
+pub mod annotations;
 pub mod atomic;
 pub mod config;
 pub mod docstate;
@@ -21,6 +22,10 @@ pub mod prefs;
 pub mod search_history;
 pub mod session;
 
+pub use annotations::{
+    Annotations, Bookmark, DocAnnotations, GlobalMark, Highlight, HighlightColor, Item, ItemKind,
+    SAME_SPOT_PT, loc_cmp,
+};
 pub use atomic::{atomic_write, bad_path, quarantine, read_json_or_default};
 pub use config::{
     CaptureConfig, Config, DEFAULT_OLLAMA_ENDPOINT, DEFAULT_OPENAI_ENDPOINT,

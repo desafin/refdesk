@@ -18,6 +18,7 @@ use crate::action::Action;
 use crate::i18n::tr;
 use crate::panels::explorer::{self, WorkspaceView};
 use crate::panels::global_search;
+use crate::panels::marks;
 use crate::panels::thumbnails;
 use crate::panels::toc::{self, title_job, triangle};
 use crate::state::{AppState, DocStore, Tab, TabId, TabStore};
@@ -43,6 +44,8 @@ pub enum SidebarView {
     Search,
     /// Thumbnails of the pages of the focused document (WP-73).
     Pages,
+    /// Bookmarks, marks and highlights (WP-74).
+    Marks,
 }
 
 /// Space between the buttons of the view switch.
@@ -180,6 +183,7 @@ pub fn show(
         global_search,
         search_history,
         textures,
+        marks: marks_app,
         ..
     } = state;
     let Some(window) = windows.get_mut(window_index) else {
@@ -224,6 +228,19 @@ pub fn show(
             window: window_id,
         };
         thumbnails::show_view(&mut body, &mut window.thumbnails, env, queue);
+        ui.allocate_rect(whole, Sense::hover());
+        return;
+    }
+    if window.sidebar_view == SidebarView::Marks {
+        let mut body = body_ui(ui, full, "marks_body");
+        let env = marks::Env {
+            marks: marks_app,
+            tabs,
+            docs,
+            focus_tab,
+            window: window_id,
+        };
+        marks::show_view(&mut body, &mut window.marks, env, queue);
         ui.allocate_rect(whole, Sense::hover());
         return;
     }
@@ -345,6 +362,11 @@ fn view_switch(ui: &mut Ui, rect: Rect, view: &mut SidebarView, found: Option<us
             SidebarView::Pages,
             tr("sidebar.pages").to_owned(),
             "sidebar.pages_hint",
+        ),
+        (
+            SidebarView::Marks,
+            tr("sidebar.marks").to_owned(),
+            "sidebar.marks_hint",
         ),
     ];
     // Buttons of equal width that fill the row; a label that does not fit is cut short.
