@@ -800,6 +800,13 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context);
 
 - `AppState.key_grab: Option<KeyGrab>` 이 서 있는 동안 단축키 표는 아무 키도 가져가지 않는다(명령 팔레트가 열려 있을 때와 같다). 다음 키 입력을 기다리는 기능이 쓴다: 마크의 글자(`SetMark`, `GoToMark`), 링크 힌트의 글자(`LinkHints`). 세운 기능이 키를 직접 읽고, 끝나면(Esc 포함) 반드시 내린다. 탭이 닫히거나 포커스가 다른 탭으로 가도 내린다.
 
+### 5.14 뷰 위의 도구 (WP-33)
+
+- `overlays/region_zoom.rs`: 영역 확대(Z)와 가운데 버튼 끌기. 확대하기 전의 배율 방식과 자리를 뷰 상태에 기억하고 "이전 배율로"(Shift+Z)가 되돌린다. 히스토리는 배율을 되돌리지 않는다.
+- `overlays/link_hints.rs`: 키보드 링크 힌트(F, Shift+F). `key_grab` 을 `LinkHints` 로 세우고, `dispatch_queued` 끝의 `settle` 이 끝난 모드를 내린다(탭 닫힘, 포커스 이동, 2초 경과 포함).
+- `overlays/pinned_preview.rs`: 고정한 링크 미리보기. 탭마다 최대 4개, 위치와 크기는 뷰 영역에 대한 비율, 세션에는 저장하지 않는다. 상태는 `views/links.rs` 의 `LinkState` 에 있다.
+- 쪽 색(WP-19): 색은 문서 핸들에 실린다(`set_page_colors`). 렌더 결과에 어떤 색으로 그렸는지가 들어 있어 캐시가 섞이지 않는다. 화면 캡처는 언제나 원래 색.
+
 ### 5.8 세션
 
 `session.rs` 가 `AppState` → `Session` 변환과 그 반대를 맡는다. 구조나 위치가 바뀌면 2초 뒤 저장(연속 변경은 한 번으로), 종료 시 즉시 저장.
