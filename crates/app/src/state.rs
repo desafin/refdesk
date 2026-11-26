@@ -280,6 +280,28 @@ impl WindowState {
     }
 }
 
+/// A mode in which the next key presses belong to one feature and not to the shortcut table:
+/// the letter after "set mark", the letters of a link hint. The feature that sets it reads the
+/// keys itself and clears it when it is done (Esc always ends it).
+// The features that set these arrive with WP-74 (marks) and WP-33 (link hints); each removes
+// this allowance for its own variants' sake once it constructs them.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyGrab {
+    /// "Set mark" was pressed in this tab: the next letter names the mark (ETC-5).
+    SetMark(TabId),
+    /// "Go to mark" was pressed in this tab: the next letter is the mark to go to (ETC-5).
+    GoToMark(TabId),
+    /// Link hints are shown in this tab: the next letters choose a link (LINK-13). `new_tab`
+    /// opens the link in a new tab instead of following it.
+    LinkHints {
+        /// The tab whose links are labelled.
+        tab: TabId,
+        /// Open the chosen link in a new tab.
+        new_tab: bool,
+    },
+}
+
 /// Whether the folder watcher of the workspace is running.
 #[derive(Debug, Default)]
 pub enum WatchState {
@@ -375,6 +397,9 @@ pub struct AppState {
     pub closed_tabs: Vec<ClosedTab>,
     /// The command palette and quick open (WP-43).
     pub palette: PaletteState,
+    /// A mode that takes the next key presses of the focused view for itself; while it is set
+    /// the shortcut table consumes nothing. Not saved.
+    pub key_grab: Option<KeyGrab>,
     /// The search in all open documents (WP-55). Not saved.
     pub global_search: GlobalSearch,
     /// Where the session and the document records are saved; `None` saves nothing (tests).
@@ -428,6 +453,7 @@ impl AppState {
             diff_dialog: None,
             closed_tabs: Vec::new(),
             palette: PaletteState::default(),
+            key_grab: None,
             global_search: GlobalSearch::default(),
             paths: None,
             config: Config::default(),

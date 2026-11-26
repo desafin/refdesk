@@ -948,7 +948,8 @@ fn specificity(shortcut: &KeyboardShortcut) -> u8 {
 /// goes to the field.
 pub fn handle_shortcuts(ctx: &egui::Context, state: &AppState) -> Option<Action> {
     // While the palette is open it owns the keyboard, including the shortcuts that open it.
-    if ctx.text_edit_focused() || state.palette.open.is_some() {
+    // So does a mode that waits for the next keys (`AppState::key_grab`).
+    if ctx.text_edit_focused() || state.palette.open.is_some() || state.key_grab.is_some() {
         return None;
     }
     let mut bindings: Vec<(KeyboardShortcut, &Command)> = COMMANDS
@@ -1794,6 +1795,19 @@ mod tests {
             ui.text_edit_singleline(&mut text);
         });
         assert!(ctx.text_edit_focused());
+        assert_eq!(press(&ctx, &state, Modifiers::CTRL, Key::O), None);
+    }
+
+    #[test]
+    fn shortcuts_are_ignored_while_a_mode_waits_for_the_next_keys() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new();
+        assert_eq!(
+            press(&ctx, &state, Modifiers::CTRL, Key::O),
+            Some(Action::OpenFileDialog)
+        );
+        let tab = state.tabs.insert(Tab::Start);
+        state.key_grab = Some(crate::state::KeyGrab::SetMark(tab));
         assert_eq!(press(&ctx, &state, Modifiers::CTRL, Key::O), None);
     }
 
