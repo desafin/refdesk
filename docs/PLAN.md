@@ -104,7 +104,7 @@ cargo clean -p refdesk -p refdesk-core                             # 작업 공�
 | 80 | core 번역: Ollama 클라이언트, 프롬프트, 작업, 캐시, `[translate]` 설정, `refdesk --translate` (TR-5 ~ 8, 10 ~ 13) | 번역 | 40 | M | Opus | 완료. `refdesk --translate` 로 실제 Ollama 왕복을 두 백엔드 모두 확인 |
 | 81 | 번역 UI: 번역 모드, 선택 번역, 단어 호버 번역, 팝업, 준비 상태 표시 (TR-1 ~ 4, 7, 12) | 번역 | 80, 52 | L | Opus | 완료. 실제 앱에서 상태 표시줄 토글과 모델 준비 표시를 확인. 팝업은 사용자 확인 대기 |
 | 82 | 실험: 추론 엔진 내장(llama.cpp + GGUF), CUDA 와 Vulkan 과 CPU 비교 (TR-14 의 타당성) | 번역 | — | S | Sonnet | 완료. 결과는 `spikes/llm-embedded/README.md`: 데워진 속도는 CUDA = Vulkan = Ollama, 실행 파일은 Vulkan +42MB 대 CUDA +1GB |
-| 83 | 내장 번역 엔진: `embedded` 백엔드, 선택 빌드 기능(Vulkan 기본, CPU), 모델 폴더, 모델 내리기 (TR-14) | 번역 | 80, 82 | M | Opus | 진행 중 |
+| 83 | 내장 번역 엔진: `embedded` 백엔드, 선택 빌드 기능(Vulkan 기본, CPU), 모델 폴더, 모델 내리기 (TR-14) | 번역 | 80, 82 | M | Opus | 완료. `--features embedded-vulkan` 빌드로 Ollama 모델이 내려간 상태에서 `refdesk --translate` 가 번역을 냄(프로세스당 1.2 ~ 1.5초, 모델 읽기 포함). 번역 모드를 끌 때 GPU 메모리가 풀리는지는 창이 필요해 미확인 |
 | 58 | 범위 좁혀 찾기, 위치 복사, 지금 절·장의 글 복사 (FIND-16, LINK-15, SEL-5) | 다듬기 | 53 | M | Sonnet | 완료, 사용자 확인 대기 |
 | 73 | 썸네일: 사이드바 "쪽" 보기, 검색 결과가 있는 쪽만 (VIEW-13) | 다듬기 | 71, 17 | M | Sonnet | 완료, 사용자 확인 대기 |
 | 64 | 비교 제외 영역 (DIFF-11) | 다듬기 | 63 | S | Sonnet | 완료, 사용자 확인 대기 |
