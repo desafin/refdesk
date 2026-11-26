@@ -12,9 +12,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::atomic::{Loaded, atomic_write, load_with};
-use super::config::{Config, TranslateConfig};
+use super::config::{Config, Theme, TranslateConfig};
 use super::{FORMAT_VERSION, json_version, warn_if_newer};
 use crate::diff::{MarginSide, Margins};
+use crate::recolor::PageColorsPref;
 
 /// Smallest scroll speed multiplier that is accepted.
 pub const MIN_SCROLL_SPEED: f32 = 0.25;
@@ -36,6 +37,12 @@ const SAME_SPEED: f32 = 0.005;
 pub struct Prefs {
     /// Format version of the file.
     pub version: u32,
+    /// The theme picked in the menu (VIEW-7). `None` means "use `config.toml`".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Theme>,
+    /// The page colours picked in the menu (VIEW-7). `None` means [`PageColorsPref::Original`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_colors: Option<PageColorsPref>,
     /// The scroll speed multiplier picked in the menu. `None` means "use `config.toml`".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scroll_speed: Option<f32>,
@@ -55,6 +62,8 @@ impl Default for Prefs {
     fn default() -> Prefs {
         Prefs {
             version: FORMAT_VERSION,
+            theme: None,
+            page_colors: None,
             scroll_speed: None,
             translate_mode: None,
             translate_model: None,
@@ -75,6 +84,8 @@ impl Prefs {
                 return Err("expected a JSON object".to_string());
             };
             warn_if_newer("prefs", json_version(&obj));
+            let theme = enum_field(&obj, "theme");
+            let page_colors = enum_field(&obj, "page_colors");
             let scroll_speed = match obj.get("scroll_speed") {
                 None | Some(serde_json::Value::Null) => None,
                 Some(v) => match v.as_f64().filter(|s| s.is_finite()) {
@@ -107,6 +118,8 @@ impl Prefs {
             Ok(Loaded {
                 value: Prefs {
                     version: FORMAT_VERSION,
+                    theme,
+                    page_colors,
                     scroll_speed,
                     translate_mode,
                     translate_model,
@@ -156,6 +169,29 @@ fn load_margins(value: Option<&serde_json::Value>) -> Margins {
         }
     }
     margins.clamped()
+}
+
+/// The value of a field holding one of the names of an enum; a missing, null or unknown value is
+/// `None` (logged when present).
+fn enum_field<T: serde::de::DeserializeOwned>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Option<T> {
+    match obj.get(name) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(t) => Some(t),
+            Err(_) => {
+                log::warn!("prefs: {name}: unknown value {v}; ignored");
+                None
+            }
+        },
+    }
+}
+
+/// The theme to use: the preference if there is one, else `config.toml`'s (VIEW-7).
+pub fn effective_theme(prefs: &Prefs, config: &Config) -> Theme {
+    prefs.theme.unwrap_or(config.theme)
 }
 
 /// `speed` limited to [`MIN_SCROLL_SPEED`]..=[`MAX_SCROLL_SPEED`]; something that is not a
@@ -362,6 +398,58 @@ mod tests {
         let path = dir.path().join("prefs.json");
         fs::write(&path, "{}").unwrap();
         assert_eq!(Prefs::load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn theme_and_page_colours_roundtrip_and_win_over_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            theme: Some(Theme::Light),
+            page_colors: Some(PageColorsPref::FollowTheme),
+            ..Prefs::default()
+        };
+        prefs.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"theme\": \"light\""), "{text}");
+        assert!(text.contains("\"page_colors\": \"follow_theme\""), "{text}");
+        let back = Prefs::load(&path);
+        assert_eq!(back, prefs);
+        let config = Config {
+            theme: Theme::Dark,
+            ..Config::default()
+        };
+        assert_eq!(effective_theme(&back, &config), Theme::Light);
+        assert_eq!(effective_theme(&Prefs::default(), &config), Theme::Dark);
+    }
+
+    #[test]
+    fn a_file_without_theme_or_page_colours_reads_and_unknown_values_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        fs::write(&path, r#"{"version": 1, "scroll_speed": 3}"#).unwrap();
+        let p = Prefs::load(&path);
+        assert_eq!(
+            (p.theme, p.page_colors, p.scroll_speed),
+            (None, None, Some(3.0))
+        );
+        fs::write(
+            &path,
+            r#"{"theme": "neon", "page_colors": 5, "scroll_speed": 2}"#,
+        )
+        .unwrap();
+        let p = Prefs::load(&path);
+        assert_eq!(
+            (p.theme, p.page_colors, p.scroll_speed),
+            (None, None, Some(2.0))
+        );
+        assert!(!bad_path(&path).exists());
+        Prefs::default().save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("theme") && !text.contains("page_colors"),
+            "{text}"
+        );
     }
 
     #[test]

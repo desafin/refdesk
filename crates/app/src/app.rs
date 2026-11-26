@@ -84,6 +84,7 @@ fn start_prefs(state: &mut AppState, ctx: &egui::Context) {
     crate::panels::search_history::load_into(state);
     apply_scroll_speed(state, ctx);
     crate::overlays::translate::start(state, ctx);
+    theme::apply_theme_setting(state, ctx);
 }
 
 /// Applies the `theme` setting.
@@ -121,6 +122,8 @@ impl eframe::App for RefdeskApp {
         if poll_remote_requests(&self.remote, &mut self.state.actions) {
             bring_to_front(ctx);
         }
+        // WP-19: the page colours in effect (the system theme may change at any time).
+        theme::sync_page_colors(&mut self.state, ctx);
         // WP-15: upload finished renders; drop textures of closed documents.
         textures::collect_rendered(ctx, &self.state.docs, &mut self.state.textures);
         // WP-17: render every page's preview in the background.
@@ -516,6 +519,34 @@ mod tests {
         let (state, _saver) = initial_state(startup_at(&dir), open_request(&[]), &ctx);
         assert_eq!(state.scroll_speed(), 3.0);
         assert_eq!(line_speed(&ctx), 120.0);
+    }
+
+    #[test]
+    fn a_changed_theme_and_page_colours_are_there_again_after_a_restart() {
+        let dir = crate::action::scroll_tests::ScratchDir::new("restart-theme");
+        let ctx = egui::Context::default();
+        let (mut state, _saver) = initial_state(startup_at(&dir), open_request(&[]), &ctx);
+        crate::action::dispatch(&mut state, Action::SetTheme(Theme::Light), &ctx);
+        let pref = refdesk_core::PageColorsPref::Dark;
+        crate::action::dispatch(&mut state, Action::SetPageColors(pref), &ctx);
+        drop(state);
+
+        let ctx = egui::Context::default();
+        let mut startup = startup_at(&dir);
+        startup.config.theme = Theme::Dark;
+        let (mut state, _saver) = initial_state(startup, open_request(&[]), &ctx);
+        assert_eq!(
+            theme::theme(&state),
+            Theme::Light,
+            "prefs.json wins over config.toml"
+        );
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::Light
+        );
+        assert_eq!(theme::page_colors_pref(&state), pref);
+        theme::sync_page_colors(&mut state, &ctx);
+        assert_eq!(state.textures.page_colors(), refdesk_core::PageColors::Dark);
     }
 
     #[test]

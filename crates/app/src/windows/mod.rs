@@ -189,6 +189,7 @@ fn menu_bar(ui: &mut Ui, state: &AppState, index: usize, queue: &mut Vec<Action>
                     // The speed list sits with the two commands that step through it.
                     if command.id == "view.scroll_slower" {
                         scroll_speed_menu(ui, state, queue);
+                        crate::theme::theme_menus(ui, state, queue);
                     }
                     // The model list sits under translation mode (TR-12).
                     if command.id == "view.translate_mode" {

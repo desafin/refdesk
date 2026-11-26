@@ -252,6 +252,16 @@ fn scroll_speed_step(state: &AppState, up: bool) -> Option<Action> {
     Some(Action::SetScrollSpeed(Some(speed)))
 }
 
+/// Swaps original and dark page colours; "follow the theme" becomes the opposite of what is
+/// shown now (VIEW-7).
+fn toggle_page_colors(state: &AppState) -> Option<Action> {
+    let pref = crate::theme::page_colors_pref(state);
+    let shown = state.textures.page_colors();
+    Some(Action::SetPageColors(refdesk_core::toggled_page_colors(
+        pref, shown,
+    )))
+}
+
 /// The command table. Order is the order within each menu.
 pub static COMMANDS: &[Command] = &[
     Command {
@@ -514,6 +524,28 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |s| scroll_speed_step(s, false),
+    },
+    Command {
+        id: "view.toggle_page_colors",
+        name_key: "cmd.view.toggle_page_colors",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(CTRL, Key::I)),
+        aliases: &[],
+        enabled: always,
+        action: toggle_page_colors,
+    },
+    Command {
+        id: "view.cycle_theme",
+        name_key: "cmd.view.cycle_theme",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |s| {
+            Some(Action::SetTheme(crate::theme::cycle_theme(
+                crate::theme::theme(s),
+            )))
+        },
     },
     Command {
         id: "nav.back",
@@ -1957,6 +1989,32 @@ mod tests {
             lookup(Lang::Ko, "cmd.view.scroll_slower"),
             Some("스크롤 속도 낮추기")
         );
+    }
+
+    #[test]
+    fn the_page_colour_and_theme_commands_are_in_the_view_menu() {
+        let toggle = command("view.toggle_page_colors").expect("command");
+        assert_eq!(
+            toggle.shortcut,
+            Some(KeyboardShortcut::new(Modifiers::CTRL, Key::I))
+        );
+        let cycle = command("view.cycle_theme").expect("command");
+        assert_eq!(cycle.all_shortcuts().count(), 0);
+        for c in [toggle, cycle] {
+            assert_eq!(c.menu, MenuGroup::View);
+            assert!(in_menu(MenuGroup::View).any(|m| m.id == c.id));
+            for lang in [Lang::Ko, Lang::En] {
+                assert!(lookup(lang, c.name_key).is_some(), "{}", c.id);
+            }
+        }
+        // Ctrl+I runs nothing else.
+        let ctrl_i = KeyboardShortcut::new(Modifiers::CTRL, Key::I);
+        let users: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.all_shortcuts().any(|s| s == ctrl_i))
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(users, vec!["view.toggle_page_colors"]);
     }
 
     #[test]

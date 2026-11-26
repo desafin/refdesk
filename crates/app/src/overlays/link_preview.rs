@@ -635,6 +635,7 @@ pub fn show(
         env.doc.request_render(key, Priority::Preview);
     }
     let texture = chosen.texture.map(|t| t.id());
+    let blank = crate::theme::blank_page(textures.page_colors());
 
     let rect = to_egui(env.view_rect, g.rect);
     let image = to_egui(env.view_rect, g.image);
@@ -658,7 +659,7 @@ pub fn show(
                     painter.image(id, image, uv, Color32::WHITE);
                 }
                 None => {
-                    painter.rect_filled(image, 0.0, Color32::WHITE);
+                    painter.rect_filled(image, 0.0, blank);
                 }
             }
             painter.rect_filled(header, 0.0, visuals.widgets.noninteractive.weak_bg_fill);

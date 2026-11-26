@@ -103,6 +103,10 @@ pub enum Action {
     RefreshTranslateModels,
     /// A translation was asked for while loading the model had failed: try loading it again.
     RetryTranslateWarmUp,
+    /// Set the interface theme; kept in `prefs.json` (VIEW-7).
+    SetTheme(refdesk_core::Theme),
+    /// Set the page colours; kept in `prefs.json` (VIEW-7).
+    SetPageColors(refdesk_core::PageColorsPref),
     /// Show a short message at the right end of the status bar for a few seconds.
     ShowNotice(String),
     /// Copy the selected text of a PDF tab (of the side in use for a comparison tab) to the
@@ -450,6 +454,8 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::SetTranslateModel(model) => translate::set_model(state, model, ctx),
         Action::RefreshTranslateModels => translate::refresh_models(state, ctx),
         Action::RetryTranslateWarmUp => translate::retry_warm_up(state, ctx),
+        Action::SetTheme(theme) => crate::theme::set_theme(state, theme, ctx),
+        Action::SetPageColors(pref) => crate::theme::set_page_colors(state, pref, ctx),
         Action::ShowNotice(text) => {
             state.status_notice = Some(StatusNotice {
                 text,

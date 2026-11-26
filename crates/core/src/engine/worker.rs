@@ -27,6 +27,7 @@ use super::{
 };
 use crate::geom::Rect;
 use crate::link::Link;
+use crate::recolor::PageColors;
 use crate::text::PageText;
 
 /// State shared between the handles of one document and its worker.
@@ -77,12 +78,14 @@ pub(super) enum WaitJob {
     },
     Render {
         key: RenderKey,
+        colors: PageColors,
         reply: Sender<Result<RenderedPage, EngineError>>,
     },
     Region {
         page: u32,
         region: Rect,
         scale_milli: u32,
+        colors: PageColors,
         reply: Sender<Result<RenderedImage, EngineError>>,
     },
 }
@@ -105,8 +108,10 @@ pub(super) struct State {
     /// Current generation; keys of any other generation are ignored (rule R-7).
     pub(super) generation: u32,
     pub(super) renders: RenderQueue,
+    /// The colours new render requests are made in (`set_page_colors`).
+    pub(super) page_colors: PageColors,
     /// The render the worker is doing now (not in `renders` any more).
-    pub(super) rendering: Option<RenderKey>,
+    pub(super) rendering: Option<(RenderKey, PageColors)>,
     /// Finished renders not yet taken by `poll_rendered`.
     pub(super) rendered: Vec<RenderedPage>,
     /// Renders that failed in this generation; requests for them are ignored so a broken page is
@@ -133,6 +138,7 @@ impl Default for State {
             info: None,
             generation: 0,
             renders: RenderQueue::default(),
+            page_colors: PageColors::Original,
             rendering: None,
             rendered: Vec::new(),
             failed_renders: HashSet::new(),
@@ -156,18 +162,22 @@ impl State {
         self.info.as_ref().map(|i| i.page_sizes.len() as u32)
     }
 
-    /// Records a render request from `request_render`.
+    /// Records a render request from `request_render`, in the current page colours.
     pub(super) fn request_render(&mut self, key: RenderKey, prio: Priority, now: Instant) {
+        let colors = self.page_colors;
         if self.status != DocStatus::Ready
             || key.generation != self.generation
             || self.page_count().is_none_or(|n| key.page >= n)
-            || self.rendering == Some(key)
+            || self.rendering == Some((key, colors))
             || self.failed_renders.contains(&key)
-            || self.rendered.iter().any(|r| r.key == key)
+            || self
+                .rendered
+                .iter()
+                .any(|r| r.key == key && r.colors == colors)
         {
             return;
         }
-        self.renders.request(key, prio, now);
+        self.renders.request(key, prio, colors, now);
     }
 
     /// Records a wish for the text of `page` from the non-blocking `page_text`.
@@ -208,8 +218,8 @@ impl State {
             return None;
         }
         self.renders.expire(now, expiry);
-        if let Some(key) = self.renders.pop(Priority::Preview) {
-            return Some(Task::Render(key));
+        if let Some((key, colors)) = self.renders.pop(Priority::Preview) {
+            return Some(Task::Render(key, colors));
         }
         while let Some(page) = self.text_wanted.pop_front() {
             if !self.texts.contains_key(&page) {
@@ -224,7 +234,9 @@ impl State {
         if let Some(job) = self.waits.pop_front() {
             return Some(Task::Wait(job));
         }
-        self.renders.pop(Priority::Background).map(Task::Render)
+        self.renders
+            .pop(Priority::Background)
+            .map(|(key, colors)| Task::Render(key, colors))
     }
 
     /// Drops everything that belongs to the previous generation and moves to `generation`.
@@ -244,7 +256,7 @@ impl State {
 
 enum Task {
     Control(Control),
-    Render(RenderKey),
+    Render(RenderKey, PageColors),
     Text(u32),
     Links(u32),
     Wait(WaitJob),
@@ -257,6 +269,8 @@ struct Pending {
     seq: u64,
     /// When the latest request came.
     last: Instant,
+    /// The colours of the latest request.
+    colors: PageColors,
 }
 
 /// Pending render requests, one entry per key.
@@ -267,8 +281,15 @@ pub(super) struct RenderQueue {
 }
 
 impl RenderQueue {
-    /// Adds a request, or refreshes the priority and time of the pending request for `key`.
-    pub(super) fn request(&mut self, key: RenderKey, prio: Priority, now: Instant) {
+    /// Adds a request, or refreshes the priority, time and colours of the pending request for
+    /// `key`.
+    pub(super) fn request(
+        &mut self,
+        key: RenderKey,
+        prio: Priority,
+        colors: PageColors,
+        now: Instant,
+    ) {
         self.seq += 1;
         self.pending.insert(
             key,
@@ -276,6 +297,7 @@ impl RenderQueue {
                 prio,
                 seq: self.seq,
                 last: now,
+                colors,
             },
         );
     }
@@ -288,15 +310,14 @@ impl RenderQueue {
 
     /// Removes and returns the most urgent request whose priority is `limit` or more urgent:
     /// the most urgent priority first, then the most recently requested.
-    pub(super) fn pop(&mut self, limit: Priority) -> Option<RenderKey> {
+    pub(super) fn pop(&mut self, limit: Priority) -> Option<(RenderKey, PageColors)> {
         let key = self
             .pending
             .iter()
             .filter(|(_, p)| p.prio <= limit)
             .min_by(|(_, a), (_, b)| a.prio.cmp(&b.prio).then(b.seq.cmp(&a.seq)))
             .map(|(k, _)| *k)?;
-        self.pending.remove(&key);
-        Some(key)
+        self.pending.remove(&key).map(|p| (key, p.colors))
     }
 
     #[cfg(test)]
@@ -416,8 +437,8 @@ fn run(shared: Arc<Shared>, path: PathBuf) {
                     return;
                 }
                 if let Some(t) = st.next_task(Instant::now(), shared.options.render_expiry) {
-                    if let Task::Render(key) = &t {
-                        st.rendering = Some(*key);
+                    if let Task::Render(key, colors) = &t {
+                        st.rendering = Some((*key, *colors));
                     }
                     break t;
                 }
@@ -460,8 +481,8 @@ fn run(shared: Arc<Shared>, path: PathBuf) {
                 drop(st);
                 shared.notify();
             }
-            Task::Render(key) => {
-                let result = with_backend(&backend, |b| render_page(b, key));
+            Task::Render(key, colors) => {
+                let result = with_backend(&backend, |b| render_page(b, key, colors));
                 let mut st = shared.lock();
                 st.rendering = None;
                 let delivered = match result {
@@ -516,17 +537,22 @@ fn with_backend<T>(
     }
 }
 
-fn render_page(b: &Backend, key: RenderKey) -> Result<RenderedPage, EngineError> {
+fn render_page(
+    b: &Backend,
+    key: RenderKey,
+    colors: PageColors,
+) -> Result<RenderedPage, EngineError> {
     let started = Instant::now();
-    let (width, height, rgb) = b.render(key.page, key.scale_milli)?;
+    let (width, height, rgb) = b.render(key.page, key.scale_milli, colors)?;
     log::debug!(
-        "render page {} at {}: {width}x{height} in {:?}",
+        "render page {} at {} ({colors:?}): {width}x{height} in {:?}",
         key.page + 1,
         key.scale_milli,
         started.elapsed()
     );
     Ok(RenderedPage {
         key,
+        colors,
         width,
         height,
         rgb,
@@ -575,10 +601,10 @@ fn serve_wait(shared: &Shared, path: &Path, backend: &Option<Backend>, job: Wait
             };
             drop(reply.send(result));
         }
-        WaitJob::Render { key, reply } => {
+        WaitJob::Render { key, colors, reply } => {
             let generation = shared.lock().generation;
             let result = if key.generation == generation {
-                with_backend(backend, |b| render_page(b, key))
+                with_backend(backend, |b| render_page(b, key, colors))
             } else {
                 Err(stale(key.generation, generation))
             };
@@ -588,9 +614,12 @@ fn serve_wait(shared: &Shared, path: &Path, backend: &Option<Backend>, job: Wait
             page,
             region,
             scale_milli,
+            colors,
             reply,
         } => {
-            let result = with_backend(backend, |b| b.render_region(page, region, scale_milli));
+            let result = with_backend(backend, |b| {
+                b.render_region(page, region, scale_milli, colors)
+            });
             drop(reply.send(result));
         }
     }
@@ -615,18 +644,22 @@ mod tests {
         }
     }
 
+    fn pop_key(q: &mut RenderQueue, limit: Priority) -> Option<RenderKey> {
+        q.pop(limit).map(|(k, _)| k)
+    }
+
     const LONG: Duration = Duration::from_secs(3600);
 
     #[test]
     fn higher_priority_first_then_most_recent() {
         let t = Instant::now();
         let mut q = RenderQueue::default();
-        q.request(key(1), Priority::Background, t);
-        q.request(key(2), Priority::Background, t);
-        q.request(key(3), Priority::Visible, t);
-        q.request(key(4), Priority::Prefetch, t);
-        q.request(key(5), Priority::Visible, t);
-        let order: Vec<u32> = std::iter::from_fn(|| q.pop(Priority::Background))
+        q.request(key(1), Priority::Background, PageColors::Original, t);
+        q.request(key(2), Priority::Background, PageColors::Original, t);
+        q.request(key(3), Priority::Visible, PageColors::Original, t);
+        q.request(key(4), Priority::Prefetch, PageColors::Original, t);
+        q.request(key(5), Priority::Visible, PageColors::Original, t);
+        let order: Vec<u32> = std::iter::from_fn(|| pop_key(&mut q, Priority::Background))
             .map(|k| k.page)
             .collect();
         assert_eq!(order, vec![5, 3, 4, 2, 1]);
@@ -636,26 +669,26 @@ mod tests {
     fn duplicate_requests_merge_and_refresh() {
         let t = Instant::now();
         let mut q = RenderQueue::default();
-        q.request(key(1), Priority::Background, t);
-        q.request(key(2), Priority::Background, t);
-        q.request(key(1), Priority::Background, t);
+        q.request(key(1), Priority::Background, PageColors::Original, t);
+        q.request(key(2), Priority::Background, PageColors::Original, t);
+        q.request(key(1), Priority::Background, PageColors::Original, t);
         assert_eq!(q.len(), 2);
         // Key 1 was requested again last, so it is now the most recent.
-        assert_eq!(q.pop(Priority::Background), Some(key(1)));
-        q.request(key(2), Priority::Visible, t);
-        assert_eq!(q.pop(Priority::Background), Some(key(2)));
-        assert_eq!(q.pop(Priority::Background), None);
+        assert_eq!(pop_key(&mut q, Priority::Background), Some(key(1)));
+        q.request(key(2), Priority::Visible, PageColors::Original, t);
+        assert_eq!(pop_key(&mut q, Priority::Background), Some(key(2)));
+        assert_eq!(pop_key(&mut q, Priority::Background), None);
     }
 
     #[test]
     fn pop_respects_the_priority_limit() {
         let t = Instant::now();
         let mut q = RenderQueue::default();
-        q.request(key(1), Priority::Prefetch, t);
-        assert_eq!(q.pop(Priority::Preview), None);
-        q.request(key(2), Priority::Preview, t);
-        assert_eq!(q.pop(Priority::Preview), Some(key(2)));
-        assert_eq!(q.pop(Priority::Background), Some(key(1)));
+        q.request(key(1), Priority::Prefetch, PageColors::Original, t);
+        assert_eq!(pop_key(&mut q, Priority::Preview), None);
+        q.request(key(2), Priority::Preview, PageColors::Original, t);
+        assert_eq!(pop_key(&mut q, Priority::Preview), Some(key(2)));
+        assert_eq!(pop_key(&mut q, Priority::Background), Some(key(1)));
     }
 
     #[test]
@@ -663,14 +696,19 @@ mod tests {
         let t0 = Instant::now();
         let expiry = Duration::from_millis(250);
         let mut q = RenderQueue::default();
-        q.request(key(1), Priority::Visible, t0);
-        q.request(key(2), Priority::Visible, t0);
+        q.request(key(1), Priority::Visible, PageColors::Original, t0);
+        q.request(key(2), Priority::Visible, PageColors::Original, t0);
         // Key 2 is requested again 200 ms later; key 1 is not.
-        q.request(key(2), Priority::Visible, t0 + Duration::from_millis(200));
+        q.request(
+            key(2),
+            Priority::Visible,
+            PageColors::Original,
+            t0 + Duration::from_millis(200),
+        );
         q.expire(t0 + Duration::from_millis(300), expiry);
-        assert_eq!(q.pop(Priority::Background), Some(key(2)));
-        assert_eq!(q.pop(Priority::Background), None);
-        q.request(key(3), Priority::Visible, t0);
+        assert_eq!(pop_key(&mut q, Priority::Background), Some(key(2)));
+        assert_eq!(pop_key(&mut q, Priority::Background), None);
+        q.request(key(3), Priority::Visible, PageColors::Original, t0);
         q.expire(t0 + Duration::from_millis(100), expiry);
         assert_eq!(q.len(), 1);
         q.expire(t0 + LONG, expiry);
@@ -681,9 +719,11 @@ mod tests {
     fn new_generation_drops_old_requests_and_results() {
         let t = Instant::now();
         let mut st = State::default();
-        st.renders.request(key(1), Priority::Visible, t);
+        st.renders
+            .request(key(1), Priority::Visible, PageColors::Original, t);
         st.rendered.push(RenderedPage {
             key: key(2),
+            colors: PageColors::Original,
             width: 1,
             height: 1,
             rgb: vec![255; 3],
@@ -691,12 +731,63 @@ mod tests {
         st.texts.insert(0, Arc::new(PageText::default()));
         let mut k = key(3);
         k.generation = 1;
-        st.renders.request(k, Priority::Visible, t);
+        st.renders
+            .request(k, Priority::Visible, PageColors::Original, t);
         st.start_generation(1);
-        assert_eq!(st.renders.pop(Priority::Background), Some(k));
-        assert!(st.renders.pop(Priority::Background).is_none());
+        assert_eq!(pop_key(&mut st.renders, Priority::Background), Some(k));
+        assert!(pop_key(&mut st.renders, Priority::Background).is_none());
         assert!(st.rendered.is_empty());
         assert!(st.texts.is_empty());
+    }
+
+    #[test]
+    fn a_request_in_new_colours_replaces_the_pending_one() {
+        let t = Instant::now();
+        let mut q = RenderQueue::default();
+        q.request(key(1), Priority::Visible, PageColors::Original, t);
+        q.request(key(1), Priority::Visible, PageColors::Dark, t);
+        assert_eq!(q.len(), 1);
+        assert_eq!(
+            q.pop(Priority::Background),
+            Some((key(1), PageColors::Dark))
+        );
+    }
+
+    #[test]
+    fn a_result_in_other_colours_does_not_hide_a_request() {
+        let t = Instant::now();
+        let mut st = State {
+            status: DocStatus::Ready,
+            info: Some(Arc::new(DocumentInfo {
+                path: PathBuf::from("/x.pdf"),
+                generation: 0,
+                page_sizes: vec![crate::geom::Size::new(10.0, 10.0); 2],
+                page_labels: Vec::new(),
+                title: None,
+                outline: crate::outline::Outline::new(),
+            })),
+            ..State::default()
+        };
+        st.rendered.push(RenderedPage {
+            key: key(0),
+            colors: PageColors::Original,
+            width: 1,
+            height: 1,
+            rgb: vec![255; 3],
+        });
+        st.rendering = Some((key(1), PageColors::Original));
+        // Same colours: already there or being made.
+        st.request_render(key(0), Priority::Visible, t);
+        st.request_render(key(1), Priority::Visible, t);
+        assert_eq!(st.renders.len(), 0);
+        st.page_colors = PageColors::Dark;
+        st.request_render(key(0), Priority::Visible, t);
+        st.request_render(key(1), Priority::Visible, t);
+        assert_eq!(st.renders.len(), 2);
+        assert_eq!(
+            st.renders.pop(Priority::Background).map(|(_, c)| c),
+            Some(PageColors::Dark)
+        );
     }
 
     #[test]

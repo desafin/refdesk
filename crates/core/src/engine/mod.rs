@@ -19,6 +19,7 @@ use worker::{Control, Shared, WaitJob};
 use crate::geom::{Rect, Size};
 use crate::link::Link;
 use crate::outline::Outline;
+use crate::recolor::PageColors;
 use crate::text::PageText;
 
 /// Called whenever a new result is available. The app passes a repaint request.
@@ -70,6 +71,8 @@ pub struct RenderKey {
 pub struct RenderedPage {
     /// The request this answers.
     pub key: RenderKey,
+    /// The colours it was rendered in (VIEW-7). A cache keeps pages of other colours apart.
+    pub colors: PageColors,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
@@ -223,10 +226,23 @@ impl DocumentHandle {
         self.shared().wake();
     }
 
+    /// Sets the page colours that later [`DocumentHandle::request_render`] and
+    /// [`DocumentHandle::render_wait`] calls render in (VIEW-7). Each request carries the
+    /// colours of the moment it is made; never blocks.
+    pub fn set_page_colors(&self, colors: PageColors) {
+        self.shared().lock().page_colors = colors;
+    }
+
+    /// The page colours requests are made in now.
+    pub fn page_colors(&self) -> PageColors {
+        self.shared().lock().page_colors
+    }
+
     /// Declares that the page is needed now. Call it every frame while that holds; never blocks.
+    /// The page is rendered in the colours set by [`DocumentHandle::set_page_colors`].
     ///
-    /// Requests for a key that is pending are merged (priority and time are refreshed). Keys of
-    /// another generation, pages past the end and keys that already failed are ignored.
+    /// Requests for a key that is pending are merged (priority, time and colours are refreshed).
+    /// Keys of another generation, pages past the end and keys that already failed are ignored.
     pub fn request_render(&self, key: RenderKey, prio: Priority) {
         self.shared()
             .lock()
@@ -308,16 +324,18 @@ impl DocumentHandle {
         self.wait(|reply| WaitJob::Text { page, reply })
     }
 
-    /// Renders a page. Blocks; must not be called on the UI thread (rule R-1).
+    /// Renders a page in the colours set by [`DocumentHandle::set_page_colors`]. Blocks; must
+    /// not be called on the UI thread (rule R-1).
     ///
     /// The result is returned here only, not through [`DocumentHandle::poll_rendered`].
     pub fn render_wait(&self, key: RenderKey) -> Result<RenderedPage, EngineError> {
         self.check_page(key.page)?;
-        self.wait(|reply| WaitJob::Render { key, reply })
+        let colors = self.page_colors();
+        self.wait(|reply| WaitJob::Render { key, colors, reply })
     }
 
-    /// Renders `region` (page space) of a page at the given scale. Blocks; must not be called on
-    /// the UI thread (rule R-1).
+    /// Renders `region` (page space) of a page at the given scale in the given colours. Blocks;
+    /// must not be called on the UI thread (rule R-1).
     ///
     /// A region that reaches past the page is clipped to it; when nothing is left the call
     /// fails.
@@ -326,12 +344,14 @@ impl DocumentHandle {
         page: u32,
         region: Rect,
         scale_milli: u32,
+        colors: PageColors,
     ) -> Result<RenderedImage, EngineError> {
         self.check_page(page)?;
         self.wait(|reply| WaitJob::Region {
             page,
             region,
             scale_milli,
+            colors,
             reply,
         })
     }

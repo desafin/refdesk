@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use refdesk_core::{DocStatus, Priority, RenderKey, Size};
+use refdesk_core::{DocStatus, PageColors, Priority, RenderKey, Size};
 
 use crate::state::{AppState, DocId, Tab, TabStore};
 
@@ -198,6 +198,8 @@ fn views_of(tabs: &TabStore, focus: Option<crate::state::TabId>, doc: DocId) -> 
 struct DocPreload {
     generation: u32,
     scale_milli: u32,
+    /// The page colours the previews are made in; a change starts the preload over (VIEW-7).
+    colors: PageColors,
     /// Pages whose preview render failed.
     failed: HashSet<u32>,
     /// The pages requested last frame.
@@ -257,10 +259,15 @@ pub fn step(ctx: &egui::Context, state: &mut AppState) {
             *entry = DocPreload::default();
             continue;
         };
-        if entry.generation != generation || entry.scale_milli != scale_milli {
+        let colors = textures.page_colors();
+        if entry.generation != generation
+            || entry.scale_milli != scale_milli
+            || entry.colors != colors
+        {
             *entry = DocPreload {
                 generation,
                 scale_milli,
+                colors,
                 ..DocPreload::default()
             };
         }
@@ -519,5 +526,80 @@ mod preload_tests {
             state.textures.preview_bytes(),
             state.textures.preview_bytes() as f64 / (1024.0 * 1024.0),
         );
+    }
+}
+
+/// The preload starts over in new page colours (VIEW-7), on a real document without a window.
+#[cfg(test)]
+mod page_colors_tests {
+    use super::*;
+
+    use crate::action::{Action, OpenTarget, dispatch};
+    use crate::views::test_support::watch_repaints;
+    use crate::views::textures::collect_rendered;
+    use refdesk_core::testutil::PdfBuilder;
+
+    #[test]
+    fn the_preload_runs_again_in_new_page_colours() {
+        let pdf = PdfBuilder::new()
+            .page(300.0, 400.0, |p| {
+                p.text(20.0, 50.0, 20.0, "ONE");
+            })
+            .page(300.0, 400.0, |p| {
+                p.text(20.0, 50.0, 20.0, "TWO");
+            })
+            .page(300.0, 400.0, |_| {})
+            .write_temp("preload-colors");
+        let ctx = egui::Context::default();
+        let repaints = watch_repaints(&ctx);
+        let mut state = AppState::new();
+        let target = OpenTarget {
+            path: pdf.path().to_path_buf(),
+            page: None,
+        };
+        dispatch(&mut state, Action::OpenFiles(vec![target]), &ctx);
+        let doc_id = state.focused_pdf().map(|(_, p)| p.doc).expect("tab");
+        let frame = |state: &mut AppState| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                collect_rendered(ui.ctx(), &state.docs, &mut state.textures);
+                step(ui.ctx(), state);
+            })
+            .drop_without_applying_deltas();
+        };
+        let all_previews = |state: &AppState| {
+            let Some(scale) = state.preload.scale_milli(doc_id) else {
+                return false;
+            };
+            (0..3).all(|page| {
+                state.textures.has_preview(
+                    doc_id,
+                    RenderKey {
+                        page,
+                        scale_milli: scale,
+                        generation: 0,
+                    },
+                )
+            })
+        };
+        repaints.wait_until("original previews", || {
+            frame(&mut state);
+            all_previews(&state) && state.preload.progress(doc_id).is_none()
+        });
+        let doc = state.docs.get(doc_id).expect("doc").clone();
+        assert_eq!(doc.page_colors(), PageColors::Original);
+
+        state.textures.set_page_colors(PageColors::Dark);
+        assert!(
+            !all_previews(&state),
+            "the old previews are not the new colours"
+        );
+        assert_eq!(state.textures.preview_count(doc_id), 3, "but still drawn");
+        frame(&mut state);
+        assert_eq!(doc.page_colors(), PageColors::Dark, "requests go out dark");
+        repaints.wait_until("dark previews", || {
+            frame(&mut state);
+            all_previews(&state) && state.preload.progress(doc_id).is_none()
+        });
+        assert_eq!(state.textures.preview_count(doc_id), 3);
     }
 }

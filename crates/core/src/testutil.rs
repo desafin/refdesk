@@ -63,15 +63,40 @@ struct LinkSpec {
     target: LinkTarget,
 }
 
+struct ImageSpec {
+    rect: PageRect,
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+}
+
 /// Content of one page. Handed to the closure of [`PdfBuilder::page`].
 pub struct PageBuilder {
     width: f32,
     height: f32,
     texts: Vec<TextRun>,
     links: Vec<LinkSpec>,
+    images: Vec<ImageSpec>,
 }
 
 impl PageBuilder {
+    /// Draws an RGB image of `width` × `height` pixels (`rgb` holds three bytes per pixel, rows
+    /// top to bottom) stretched over `rect` (page space). Written as an inline image, before the
+    /// text of the page.
+    ///
+    /// # Panics
+    /// If `rgb` does not hold `width * height * 3` bytes.
+    pub fn image(&mut self, rect: PageRect, width: u32, height: u32, rgb: &[u8]) -> &mut Self {
+        assert_eq!(rgb.len(), (width * height * 3) as usize, "image size");
+        self.images.push(ImageSpec {
+            rect,
+            width,
+            height,
+            rgb: rgb.to_vec(),
+        });
+        self
+    }
+
     /// Puts `text` on the page. `(x, y)` is the left end of the baseline in page space.
     /// `size` is the font size in pt.
     pub fn text(&mut self, x: f32, y: f32, size: f32, text: &str) -> &mut Self {
@@ -176,6 +201,7 @@ impl PdfBuilder {
             height,
             texts: Vec::new(),
             links: Vec::new(),
+            images: Vec::new(),
         };
         f(&mut page);
         self.pages.push(page);
@@ -296,6 +322,23 @@ impl PdfBuilder {
             w.end_object();
 
             let mut stream = String::new();
+            for img in &p.images {
+                let (l, t, r, b) = img.rect;
+                let mut hex = String::with_capacity(img.rgb.len() * 2);
+                for v in &img.rgb {
+                    let _ = write!(hex, "{v:02x}");
+                }
+                let _ = writeln!(
+                    stream,
+                    "q {} 0 0 {} {} {} cm BI /W {} /H {} /CS /RGB /BPC 8 /F /AHx ID {hex}> EI Q",
+                    num(r - l),
+                    num(b - t),
+                    num(l),
+                    num(p.height - b),
+                    img.width,
+                    img.height
+                );
+            }
             for t in &p.texts {
                 let _ = writeln!(
                     stream,

@@ -12,10 +12,17 @@
 //!
 //! The bookkeeping (lookup, nearest scale, eviction) lives in [`Cache`], which is generic over
 //! the texture handle so it is tested without egui. [`TextureCache`] is the egui instance.
+//!
+//! Page colours (VIEW-7): the cache holds the colours pages are drawn in now
+//! ([`Cache::set_page_colors`]); `collect_rendered` hands them to every document, so requests
+//! are made in them. Only a texture in those colours is "exact"; a texture in the previous
+//! colours is still drawn (stretched) until the new one of its page arrives, so a change of
+//! colours never shows an empty page (VIEW-3). When a page's texture in the new colours arrives,
+//! that page's textures in other colours go, so the cache does not hold a page in both.
 
 use std::collections::{HashMap, VecDeque};
 
-use refdesk_core::{RenderKey, RenderedPage};
+use refdesk_core::{PageColors, RenderKey, RenderedPage};
 
 use crate::state::{DocId, DocStore};
 
@@ -42,6 +49,8 @@ pub struct Entry<H> {
     pub bytes: usize,
     /// The frame it was last inserted or looked up in.
     pub last_used: u64,
+    /// The colours it was rendered in.
+    pub colors: PageColors,
 }
 
 /// One page's preview texture.
@@ -50,6 +59,7 @@ struct Preview<H> {
     key: RenderKey,
     handle: H,
     bytes: usize,
+    colors: PageColors,
 }
 
 /// A texture chosen for drawing a page.
@@ -80,6 +90,10 @@ pub struct Cache<H> {
     preview_scales: HashMap<DocId, (u32, u32)>,
     /// Rendered pages waiting to be uploaded.
     pending: VecDeque<(DocId, RenderedPage)>,
+    /// The colours pages are drawn in now.
+    colors: PageColors,
+    /// Sharp textures in other than the current colours may be held.
+    mixed: bool,
 }
 
 impl<H> Cache<H> {
@@ -95,6 +109,23 @@ impl<H> Cache<H> {
             preview_bytes: 0,
             preview_scales: HashMap::new(),
             pending: VecDeque::new(),
+            colors: PageColors::Original,
+            mixed: false,
+        }
+    }
+
+    /// The colours pages are drawn (and requested) in now.
+    pub fn page_colors(&self) -> PageColors {
+        self.colors
+    }
+
+    /// Changes the colours pages are drawn in. Textures in other colours stay as stand-ins until
+    /// their pages arrive in the new colours; pages waiting for upload in other colours are
+    /// dropped when their turn comes.
+    pub fn set_page_colors(&mut self, colors: PageColors) {
+        if colors != self.colors {
+            self.colors = colors;
+            self.mixed = true;
         }
     }
 
@@ -105,6 +136,10 @@ impl<H> Cache<H> {
     pub fn begin_frame(&mut self) {
         self.trim();
         self.frame += 1;
+        if self.mixed {
+            let colors = self.colors;
+            self.mixed = self.entries.values().any(|e| e.colors != colors);
+        }
     }
 
     /// The current frame number.
@@ -149,45 +184,103 @@ impl<H> Cache<H> {
         self.preview_scales.get(&doc) == Some(&(key.generation, key.scale_milli))
     }
 
-    /// Whether the preview texture of this exact key is held.
+    /// Whether the preview texture of this exact key, in the current colours, is held.
     pub fn has_preview(&self, doc: DocId, key: RenderKey) -> bool {
         self.previews
             .get(&(doc, key.page))
-            .is_some_and(|p| p.key == key)
+            .is_some_and(|p| p.key == key && p.colors == self.colors)
     }
 
-    /// Whether a texture for exactly this key is held, in either layer. Does not count as a use.
+    /// Whether a texture for exactly this key in the current colours is held, in either layer.
+    /// Does not count as a use.
     pub fn contains(&self, doc: DocId, key: RenderKey) -> bool {
-        self.entries.contains_key(&(doc, key)) || self.has_preview(doc, key)
+        self.entries
+            .get(&(doc, key))
+            .is_some_and(|e| e.colors == self.colors)
+            || self.has_preview(doc, key)
     }
 
-    /// Stores a texture, replacing one with the same key. A key at the document's preview scale
-    /// goes to the preview layer (replacing that page's preview); anything else to the sharp
-    /// layer, where it counts as used in this frame.
+    /// Stores a texture in the current colours, replacing one with the same key. A key at the
+    /// document's preview scale goes to the preview layer (replacing that page's preview);
+    /// anything else to the sharp layer, where it counts as used in this frame.
+    #[cfg(test)]
     pub fn insert_handle(&mut self, doc: DocId, key: RenderKey, handle: H, size: [u32; 2]) {
+        self.insert_colored(doc, key, self.colors, handle, size);
+    }
+
+    /// [`Cache::insert_handle`] for a texture rendered in `colors`. A texture in other than the
+    /// current colours is dropped (it was requested before the colours changed). The page's
+    /// sharp textures in other colours go. Returns whether the texture was stored.
+    pub fn insert_colored(
+        &mut self,
+        doc: DocId,
+        key: RenderKey,
+        colors: PageColors,
+        handle: H,
+        size: [u32; 2],
+    ) -> bool {
+        if colors != self.colors {
+            return false;
+        }
+        self.drop_other_colors(doc, key.page);
         let bytes = texture_bytes(size[0], size[1]);
         if self.is_preview_key(doc, key) {
-            let preview = Preview { key, handle, bytes };
+            let preview = Preview {
+                key,
+                handle,
+                bytes,
+                colors,
+            };
             if let Some(old) = self.previews.insert((doc, key.page), preview) {
                 self.preview_bytes -= old.bytes;
             }
             self.preview_bytes += bytes;
-            return;
+            return true;
         }
         let entry = Entry {
             handle,
             bytes,
             last_used: self.frame,
+            colors,
         };
         if let Some(old) = self.entries.insert((doc, key), entry) {
             self.bytes -= old.bytes;
         }
         self.bytes += bytes;
+        true
     }
 
-    /// The texture for exactly this key, from either layer. A sharp one is marked as used in
-    /// this frame.
+    /// Drops the sharp textures of a page that are not in the current colours. (The page's
+    /// preview in other colours stays until its replacement arrives: previews are what every
+    /// page falls back to.)
+    fn drop_other_colors(&mut self, doc: DocId, page: u32) {
+        if !self.mixed {
+            return;
+        }
+        let colors = self.colors;
+        let old: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|((d, k), e)| *d == doc && k.page == page && e.colors != colors)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in old {
+            self.remove(key);
+        }
+    }
+
+    /// The texture for exactly this key in the current colours, from either layer. A sharp one
+    /// is marked as used in this frame.
     pub fn get(&mut self, doc: DocId, key: RenderKey) -> Option<&H> {
+        if !self.contains(doc, key) {
+            return None;
+        }
+        self.get_any(doc, key)
+    }
+
+    /// The texture of this key in whatever colours, from either layer. A sharp one is marked as
+    /// used in this frame.
+    fn get_any(&mut self, doc: DocId, key: RenderKey) -> Option<&H> {
         let frame = self.frame;
         if let Some(e) = self.entries.get_mut(&(doc, key)) {
             e.last_used = frame;
@@ -200,8 +293,8 @@ impl<H> Cache<H> {
     }
 
     /// The key of the texture of the same document, page and generation whose scale is closest
-    /// to `scale_milli` (by ratio; on a tie the larger, sharper one), in either layer. Does not
-    /// count as a use.
+    /// to `scale_milli` (by ratio; on a tie the larger, sharper one), in either layer. A texture
+    /// in the current colours is preferred over any in other colours. Does not count as a use.
     fn nearest_key(
         &self,
         doc: DocId,
@@ -211,21 +304,24 @@ impl<H> Cache<H> {
     ) -> Option<RenderKey> {
         let target = f64::from(scale_milli.max(1)).ln();
         let distance = |k: &RenderKey| (f64::from(k.scale_milli.max(1)).ln() - target).abs();
+        let current = self.colors;
         let preview = self
             .previews
             .get(&(doc, page))
-            .map(|p| p.key)
-            .filter(|k| k.generation == generation);
+            .map(|p| (p.key, p.colors))
+            .filter(|(k, _)| k.generation == generation);
         self.entries
-            .keys()
-            .filter(|(d, k)| *d == doc && k.page == page && k.generation == generation)
-            .map(|(_, k)| *k)
+            .iter()
+            .filter(|((d, k), _)| *d == doc && k.page == page && k.generation == generation)
+            .map(|((_, k), e)| (*k, e.colors))
             .chain(preview)
-            .min_by(|a, b| {
-                distance(a)
-                    .total_cmp(&distance(b))
+            .min_by(|(a, ac), (b, bc)| {
+                (*ac != current)
+                    .cmp(&(*bc != current))
+                    .then(distance(a).total_cmp(&distance(b)))
                     .then(b.scale_milli.cmp(&a.scale_milli))
             })
+            .map(|(k, _)| k)
     }
 
     /// The texture of the same page and generation whose scale is closest to `scale_milli`,
@@ -238,7 +334,7 @@ impl<H> Cache<H> {
         scale_milli: u32,
     ) -> Option<&H> {
         let key = self.nearest_key(doc, page, generation, scale_milli)?;
-        self.get(doc, key)
+        self.get_any(doc, key)
     }
 
     /// What to draw for a page wanted at `key`: the exact texture, else the nearest scale of the
@@ -339,20 +435,23 @@ impl<H> Cache<H> {
         self.pending.push_back((doc, page));
     }
 
-    /// The keys of `doc`'s rendered pages that wait for upload.
+    /// The keys of `doc`'s rendered pages in the current colours that wait for upload.
     pub fn pending_keys(&self, doc: DocId) -> impl Iterator<Item = RenderKey> + '_ {
         self.pending
             .iter()
-            .filter(move |(d, _)| *d == doc)
+            .filter(move |(d, p)| *d == doc && p.colors == self.colors)
             .map(|(_, p)| p.key)
     }
 
     /// Takes the pending pages to upload this frame: sharp ones before previews (what the
     /// views wait for comes first), in arrival order, until `max_bytes` of texture is reached
-    /// (always at least one page). The rest stays queued.
+    /// (always at least one page). The rest stays queued. Pages in other than the current
+    /// colours are dropped.
     pub fn take_uploads(&mut self, max_bytes: usize) -> Vec<(DocId, RenderedPage)> {
+        let colors = self.colors;
         let (mut sharp, previews): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.pending)
             .into_iter()
+            .filter(|(_, p)| p.colors == colors)
             .partition(|(d, p)| !self.is_preview_key(*d, p.key));
         sharp.extend(previews);
         let mut out = Vec::new();
@@ -395,22 +494,28 @@ impl Cache<egui::TextureHandle> {
             );
             return;
         }
+        if page.colors != self.page_colors() {
+            // Requested before the colours changed: nobody wants it any more.
+            return;
+        }
         let image = egui::ColorImage::from_rgb([w as usize, h as usize], &page.rgb);
         let name = format!(
-            "doc{doc:?}-p{}-s{}-g{}",
-            page.key.page, page.key.scale_milli, page.key.generation
+            "doc{doc:?}-p{}-s{}-g{}-{:?}",
+            page.key.page, page.key.scale_milli, page.key.generation, page.colors
         );
         let handle = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
-        self.insert_handle(doc, page.key, handle, [w, h]);
+        self.insert_colored(doc, page.key, page.colors, handle, [w, h]);
     }
 }
 
 /// Takes the finished renders of every open document, drops the textures of closed documents
 /// and of old generations, and uploads up to [`UPLOAD_BYTES_PER_FRAME`] of the queue. When more
-/// is queued, asks for another frame. Called from `logic()` once per frame.
+/// is queued, asks for another frame. Also tells every document the page colours to request
+/// in. Called from `logic()` once per frame.
 pub fn collect_rendered(ctx: &egui::Context, docs: &DocStore, textures: &mut TextureCache) {
     textures.begin_frame();
     for (id, doc) in docs.iter() {
+        doc.set_page_colors(textures.page_colors());
         if let Some(info) = doc.info() {
             textures.retain_generation(id, info.generation);
         }
@@ -562,6 +667,7 @@ mod tests {
     fn rendered(key: RenderKey, w: u32, h: u32) -> RenderedPage {
         RenderedPage {
             key,
+            colors: PageColors::Original,
             width: w,
             height: h,
             rgb: vec![255; (w * h * 3) as usize],
@@ -679,6 +785,123 @@ mod tests {
         assert!(!c.has_pending());
     }
 
+    /// A rendered page in `colors`.
+    fn rendered_in(key: RenderKey, colors: PageColors) -> RenderedPage {
+        RenderedPage {
+            colors,
+            ..rendered(key, 1, 1)
+        }
+    }
+
+    #[test]
+    fn only_textures_in_the_current_colours_are_exact() {
+        let (a, _) = docs();
+        let mut c: Cache<&str> = Cache::new(usize::MAX);
+        assert_eq!(c.page_colors(), PageColors::Original);
+        c.insert_handle(a, key(0, 1000, 0), "light", [1, 1]);
+        c.set_page_colors(PageColors::Dark);
+        // The light texture is no longer exact, so the view asks for a dark one ...
+        assert!(!c.contains(a, key(0, 1000, 0)));
+        assert_eq!(c.get(a, key(0, 1000, 0)), None);
+        // ... and draws the light one until it comes (VIEW-3: never an empty page).
+        assert_eq!(c.pick(a, key(0, 1000, 0)), Pick::Stretched(&"light"));
+        assert!(c.insert_colored(a, key(0, 1000, 0), PageColors::Dark, "dark", [1, 1]));
+        assert_eq!(c.pick(a, key(0, 1000, 0)), Pick::Exact(&"dark"));
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.bytes(), 4);
+    }
+
+    #[test]
+    fn a_page_in_the_new_colours_drops_its_textures_in_the_old_ones() {
+        let (a, b) = docs();
+        let mut c: Cache<&str> = Cache::new(usize::MAX);
+        c.insert_handle(a, key(0, 1000, 0), "a0 light", [1, 1]);
+        c.insert_handle(a, key(0, 2000, 0), "a0 light sharp", [1, 1]);
+        c.insert_handle(a, key(1, 1000, 0), "a1 light", [1, 1]);
+        c.insert_handle(b, key(0, 1000, 0), "b0 light", [1, 1]);
+        c.set_page_colors(PageColors::Dark);
+        c.begin_frame();
+        // A dark texture of page 0 at another scale arrives.
+        c.insert_handle(a, key(0, 1500, 0), "a0 dark", [1, 1]);
+        assert_eq!(c.len(), 3, "page 0's light textures went");
+        assert_eq!(c.pick(a, key(0, 2000, 0)), Pick::Stretched(&"a0 dark"));
+        // Other pages and documents keep theirs until their own dark ones come.
+        assert_eq!(c.pick(a, key(1, 1000, 0)), Pick::Stretched(&"a1 light"));
+        assert_eq!(c.pick(b, key(0, 1000, 0)), Pick::Stretched(&"b0 light"));
+        // Back to light: the light textures are exact again, the dark one is a stand-in.
+        c.set_page_colors(PageColors::Original);
+        assert_eq!(c.pick(a, key(1, 1000, 0)), Pick::Exact(&"a1 light"));
+        assert_eq!(c.pick(a, key(0, 1500, 0)), Pick::Stretched(&"a0 dark"));
+    }
+
+    #[test]
+    fn nearest_prefers_the_current_colours_over_a_closer_scale() {
+        let (a, _) = docs();
+        let mut c: Cache<&str> = Cache::new(usize::MAX);
+        c.insert_handle(a, key(0, 1000, 0), "light exact scale", [1, 1]);
+        c.set_page_colors(PageColors::Dark);
+        c.insert_handle(a, key(5, 1, 0), "unrelated", [1, 1]);
+        c.set_preview_scale(a, 0, 300);
+        c.insert_handle(a, key(0, 300, 0), "dark preview", [1, 1]);
+        assert_eq!(c.nearest(a, 0, 0, 1000), Some(&"dark preview"));
+    }
+
+    #[test]
+    fn previews_in_old_colours_stay_until_replaced() {
+        let (a, _) = docs();
+        let mut c: Cache<&str> = Cache::new(usize::MAX);
+        c.set_preview_scale(a, 0, 300);
+        c.insert_handle(a, key(0, 300, 0), "light preview", [1, 1]);
+        c.set_page_colors(PageColors::Dark);
+        assert!(
+            !c.has_preview(a, key(0, 300, 0)),
+            "the preload must run again"
+        );
+        assert_eq!(c.preview_count(a), 1);
+        assert_eq!(
+            c.pick(a, key(0, 1000, 0)),
+            Pick::Stretched(&"light preview")
+        );
+        // A dark sharp texture does not take the preview's place ...
+        c.insert_handle(a, key(0, 1000, 0), "dark sharp", [1, 1]);
+        assert_eq!(c.preview_count(a), 1);
+        // ... a dark preview does.
+        c.insert_handle(a, key(0, 300, 0), "dark preview", [1, 1]);
+        assert!(c.has_preview(a, key(0, 300, 0)));
+        assert_eq!(c.preview_count(a), 1);
+        assert_eq!(c.preview_bytes(), 4);
+    }
+
+    #[test]
+    fn renders_in_old_colours_are_dropped_before_upload() {
+        let (a, _) = docs();
+        let mut c: Cache<u32> = Cache::new(usize::MAX);
+        c.queue(a, rendered_in(key(0, 1000, 0), PageColors::Original));
+        c.queue(a, rendered_in(key(1, 1000, 0), PageColors::Dark));
+        c.set_page_colors(PageColors::Dark);
+        let keys: Vec<RenderKey> = c.pending_keys(a).collect();
+        assert_eq!(keys, vec![key(1, 1000, 0)]);
+        let up = c.take_uploads(usize::MAX);
+        assert_eq!(up.len(), 1);
+        assert_eq!(up[0].1.colors, PageColors::Dark);
+        assert!(!c.has_pending());
+        // Inserting one in the wrong colours directly is refused too.
+        assert!(!c.insert_colored(a, key(2, 1000, 0), PageColors::Original, 7, [1, 1]));
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn uploading_keeps_only_pages_in_the_current_colours() {
+        let ctx = egui::Context::default();
+        let (a, _) = docs();
+        let mut c = TextureCache::new(usize::MAX);
+        c.set_page_colors(PageColors::Dark);
+        c.insert(&ctx, a, rendered_in(key(0, 1000, 0), PageColors::Original));
+        assert!(!c.contains(a, key(0, 1000, 0)));
+        c.insert(&ctx, a, rendered_in(key(0, 1000, 0), PageColors::Dark));
+        assert!(c.contains(a, key(0, 1000, 0)));
+    }
+
     #[test]
     fn begin_frame_advances_the_frame() {
         let mut c: Cache<u32> = Cache::new(0);
@@ -698,6 +921,7 @@ mod tests {
             a,
             RenderedPage {
                 key: k,
+                colors: PageColors::Original,
                 width: 2,
                 height: 2,
                 rgb: vec![255; 12],
@@ -711,6 +935,7 @@ mod tests {
             a,
             RenderedPage {
                 key: key(1, 1000, 0),
+                colors: PageColors::Original,
                 width: 2,
                 height: 2,
                 rgb: vec![255; 5],

@@ -546,7 +546,10 @@ pub enum Event {
 /// Renders the region, copies it to the clipboard and saves it when asked to. Blocks: run it on a
 /// background thread (R-1).
 pub fn run_job(doc: &DocumentHandle, clipboard: &dyn Clipboard, params: &JobParams) -> Event {
-    let image = match doc.render_region_wait(params.page, params.region, params.scale_milli) {
+    // Captures go into other documents: always the page's own colours (VIEW-7).
+    let colors = refdesk_core::PageColors::Original;
+    let image = match doc.render_region_wait(params.page, params.region, params.scale_milli, colors)
+    {
         Ok(image) => image,
         Err(e) => return Event::Failed(e.to_string()),
     };

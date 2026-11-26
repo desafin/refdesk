@@ -14,6 +14,7 @@ pub mod link;
 pub mod model;
 pub mod nav;
 pub mod outline;
+pub mod recolor;
 pub mod search;
 pub mod store;
 #[cfg(any(test, feature = "testutil"))]
@@ -38,6 +39,7 @@ pub use model::{Location, ViewState, ZoomMode};
 pub use nav::dest::{DestKind, Destination};
 pub use nav::history::{History, Place};
 pub use outline::{Outline, OutlineItem, OutlineNode};
+pub use recolor::{PageColors, PageColorsPref, effective_page_colors, toggled_page_colors};
 pub use search::{
     MatchPart, ScopeChoice, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery,
     SearchScope, SearchSnapshot, document_end, scope_choices, section_scope,

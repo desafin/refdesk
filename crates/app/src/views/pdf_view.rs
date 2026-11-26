@@ -686,13 +686,9 @@ fn show_password(ui: &mut Ui, tab: &mut PdfTab, doc: &DocumentHandle) {
     });
 }
 
-/// The view background: a dark middle tone of the theme.
-fn background(visuals: &egui::Visuals) -> Color32 {
-    if visuals.dark_mode {
-        Color32::from_gray(52)
-    } else {
-        Color32::from_gray(140)
-    }
+/// The view background: a dark middle tone of the theme, dark on dark pages (VIEW-7).
+fn background(visuals: &egui::Visuals, colors: refdesk_core::PageColors) -> Color32 {
+    crate::theme::page_backdrop(colors, visuals.dark_mode)
 }
 
 fn to_vec(p: Point) -> Vec2 {
@@ -890,7 +886,7 @@ fn show_document(
     );
     paint_global_search(ui, view_rect, state, marks.as_ref());
     paint_search(ui, view_rect, state);
-    paint_selection(ui, view_rect, state, &texts);
+    paint_selection(ui, view_rect, state, &texts, cx.textures.page_colors());
     paint_link_hover(ui, view_rect, state, hover.as_ref());
     paint_arrival(ui, view_rect, state, now);
     show_copy_notice(ui, view_rect, state, now);
@@ -1258,13 +1254,19 @@ fn autoscroll_and_follow(
 }
 
 /// Tints the selected lines of the visible pages with the theme's selection color.
-fn paint_selection(ui: &Ui, view_rect: Rect, state: &PdfViewUiState, texts: selection::PageTexts) {
+fn paint_selection(
+    ui: &Ui,
+    view_rect: Rect,
+    state: &PdfViewUiState,
+    texts: selection::PageTexts,
+    colors: refdesk_core::PageColors,
+) {
     let (Some(sel), Some(layout)) = (state.selection.active(), state.layout()) else {
         return;
     };
     let base = ui.visuals().selection.bg_fill;
-    // Translucent, so the text stays readable.
-    let color = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 110);
+    // Translucent, so the text stays readable; its own blue on dark pages (VIEW-7).
+    let color = crate::theme::selection_tint(base, colors);
     let painter = ui.painter_at(view_rect);
     for h in selection::highlight_rects(&sel, layout, state.scroll(), state.viewport(), texts) {
         let rect = Rect::from_min_max(
@@ -1424,7 +1426,8 @@ fn paint_pages(
     textures: &mut TextureCache,
 ) {
     let painter = ui.painter_at(view_rect);
-    painter.rect_filled(view_rect, 0.0, background(ui.visuals()));
+    let colors = textures.page_colors();
+    painter.rect_filled(view_rect, 0.0, background(ui.visuals(), colors));
     let Some(layout) = state.layout() else {
         return;
     };
@@ -1445,7 +1448,7 @@ fn paint_pages(
                 painter.image(id, rect, uv, Color32::WHITE);
             }
             None => {
-                painter.rect_filled(rect, 0.0, Color32::WHITE);
+                painter.rect_filled(rect, 0.0, crate::theme::blank_page(colors));
             }
         }
         painter.rect_stroke(rect, 0.0, border, StrokeKind::Outside);

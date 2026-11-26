@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use refdesk_core::testutil::{PdfBuilder, TempPdf};
 use refdesk_core::{
     DestKind, Destination, DocStatus, DocumentHandle, DocumentInfo, EngineError, EngineOptions,
-    LinkTarget, Location, Priority, Rect, RenderKey, RenderedPage,
+    LinkTarget, Location, PageColors, Priority, Rect, RenderKey, RenderedPage,
 };
 
 /// Deadline for anything the worker does. Far above what a slow machine needs.
@@ -242,14 +242,21 @@ fn damaged_files_do_not_panic() {
                     // Each call may succeed or fail; it must answer.
                     let _ = doc.handle.render_wait(key(page, 1000, 0));
                     let _ = doc.handle.page_text_wait(page);
-                    let _ =
-                        doc.handle
-                            .render_region_wait(page, Rect::new(0.0, 0.0, 50.0, 50.0), 1000);
+                    let _ = doc.handle.render_region_wait(
+                        page,
+                        Rect::new(0.0, 0.0, 50.0, 50.0),
+                        1000,
+                        PageColors::Original,
+                    );
                     // Non-blocking extraction runs before blocking jobs, so after the next
                     // blocking call the links have either arrived or failed.
                     let _ = doc.handle.page_links(page);
                     let _ = doc.handle.page_text_wait(page);
                     let _ = doc.handle.page_links(page);
+                    // Dark colours read the page's images too; that must answer as well.
+                    doc.handle.set_page_colors(PageColors::Dark);
+                    let _ = doc.handle.render_wait(key(page, 1000, 0));
+                    doc.handle.set_page_colors(PageColors::Original);
                 }
             }
             DocStatus::Failed(msg) => assert!(!msg.is_empty()),
@@ -308,7 +315,12 @@ fn render_region_size_content_and_clipping() {
     // The text baseline is at y = 100 with 24 pt glyphs.
     let text = doc
         .handle
-        .render_region_wait(0, Rect::new(70.0, 76.0, 200.0, 106.0), 2000)
+        .render_region_wait(
+            0,
+            Rect::new(70.0, 76.0, 200.0, 106.0),
+            2000,
+            PageColors::Original,
+        )
         .unwrap();
     assert_eq!((text.width, text.height), (260, 60));
     assert_eq!(text.rgb.len(), (text.width * text.height * 3) as usize);
@@ -316,7 +328,12 @@ fn render_region_size_content_and_clipping() {
 
     let empty = doc
         .handle
-        .render_region_wait(0, Rect::new(300.0, 500.0, 400.0, 600.0), 1000)
+        .render_region_wait(
+            0,
+            Rect::new(300.0, 500.0, 400.0, 600.0),
+            1000,
+            PageColors::Original,
+        )
         .unwrap();
     assert_eq!((empty.width, empty.height), (100, 100));
     assert!(all_white(&empty.rgb));
@@ -324,13 +341,22 @@ fn render_region_size_content_and_clipping() {
     // Reaches past the right and bottom edges: clipped to 512..612 x 692..792.
     let clipped = doc
         .handle
-        .render_region_wait(0, Rect::new(512.0, 692.0, 700.0, 900.0), 1000)
+        .render_region_wait(
+            0,
+            Rect::new(512.0, 692.0, 700.0, 900.0),
+            1000,
+            PageColors::Original,
+        )
         .unwrap();
     assert_eq!((clipped.width, clipped.height), (100, 100));
 
     assert!(matches!(
-        doc.handle
-            .render_region_wait(0, Rect::new(700.0, 0.0, 800.0, 100.0), 1000),
+        doc.handle.render_region_wait(
+            0,
+            Rect::new(700.0, 0.0, 800.0, 100.0),
+            1000,
+            PageColors::Original
+        ),
         Err(EngineError::Failed(_))
     ));
 }
