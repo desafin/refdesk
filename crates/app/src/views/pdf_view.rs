@@ -30,7 +30,9 @@ use crate::commands;
 use crate::i18n::tr;
 use crate::overlays::capture::CaptureState;
 use crate::overlays::link_preview::{self, ShowEnv, UpdateEnv};
+use crate::overlays::region_zoom::{self, RegionZoom};
 use crate::overlays::translate_popup::{self, TranslateView};
+use crate::overlays::{link_hints, pinned_preview};
 use crate::panels::global_search::DocMarks;
 use crate::panels::search::{self, SearchState};
 use crate::panels::status_bar::GotoInput;
@@ -203,6 +205,8 @@ pub struct PdfViewUiState {
     pub capture: Box<CaptureState>,
     /// The translation popup of this view (TR-2 .. TR-4). Boxed to keep tabs small.
     pub translate: Box<TranslateView>,
+    /// The region zoom and the middle-button pan (VIEW-14, VIEW-6). Boxed to keep tabs small.
+    pub region_zoom: Box<RegionZoom>,
 }
 
 /// The unclamped document location at a content-space point: the nearest page, and the offset
@@ -721,6 +725,16 @@ fn show_document(
     state.selection.sync_generation(info.generation);
     // In capture mode a drag draws a rectangle and a click follows no link.
     let capturing = state.capture_input(ui, &response, view_rect, cx.focused, cx.tab_id, cx.queue);
+    let capturing = region_zoom::input(
+        ui,
+        &response,
+        view_rect,
+        cx.focused,
+        &mut tab.view,
+        state,
+        info,
+    ) || capturing;
+    link_hints::input(ui, state, info, cx.tab_id, cx.focused, cx.queue);
 
     let now = ui.input(|i| i.time);
     let texts = |page: u32| doc.page_text(page);
@@ -906,6 +920,17 @@ fn show_document(
         },
     );
     state.capture_paint(ui, view_rect, hovered, now, cx.tab_id, cx.queue);
+    region_zoom::paint(ui, view_rect, state, hovered);
+    link_hints::paint(ui, view_rect, state, cx.tab_id);
+    let pinned_env = pinned_preview::Env {
+        tab: cx.tab_id,
+        view_rect,
+        doc_id: tab.doc,
+        doc,
+        info,
+        pixels,
+    };
+    pinned_preview::show(ui, state, cx.textures, cx.queue, &pinned_env);
     // The popup says the same as the tooltip, and more.
     if let Some(text) = hover_text
         && !preview_open

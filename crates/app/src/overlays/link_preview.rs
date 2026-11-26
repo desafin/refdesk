@@ -10,6 +10,10 @@
 //! ([`shot`]) and the texture it draws ([`choose_texture`]). [`update`] and [`show`] are the
 //! egui part: they read the pointer and the keys, and paint the popup in the tooltip layer.
 //!
+//! The pin at the right end of the title line turns the popup into a pinned preview that stays
+//! (LINK-14, `pinned_preview.rs`), which reuses the drawing helpers [`page_texture`] and
+//! [`paint_title`].
+//!
 //! The popup draws a part of a texture that is in the cache already (the preview layer holds
 //! every page). When there is no picture at the scale the popup needs, the preview is stretched
 //! and a render is requested; the sharp one replaces it when it arrives (R-1: nothing blocks).
@@ -25,6 +29,8 @@ use refdesk_core::{
 };
 
 use crate::action::{Action, OpenHow};
+use crate::i18n::tr;
+use crate::overlays::pinned_preview::PinRequest;
 use crate::state::{DocId, TabId};
 use crate::views::links::{self, LinkHit};
 use crate::views::pdf_view::{PdfViewUiState, PixelInfo, render_scale_milli};
@@ -630,22 +636,20 @@ pub fn show(
         return;
     };
     let key = wanted_key(&shown, &g, env.pixels, env.generation);
-    let chosen = choose_texture(textures, env.doc_id, key);
-    if !chosen.sharp {
-        env.doc.request_render(key, Priority::Preview);
-    }
-    let texture = chosen.texture.map(|t| t.id());
+    let texture = page_texture(textures, env.doc_id, env.doc, key);
     let blank = crate::theme::blank_page(textures.page_colors());
 
     let rect = to_egui(env.view_rect, g.rect);
     let image = to_egui(env.view_rect, g.image);
     let header = to_egui(env.view_rect, g.header);
+    let pin = pin_rect(header);
     let uv = egui::Rect::from_min_max(
         pos2(g.shot.uv.x0, g.shot.uv.y0),
         pos2(g.shot.uv.x1, g.shot.uv.y1),
     );
     let visuals = ui.visuals().clone();
     let mut clicked = false;
+    let mut pinned = false;
     egui::Area::new(Id::unique(("link_preview", env.tab)))
         .order(Order::Tooltip)
         .fixed_pos(rect.min)
@@ -663,34 +667,43 @@ pub fn show(
                 }
             }
             painter.rect_filled(header, 0.0, visuals.widgets.noninteractive.weak_bg_fill);
-            let font = FontId::proportional(13.0);
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                shown.title.clone(),
-                font,
-                visuals.text_color(),
-            );
-            job.wrap.max_width = (header.width() - 16.0).max(0.0);
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = true;
-            job.wrap.overflow_character = Some('…');
-            let galley = painter.layout_job(job);
-            let at = Pos2::new(
-                header.min.x + 8.0,
-                header.center().y - galley.size().y / 2.0,
-            );
-            painter.galley(at, galley, visuals.text_color());
+            let title = egui::Rect::from_min_max(header.min, pos2(pin.min.x, header.max.y));
+            paint_title(&painter, title, &shown.title, visuals.text_color());
             painter.rect_stroke(
                 rect,
                 0.0,
                 Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
                 StrokeKind::Inside,
             );
-            if response.hovered() {
+            // The pin (LINK-14): turns the popup into a pinned preview that stays.
+            let pin_response = ui.interact(
+                pin,
+                Id::unique(("link_preview_pin", env.tab)),
+                Sense::click(),
+            );
+            pin_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, tr("pin.button"))
+            });
+            if pin_response.hovered() {
+                painter.rect_filled(pin.shrink(2.0), 3.0, visuals.widgets.hovered.weak_bg_fill);
+            }
+            paint_pin(&painter, pin, visuals.text_color());
+            if response.hovered() || pin_response.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             }
             clicked = response.clicked();
+            pinned = pin_response.clicked();
         });
-    if clicked {
+    if pinned {
+        state.links.pinned.pin(PinRequest {
+            title: shown.title.clone(),
+            dest: shown.dest,
+            top: g.shot.region.y0,
+            rect: g.rect,
+            view: Size::new(env.view_rect.width(), env.view_rect.height()),
+        });
+        state.links.preview.close();
+    } else if clicked {
         queue.push(Action::Navigate {
             tab: env.tab,
             to: shown.dest,
@@ -698,6 +711,58 @@ pub fn show(
         });
         state.links.preview.close();
     }
+}
+
+/// The texture of a page to draw for `key`: the exact one, else the one closest in scale (a
+/// render at `key` is asked for then), `None` when the page has none yet. Shared with the pinned
+/// previews.
+pub(crate) fn page_texture(
+    textures: &mut TextureCache,
+    doc_id: DocId,
+    doc: &DocumentHandle,
+    key: RenderKey,
+) -> Option<egui::TextureId> {
+    let chosen = choose_texture(textures, doc_id, key);
+    if !chosen.sharp {
+        doc.request_render(key, Priority::Preview);
+    }
+    chosen.texture.map(|t| t.id())
+}
+
+/// Paints a title line into `rect`: one line, cut with "…" where it is too long. Shared with the
+/// pinned previews.
+pub(crate) fn paint_title(painter: &egui::Painter, rect: egui::Rect, title: &str, color: Color32) {
+    let font = FontId::proportional(13.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(title.to_owned(), font, color);
+    job.wrap.max_width = (rect.width() - 16.0).max(0.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    let galley = painter.layout_job(job);
+    let at = Pos2::new(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0);
+    painter.galley(at, galley, color);
+}
+
+/// The pin button at the right end of the title line.
+pub fn pin_rect(header: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        pos2(header.max.x - header.height(), header.min.y),
+        header.max,
+    )
+}
+
+/// A pin drawn with shapes (no glyph needed): a round head and a needle.
+fn paint_pin(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    painter.circle_filled(c - vec2(0.0, 3.0), 3.5, color);
+    painter.line_segment(
+        [c - vec2(0.0, 1.0), c + vec2(0.0, 6.0)],
+        Stroke::new(1.5, color),
+    );
+    painter.line_segment(
+        [c + vec2(-4.0, 1.0), c + vec2(4.0, 1.0)],
+        Stroke::new(1.5, color),
+    );
 }
 
 #[cfg(test)]
@@ -1245,6 +1310,17 @@ pub(crate) mod tests {
         pub time: f64,
         /// The texts the last frame drew, with where.
         pub drawn: Vec<(String, egui::Pos2)>,
+        /// Run the shortcut table in each frame, like a window does.
+        pub shortcuts: bool,
+        /// Collect the accessibility tree of each frame into `nodes`.
+        pub accesskit: bool,
+        /// The role and name (label, or value for a label node) of each accessible node of the
+        /// last frame.
+        pub nodes: Vec<(egui::accesskit::Role, String)>,
+        /// The addresses the frames asked the platform to open, oldest first.
+        pub opened: Vec<String>,
+        /// The cursor the last frame asked for.
+        pub cursor: CursorIcon,
     }
 
     fn collect_texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
@@ -1265,6 +1341,11 @@ pub(crate) mod tests {
                 state: AppState::new(),
                 time: 0.0,
                 drawn: Vec::new(),
+                shortcuts: false,
+                accesskit: false,
+                nodes: Vec::new(),
+                opened: Vec::new(),
+                cursor: CursorIcon::Default,
             }
         }
 
@@ -1280,6 +1361,9 @@ pub(crate) mod tests {
         /// A frame at the time `at` (seconds) with these events.
         pub fn frame_at(&mut self, at: f64, events: Vec<egui::Event>) {
             self.time = at;
+            if self.accesskit {
+                self.ctx.enable_accesskit();
+            }
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, SCREEN)),
                 time: Some(at),
@@ -1290,7 +1374,11 @@ pub(crate) mod tests {
             preload::step(&self.ctx, &mut self.state);
             let state = &mut self.state;
             let mut queue = Vec::new();
+            let shortcuts = self.shortcuts;
             let output = self.ctx.run_ui(input, |ui| {
+                if shortcuts {
+                    queue.extend(crate::commands::handle_shortcuts(ui.ctx(), state));
+                }
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| draw_active(ui, state, &mut queue));
@@ -1299,6 +1387,21 @@ pub(crate) mod tests {
             for clipped in &output.shapes {
                 collect_texts(&clipped.shape, &mut self.drawn);
             }
+            for command in &output.platform_output.commands {
+                if let egui::OutputCommand::OpenUrl(open) = command {
+                    self.opened.push(open.url.clone());
+                }
+            }
+            self.cursor = output.platform_output.cursor_icon;
+            self.nodes = output
+                .platform_output
+                .accesskit_update
+                .clone()
+                .map(|u| u.nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(_, n)| Some((n.role(), n.label().or(n.value())?.to_owned())))
+                .collect();
             output.drop_without_applying_deltas();
             self.state.actions.append(&mut queue);
             dispatch_queued(&mut self.state, &self.ctx);
@@ -1352,6 +1455,35 @@ pub(crate) mod tests {
                 pixels_per_point: 1.0,
                 max_texture_side: self.ctx.input(|i| i.max_texture_side),
             }
+        }
+
+        /// Whether the last frame's accessibility tree has a node with this role and name.
+        pub fn has_node(&self, role: egui::accesskit::Role, name: &str) -> bool {
+            self.nodes.iter().any(|(r, n)| *r == role && n == name)
+        }
+
+        /// A key press and release at the time `at`.
+        pub fn key_at(&mut self, at: f64, key: egui::Key, modifiers: Modifiers) {
+            let event = |pressed| egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed,
+                repeat: false,
+                modifiers,
+            };
+            self.frame_at(at, vec![event(true), event(false)]);
+        }
+
+        /// A primary click (press and release in two frames) at `pos`, from the time `at`.
+        pub fn click_at(&mut self, at: f64, pos: egui::Pos2) {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame_at(at, vec![egui::Event::PointerMoved(pos), event(true)]);
+            self.frame_at(at + 0.02, vec![event(false)]);
         }
 
         pub fn popup(&self, tab: TabId) -> Option<(egui::Rect, RenderKey)> {
@@ -1454,7 +1586,7 @@ pub(crate) mod tests {
     }
 
     /// Rests the pointer on `pos` from `at` on and runs the frames of a quarter second.
-    fn hover_from(h: &mut Harness, at: f64, pos: egui::Pos2) {
+    pub(crate) fn hover_from(h: &mut Harness, at: f64, pos: egui::Pos2) {
         h.frame_at(at, vec![egui::Event::PointerMoved(pos)]);
         h.frame_at(at + 0.001, Vec::new());
     }

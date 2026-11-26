@@ -16,7 +16,9 @@ use refdesk_core::{Link, LinkTarget, Location, Outline, PageLayout, Point, Rect,
 
 use crate::action::OpenHow;
 use crate::i18n::tr;
+use crate::overlays::link_hints::LinkHints;
 use crate::overlays::link_preview::PreviewState;
+use crate::overlays::pinned_preview::PinnedPreviews;
 use crate::views::selection::{self, Hit};
 
 /// How long the mark of a jump's landing place takes to fade out.
@@ -392,6 +394,10 @@ pub struct LinkState {
     pub middle_down: bool,
     /// The hover preview popup of a link (LINK-8).
     pub preview: PreviewState,
+    /// The keyboard link hints (LINK-13), while they are shown.
+    pub hints: LinkHints,
+    /// The pinned previews (LINK-14).
+    pub pinned: PinnedPreviews,
 }
 
 impl LinkState {

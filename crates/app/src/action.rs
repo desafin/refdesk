@@ -12,6 +12,7 @@ use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, Rect,
 use crate::overlays::capture;
 use crate::overlays::palette::{self, PaletteMode};
 use crate::overlays::translate;
+use crate::overlays::{link_hints, pinned_preview, region_zoom};
 use crate::panels::explorer;
 use crate::panels::global_search;
 use crate::panels::search;
@@ -270,6 +271,20 @@ pub enum Action {
         /// Which view shows the place.
         how: OpenHow,
     },
+    /// Arm the region zoom of a PDF tab, or disarm it (VIEW-14).
+    StartRegionZoom(TabId),
+    /// Go back to the zoom and place before the first region zoom of a PDF tab (VIEW-14).
+    ZoomBack(TabId),
+    /// Label the links in view of a PDF tab for the keyboard (LINK-13); `new_tab` opens the
+    /// chosen one in a new tab.
+    ShowLinkHints {
+        /// The tab.
+        tab: TabId,
+        /// Open the chosen link in a new tab.
+        new_tab: bool,
+    },
+    /// Close every pinned preview of a PDF tab (LINK-14).
+    CloseAllPinned(TabId),
     /// Move a PDF tab one step back in its history (LINK-2), to the exact place it left. The
     /// place it leaves is recorded, so that `Forward` returns to it. Nothing happens at the
     /// oldest entry.
@@ -612,6 +627,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             }
         }
         Action::Navigate { tab, to, how } => navigate(state, tab, to, how),
+        Action::StartRegionZoom(tab) => region_zoom::start(state, tab, ctx),
+        Action::ZoomBack(tab) => region_zoom::back(state, tab),
+        Action::ShowLinkHints { tab, new_tab } => link_hints::start(state, tab, new_tab, ctx),
+        Action::CloseAllPinned(tab) => pinned_preview::close_all(state, tab),
         Action::Back(tab) => step_history(state, tab, false),
         Action::Forward(tab) => step_history(state, tab, true),
         Action::ToggleToc => {
@@ -685,6 +704,8 @@ pub fn dispatch_queued(state: &mut AppState, ctx: &egui::Context) {
     for action in queue {
         dispatch(state, action, ctx);
     }
+    link_hints::settle(state, ctx);
+    region_zoom::settle(state);
 }
 
 /// Makes `tab` the active tab of its pane, gives the pane the focus and makes the tab the target

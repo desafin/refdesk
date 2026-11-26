@@ -490,6 +490,24 @@ pub static COMMANDS: &[Command] = &[
         action: |s| set_zoom(s, ZoomMode::Custom(1.0)),
     },
     Command {
+        id: "view.zoom_region",
+        name_key: "cmd.view.zoom_region",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::Z)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| s.focus.map(Action::StartRegionZoom),
+    },
+    Command {
+        id: "view.zoom_back",
+        name_key: "cmd.view.zoom_back",
+        menu: MenuGroup::View,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::Z)),
+        aliases: &[],
+        enabled: crate::overlays::region_zoom::can_go_back,
+        action: |s| s.focus.map(Action::ZoomBack),
+    },
+    Command {
         id: "view.fit_width",
         name_key: "cmd.view.fit_width",
         menu: MenuGroup::View,
@@ -564,6 +582,41 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: can_go_forward,
         action: |s| s.focus.map(Action::Forward),
+    },
+    Command {
+        id: "nav.link_hints",
+        name_key: "cmd.nav.link_hints",
+        menu: MenuGroup::Go,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| {
+            s.focus.map(|tab| Action::ShowLinkHints {
+                tab,
+                new_tab: false,
+            })
+        },
+    },
+    Command {
+        id: "nav.link_hints_new_tab",
+        name_key: "cmd.nav.link_hints_new_tab",
+        menu: MenuGroup::Go,
+        shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::F)),
+        aliases: &[],
+        enabled: has_ready_pdf_focus,
+        action: |s| {
+            s.focus
+                .map(|tab| Action::ShowLinkHints { tab, new_tab: true })
+        },
+    },
+    Command {
+        id: "view.close_pinned",
+        name_key: "cmd.view.close_pinned",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: crate::overlays::pinned_preview::has_pinned,
+        action: |s| s.focus.map(Action::CloseAllPinned),
     },
     Command {
         id: "view.goto_page",
@@ -1138,7 +1191,16 @@ mod tests {
     #[test]
     fn the_go_menu_lists_back_forward_and_go_to_page_with_their_shortcuts() {
         let go: Vec<&str> = in_menu(MenuGroup::Go).map(|c| c.id).collect();
-        assert_eq!(go, vec!["nav.back", "nav.forward", "view.goto_page"]);
+        assert_eq!(
+            go,
+            vec![
+                "nav.back",
+                "nav.forward",
+                "nav.link_hints",
+                "nav.link_hints_new_tab",
+                "view.goto_page"
+            ]
+        );
         let shortcut = |id| command(id).and_then(|c| c.shortcut);
         assert_eq!(
             shortcut("nav.back"),
