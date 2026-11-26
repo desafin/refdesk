@@ -8,4 +8,5 @@ pub mod search;
 pub mod search_history;
 pub mod sidebar;
 pub mod status_bar;
+pub mod thumbnails;
 pub mod toc;

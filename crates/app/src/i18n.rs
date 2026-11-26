@@ -275,6 +275,47 @@ pub const TABLE: &[Row] = &[
     ("gsearch.head_one", "{name}, {n}건", "{name}, {n} result"),
     ("sidebar.files", "파일", "Files"),
     ("sidebar.search", "검색", "Search"),
+    ("sidebar.pages", "쪽", "Pages"),
+    ("sidebar.pages_hint", "쪽 썸네일", "Page thumbnails"),
+    (
+        "cmd.view.show_pages",
+        "쪽 썸네일 보기",
+        "Show Page Thumbnails",
+    ),
+    (
+        "pages.no_doc",
+        "쪽을 보일 문서가 없습니다",
+        "No document to show pages of",
+    ),
+    ("pages.loading", "문서를 읽는 중…", "Loading the document…"),
+    ("pages.smaller", "썸네일 작게", "Smaller thumbnails"),
+    ("pages.larger", "썸네일 크게", "Larger thumbnails"),
+    (
+        "pages.only_matches",
+        "검색 결과가 있는 쪽만",
+        "Only pages with results",
+    ),
+    (
+        "pages.only_matches_doc",
+        "이 문서에서 찾은 결과가 있는 쪽만 보이고, 쪽마다 건수가 붙습니다",
+        "Shows only the pages with results of this document's search, with their counts",
+    ),
+    (
+        "pages.only_matches_all",
+        "모든 문서 찾기의 이 문서 결과가 있는 쪽만 보이고, 쪽마다 건수가 붙습니다",
+        "Shows only the pages with results of the search in all documents, with their counts",
+    ),
+    (
+        "pages.only_matches_none",
+        "이 문서에 검색 결과가 없습니다. 문서 안에서 찾거나 모든 문서에서 찾으면 켤 수 있습니다",
+        "No search results in this document. Search in it or in all documents to use this",
+    ),
+    ("pages.item_count", "{page}, {n}건", "{page}, {n} results"),
+    (
+        "pages.item_count_one",
+        "{page}, {n}건",
+        "{page}, {n} result",
+    ),
     ("sidebar.search_count", "검색 ({n})", "Search ({n})"),
     (
         "sidebar.files_hint",

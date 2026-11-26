@@ -508,6 +508,15 @@ pub static COMMANDS: &[Command] = &[
         action: |_| Some(Action::ShowExplorer),
     },
     Command {
+        id: "view.show_pages",
+        name_key: "cmd.view.show_pages",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::ShowPages),
+    },
+    Command {
         id: "view.toggle_explorer_section",
         name_key: "cmd.view.toggle_explorer_section",
         menu: MenuGroup::View,
@@ -1420,10 +1429,11 @@ mod tests {
             .position(|id| *id == "view.toggle_toc")
             .expect("toggle_toc");
         assert_eq!(
-            view[toc..toc + 5],
+            view[toc..toc + 6],
             [
                 "view.toggle_toc",
                 "view.show_explorer",
+                "view.show_pages",
                 "view.toggle_explorer_section",
                 "view.toggle_outline_section",
                 "view.refresh_explorer",

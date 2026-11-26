@@ -6,8 +6,9 @@
 //! (`WindowState::sidebar_split`); a folded section leaves its height to the other. How the
 //! height is shared is the pure function [`layout`]. The sidebar's state is per window.
 //!
-//! A thin row at the top switches between two views (WP-55): "Files" (the two sections) and
-//! "Search" (the search in all open documents, `panels/global_search.rs`).
+//! A thin row at the top switches between three views (WP-55, WP-73): "Files" (the two
+//! sections), "Search" (the search in all open documents, `panels/global_search.rs`) and
+//! "Pages" (thumbnails of the focused document, `panels/thumbnails.rs`).
 
 use std::path::PathBuf;
 
@@ -17,6 +18,7 @@ use crate::action::Action;
 use crate::i18n::tr;
 use crate::panels::explorer::{self, WorkspaceView};
 use crate::panels::global_search;
+use crate::panels::thumbnails;
 use crate::panels::toc::{self, title_job, triangle};
 use crate::state::{AppState, DocStore, Tab, TabId, TabStore};
 
@@ -39,6 +41,21 @@ pub enum SidebarView {
     Files,
     /// The search in all open documents.
     Search,
+    /// Thumbnails of the pages of the focused document (WP-73).
+    Pages,
+}
+
+/// Space between the buttons of the view switch.
+pub const SWITCH_GAP: f32 = 2.0;
+
+/// The width of each of `n` buttons that share a row `total` wide with [`SWITCH_GAP`] between
+/// them: the same for all, so a narrow sidebar shortens the buttons instead of pushing the last
+/// one out.
+pub fn switch_button_width(total: f32, n: usize) -> f32 {
+    if n == 0 {
+        return 0.0;
+    }
+    ((total - SWITCH_GAP * (n - 1) as f32) / n as f32).max(0.0)
 }
 
 /// The height left for the view below the switch row in a sidebar of height `total`.
@@ -162,6 +179,7 @@ pub fn show(
         workspace,
         global_search,
         search_history,
+        textures,
         ..
     } = state;
     let Some(window) = windows.get_mut(window_index) else {
@@ -192,6 +210,20 @@ pub fn show(
             search_history,
             queue,
         );
+        ui.allocate_rect(whole, Sense::hover());
+        return;
+    }
+    if window.sidebar_view == SidebarView::Pages {
+        let mut body = body_ui(ui, full, "pages_body");
+        let env = thumbnails::Env {
+            tabs,
+            docs,
+            textures,
+            global_search,
+            focus_tab,
+            window: window_id,
+        };
+        thumbnails::show_view(&mut body, &mut window.thumbnails, env, queue);
         ui.allocate_rect(whole, Sense::hover());
         return;
     }
@@ -309,10 +341,24 @@ fn view_switch(ui: &mut Ui, rect: Rect, view: &mut SidebarView, found: Option<us
             "sidebar.files_hint",
         ),
         (SidebarView::Search, search, "sidebar.search_hint"),
+        (
+            SidebarView::Pages,
+            tr("sidebar.pages").to_owned(),
+            "sidebar.pages_hint",
+        ),
     ];
+    // Buttons of equal width that fill the row; a label that does not fit is cut short.
+    row.spacing_mut().item_spacing.x = SWITCH_GAP;
+    let size = egui::vec2(
+        switch_button_width(row.available_width(), entries.len()),
+        row.available_height(),
+    );
     for (which, label, hint) in entries {
         if row
-            .selectable_label(*view == which, label)
+            .add_sized(
+                size,
+                egui::Button::selectable(*view == which, label).truncate(),
+            )
             .on_hover_text(tr(hint))
             .clicked()
         {
@@ -438,6 +484,54 @@ mod tests {
         assert!((l.explorer_body - shared * 0.25).abs() < 1e-3);
         assert!((l.explorer_body + l.outline_body - shared).abs() < 1e-3);
         assert_eq!(SidebarView::default(), SidebarView::Files);
+    }
+
+    #[test]
+    fn the_three_switch_buttons_share_the_row_equally_whatever_its_width() {
+        for total in [0.0, 30.0, 120.0, 240.0, 600.0] {
+            let w = switch_button_width(total, 3);
+            assert!(w >= 0.0);
+            // Three buttons and two gaps never exceed the row (they fill it when it is wide).
+            assert!(3.0 * w + 2.0 * SWITCH_GAP <= total.max(2.0 * SWITCH_GAP) + 1e-3);
+            if total >= 2.0 * SWITCH_GAP {
+                assert!((3.0 * w + 2.0 * SWITCH_GAP - total).abs() < 1e-3);
+            }
+        }
+        assert_eq!(switch_button_width(100.0, 0), 0.0);
+        assert_eq!(switch_button_width(100.0, 1), 100.0);
+    }
+
+    #[test]
+    fn the_sidebar_switches_between_its_three_views_and_the_rest_of_the_height_is_unchanged() {
+        let ctx = egui::Context::default();
+        let (mut state, _, _) = two_windows();
+        assert_eq!(state.windows[1].sidebar_view, SidebarView::Files);
+        dispatch(&mut state, Action::ShowPages, &ctx);
+        assert_eq!(state.windows[1].sidebar_view, SidebarView::Pages);
+        assert!(state.windows[1].toc_open, "the sidebar opens");
+        assert_eq!(state.windows[0].sidebar_view, SidebarView::Files);
+        dispatch(&mut state, Action::ShowGlobalSearch, &ctx);
+        assert_eq!(state.windows[1].sidebar_view, SidebarView::Search);
+        dispatch(&mut state, Action::ShowPages, &ctx);
+        // The commands that show the explorer or a section turn the view back to Files.
+        dispatch(&mut state, Action::ShowExplorer, &ctx);
+        assert_eq!(state.windows[1].sidebar_view, SidebarView::Files);
+        dispatch(&mut state, Action::ShowPages, &ctx);
+        let outline = Action::ToggleSidebarSection {
+            window: state.windows[1].id,
+            section: SidebarSection::Outline,
+        };
+        dispatch(&mut state, outline, &ctx);
+        assert_eq!(state.windows[1].sidebar_view, SidebarView::Files);
+        // Every view is drawn below the one switch row of the same height.
+        for view in [SidebarView::Files, SidebarView::Search, SidebarView::Pages] {
+            state.windows[1].sidebar_view = view;
+            state.windows[0].sidebar_view = view;
+            state.windows[0].toc_open = true;
+            for _ in 0..2 {
+                frame(&ctx, &mut state, Vec::new());
+            }
+        }
     }
 
     #[test]

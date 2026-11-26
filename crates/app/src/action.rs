@@ -259,6 +259,9 @@ pub enum Action {
     /// Show the explorer of the focused window: open the sidebar and its explorer section and
     /// put the keyboard in the filter box (WS-7).
     ShowExplorer,
+    /// Show the page thumbnails of the focused window: open the sidebar on its Pages view
+    /// (WP-73, VIEW-13).
+    ShowPages,
     /// Fold or unfold one section of a window's sidebar. A hidden sidebar is shown with the
     /// section open (WS-7).
     ToggleSidebarSection {
@@ -587,6 +590,14 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
                 window.explorer_open = true;
                 window.explorer.focus_filter = true;
                 window.sidebar_view = SidebarView::Files;
+            }
+            ctx.request_repaint();
+        }
+        Action::ShowPages => {
+            let w = state.focused_window_index();
+            if let Some(window) = state.windows.get_mut(w) {
+                window.toc_open = true;
+                window.sidebar_view = SidebarView::Pages;
             }
             ctx.request_repaint();
         }

@@ -19,6 +19,7 @@ use crate::overlays::translate::TranslateApp;
 use crate::panels::explorer::ExplorerState;
 use crate::panels::global_search::GlobalSearch;
 use crate::panels::sidebar::{DEFAULT_SPLIT, SidebarView};
+use crate::panels::thumbnails::ThumbState;
 use crate::panels::toc::{DEFAULT_TOC_WIDTH, TocState};
 use crate::session::Memory;
 use crate::views::diff_view::{DiffDialog, DiffTab};
@@ -261,6 +262,8 @@ pub struct WindowState {
     pub sidebar_split: f32,
     /// Folding, filter and scroll of this window's explorer; the index is shared (WS-2).
     pub explorer: ExplorerState,
+    /// The Pages view of the sidebar: thumbnail width, filter and scroll (WP-73). Not saved.
+    pub thumbnails: ThumbState,
 }
 
 impl WindowState {
@@ -276,6 +279,7 @@ impl WindowState {
             outline_open: true,
             sidebar_split: DEFAULT_SPLIT,
             explorer: ExplorerState::default(),
+            thumbnails: ThumbState::default(),
         }
     }
 }
