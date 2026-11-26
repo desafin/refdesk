@@ -290,9 +290,6 @@ impl WindowState {
 /// A mode in which the next key presses belong to one feature and not to the shortcut table:
 /// the letter after "set mark", the letters of a link hint. The feature that sets it reads the
 /// keys itself and clears it when it is done (Esc always ends it).
-// The features that set these arrive with WP-74 (marks) and WP-33 (link hints); each removes
-// this allowance for its own variants' sake once it constructs them.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyGrab {
     /// "Set mark" was pressed in this tab: the next letter names the mark (ETC-5).
