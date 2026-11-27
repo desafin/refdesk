@@ -40,6 +40,11 @@ pub use model::{Location, ViewState, ZoomMode};
 pub use nav::dest::{DestKind, Destination};
 pub use nav::history::{History, Place};
 pub use outline::{Outline, OutlineItem, OutlineNode};
+pub use project::{
+    Conflict, ConflictChoice, ConflictPolicy, ImportItem, ImportJob, ImportOutcome, ImportResult,
+    ImportSnapshot, ImportState, Project, ProjectError, SkipReason, SourceSurvey, SurveyFile,
+    SurveySnapshot, SurveyState, TrashEntry,
+};
 pub use recolor::{PageColors, PageColorsPref, effective_page_colors, toggled_page_colors};
 pub use search::{
     MatchPart, ScopeChoice, SearchError, SearchJob, SearchMatch, SearchOptions, SearchQuery,

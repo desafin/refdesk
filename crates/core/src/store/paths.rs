@@ -15,6 +15,9 @@ pub struct Paths {
     pub capture_dir: PathBuf,
     /// Holds `models/` (`<data_home>/refdesk`, else `<home>/.local/share/refdesk`).
     pub data_dir: PathBuf,
+    /// Where new projects go by default (`<documents>/refdesk`, see
+    /// [`Paths::default_projects_dir`]).
+    pub projects_dir: PathBuf,
 }
 
 impl Paths {
@@ -30,6 +33,23 @@ impl Paths {
             var("HOME"),
         )
         .with_data_home(var("XDG_DATA_HOME"))
+        .with_documents_dir(
+            directories::UserDirs::new().and_then(|u| u.document_dir().map(Path::to_path_buf)),
+        )
+    }
+
+    /// Puts `projects_dir` at `<documents>/refdesk` when `documents` (the XDG documents
+    /// folder) is an absolute path; otherwise it stays at `<home>/Documents/refdesk`.
+    pub fn with_documents_dir(mut self, documents: Option<PathBuf>) -> Paths {
+        if let Some(dir) = documents.filter(|p| p.is_absolute()) {
+            self.projects_dir = dir.join("refdesk");
+        }
+        self
+    }
+
+    /// The folder new projects are made in by default (PROJ-1).
+    pub fn default_projects_dir(&self) -> PathBuf {
+        self.projects_dir.clone()
     }
 
     /// Puts `data_dir` at `<data_home>/refdesk` when `data_home` is an absolute path; otherwise
@@ -50,6 +70,7 @@ impl Paths {
     /// * `socket_path`: `<runtime_dir>/refdesk.sock`, else `<state_dir>/refdesk.sock`
     /// * `capture_dir`: `<home>/Pictures/refdesk`
     /// * `data_dir`: `<home>/.local/share/refdesk` (see [`Paths::with_data_home`])
+    /// * `projects_dir`: `<home>/Documents/refdesk` (see [`Paths::with_documents_dir`])
     pub fn from_values(
         state_home: Option<PathBuf>,
         config_home: Option<PathBuf>,
@@ -74,6 +95,7 @@ impl Paths {
             socket_path,
             capture_dir: home.join("Pictures/refdesk"),
             data_dir: home.join(".local/share/refdesk"),
+            projects_dir: home.join("Documents/refdesk"),
         }
     }
 
@@ -85,6 +107,7 @@ impl Paths {
             socket_path: root.join("refdesk.sock"),
             capture_dir: root.join("captures"),
             data_dir: root.join("data"),
+            projects_dir: root.join("projects"),
         }
     }
 
@@ -193,6 +216,7 @@ mod tests {
             &paths.socket_path,
             &paths.capture_dir,
             &paths.data_dir,
+            &paths.projects_dir,
         ] {
             assert!(dir.starts_with(root), "{dir:?}");
         }
@@ -217,6 +241,28 @@ mod tests {
         assert_eq!(
             Paths::under(Path::new("/r")).models_dir(),
             PathBuf::from("/r/data/models")
+        );
+    }
+
+    #[test]
+    fn new_projects_go_to_the_documents_folder() {
+        let paths = Paths::from_values(None, None, None, p("/home/u"));
+        assert_eq!(
+            paths.default_projects_dir(),
+            PathBuf::from("/home/u/Documents/refdesk")
+        );
+        let moved = paths.clone().with_documents_dir(p("/home/u/Dokumente"));
+        assert_eq!(
+            moved.default_projects_dir(),
+            PathBuf::from("/home/u/Dokumente/refdesk")
+        );
+        assert_eq!(
+            paths.clone().with_documents_dir(p("relative")),
+            paths.clone().with_documents_dir(None)
+        );
+        assert_eq!(
+            Paths::under(Path::new("/r")).default_projects_dir(),
+            PathBuf::from("/r/projects")
         );
     }
 

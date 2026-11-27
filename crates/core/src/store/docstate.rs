@@ -23,6 +23,10 @@ pub struct RecentFolder {
     /// When it was last opened (Unix seconds, from the caller).
     #[serde(default)]
     pub last_opened: i64,
+    /// The project's name, when the folder was a project when it was opened (PROJ-4). Files
+    /// written before projects existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// What is remembered about one document.
@@ -172,12 +176,19 @@ impl DocStateDb {
     /// Remembers that the folder `path` was opened as a workspace at `now` (Unix seconds). The
     /// same path is kept once. At most [`MAX_RECENT_FOLDERS`] are kept; the least recent go.
     pub fn record_folder(&mut self, path: &Path, now: i64) {
+        self.record_project_folder(path, None, now);
+    }
+
+    /// Like [`DocStateDb::record_folder`] for a folder that is a project called `project` (or
+    /// not a project, with `None`).
+    pub fn record_project_folder(&mut self, path: &Path, project: Option<&str>, now: i64) {
         self.recent_folders.retain(|f| f.path != path);
         self.recent_folders.insert(
             0,
             RecentFolder {
                 path: path.to_path_buf(),
                 last_opened: now,
+                project: project.map(str::to_owned),
             },
         );
         self.sort_folders();
@@ -535,6 +546,31 @@ mod tests {
         db.record_folder(Path::new("/w/a"), 5);
         db.record_folder(Path::new("/w/b"), 5);
         assert_eq!(db.recent_folders(1)[0].path, Path::new("/w/b"));
+    }
+
+    #[test]
+    fn recent_folders_remember_the_project_name_and_old_files_read_as_plain_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("documents.json");
+        let mut db = DocStateDb::default();
+        db.record_project_folder(Path::new("/w/proj"), Some("Specs"), 20);
+        db.record_folder(Path::new("/w/plain"), 10);
+        db.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"project\"").count(), 1, "{text}");
+        let loaded = DocStateDb::load(&path);
+        let folders = loaded.recent_folders(5);
+        assert_eq!(folders[0].project.as_deref(), Some("Specs"));
+        assert_eq!(folders[1].project, None);
+
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "recent_folders": [{"path": "/w/a", "last_opened": 5}]}"#,
+        )
+        .unwrap();
+        let old = DocStateDb::load(&path);
+        assert_eq!(old.recent_folders(5)[0].path, Path::new("/w/a"));
+        assert_eq!(old.recent_folders(5)[0].project, None);
     }
 
     #[test]
