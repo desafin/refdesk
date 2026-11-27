@@ -1,0 +1,12 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: refdesk
+Source: https://github.com/desafin/refdesk
+Comment:
+ The executable also contains MuPDF (AGPL-3.0-or-later) with the libraries
+ it bundles, the URW++ base 14 fonts, and many Rust crates under permissive
+ licenses. Their names, versions and licenses are listed in
+ /usr/share/doc/refdesk/THIRD-PARTY-NOTICES.md.
+
+Files: *
+Copyright: The refdesk contributors
+License: AGPL-3.0-or-later

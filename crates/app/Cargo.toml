@@ -1,0 +1,43 @@
+[package]
+name = "refdesk"
+description = "Desktop viewer for reading several software documentation PDFs at once"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["pdf", "viewer", "documentation", "mupdf", "egui"]
+categories = ["gui", "text-processing"]
+
+[[bin]]
+name = "refdesk"
+path = "src/main.rs"
+
+[dependencies]
+refdesk-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_dock.workspace = true
+rfd.workspace = true
+log.workspace = true
+png.workspace = true
+# Local time for capture file names; pure Rust, reads the system time zone itself.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
+# The clipboard's file list (Ctrl+V of files copied in a file manager). Already built for
+# egui-winit with the same features; named here because egui does not expose file lists.
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+
+[features]
+# Forwarded to refdesk-core: the in-process translation engine (`backend = "embedded"`).
+embedded = ["refdesk-core/embedded"]
+embedded-vulkan = ["refdesk-core/embedded-vulkan"]
+embedded-cuda = ["refdesk-core/embedded-cuda"]
+
+[dev-dependencies]
+egui_kittest.workspace = true
+refdesk-core = { workspace = true, features = ["testutil"] }
+
+[lints]
+workspace = true

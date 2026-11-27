@@ -1,0 +1,49 @@
+[package]
+name = "refdesk-core"
+description = "Document engine and view logic for refdesk (no UI dependencies)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["pdf", "mupdf", "diff", "search", "viewer"]
+categories = ["text-processing", "parsing"]
+
+[dependencies]
+mupdf.workspace = true
+font-kit.workspace = true
+similar.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+log.workspace = true
+notify.workspace = true
+directories.workspace = true
+xxhash-rust.workspace = true
+unicode-normalization.workspace = true
+png.workspace = true
+regex.workspace = true
+ureq.workspace = true
+# Optional: compiles llama.cpp (needs cmake, libclang and a C++ compiler). Off by default.
+llama-cpp-2 = { workspace = true, optional = true }
+
+[features]
+# Test PDF generator (`testutil` module). Enabled for this crate's own tests through the
+# self dev-dependency below, so `cargo test --workspace` needs no extra flags.
+testutil = []
+# In-process translation engine (`translate::embedded`), CPU only.
+embedded = ["dep:llama-cpp-2"]
+# The same with the Vulkan GPU backend (needs glslc, libvulkan-dev and SPIRV-Headers).
+embedded-vulkan = ["embedded", "llama-cpp-2/vulkan"]
+# The same with CUDA. The executable grows by 0.7 ~ 1 GB (static cuBLAS); not checked here.
+embedded-cuda = ["embedded", "llama-cpp-2/cuda"]
+
+[dev-dependencies]
+refdesk-core = { path = ".", features = ["testutil"] }
+tempfile = "3"
+
+[lints]
+workspace = true

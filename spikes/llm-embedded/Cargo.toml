@@ -1,0 +1,18 @@
+# WP-82: spike for an embedded model runtime (llama.cpp in-process). Throwaway code; see README.md.
+[package]
+name = "llm-embedded"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+llama-cpp-2 = { version = "0.1.161", default-features = false }
+
+[features]
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+# llama-cpp-2 default features (openmp, common) are off in this spike; this one turns OpenMP back on for the CPU comparison.
+openmp = ["llama-cpp-2/openmp"]
+
+# Standalone project: not part of the root workspace.
+[workspace]

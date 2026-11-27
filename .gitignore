@@ -1,0 +1,11 @@
+# 참고용으로 클론한 외부 프로젝트 (scripts/clone-references.sh 로 재현)
+/references/
+
+# Rust
+/target/
+
+# 검증용 코드의 빌드 산출물
+/spikes/*/target/
+
+# 릴리스 묶음 (scripts/package.sh)
+/dist/
