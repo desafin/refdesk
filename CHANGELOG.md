@@ -4,7 +4,7 @@ All notable changes to refdesk are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-27
 
 The first public release: a desktop viewer for reading several software documentation PDFs at
 once, for Linux x86_64 (GNOME on Wayland; built on Ubuntu 24.04).
