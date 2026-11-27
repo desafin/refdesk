@@ -185,6 +185,13 @@ local servers. **If you enter the address of another machine, the text to transl
   selection's popup stays until the selection is cleared, `Esc` or "Close". "Copy" copies the translation.
   Selections longer than 2,000 characters are translated up to that length.
 - Translations are cached (`~/.local/state/refdesk/translations.json`, the latest 5,000).
+- **Background translation** (View ▸ Background Translation, in a project only): translates the
+  project's documents sentence by sentence ahead of reading and keeps the result inside the project
+  (`.refdesk/translations/`). It starts around the page you are on, then the rest of the open
+  documents, then the other documents; a popup you ask for always goes first. When every sentence of
+  a selection is already translated, the popup shows at once. The indicator in the status bar pauses
+  and resumes it. It stops on battery power (`pretranslate_on_battery = true` changes that). A
+  document of a thousand pages takes hours; finished pages are kept and the work goes on next time.
 - `refdesk --translate "The watchdog supervises each process."` checks the setup from the command line.
 
 ### Ollama (default)
