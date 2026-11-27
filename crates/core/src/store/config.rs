@@ -187,6 +187,8 @@ pub const DEFAULT_OPENAI_ENDPOINT: &str = "http://127.0.0.1:8080";
 pub const EMBEDDED_ENDPOINT: &str = "in-process";
 /// Default translation model.
 pub const DEFAULT_TRANSLATE_MODEL: &str = "translategemma:4b";
+/// Default local GGUF model used when a translation server is unavailable.
+pub const DEFAULT_FALLBACK_MODEL: &str = "translategemma-4b-it.Q4_K_M.gguf";
 /// Default context size of the embedded engine, in tokens.
 pub const DEFAULT_CONTEXT_TOKENS: u32 = 4096;
 /// Smallest and largest accepted `context_tokens`.
@@ -241,7 +243,7 @@ impl<'de> Deserialize<'de> for GpuLayers {
 pub struct TranslateConfig {
     /// `"ollama"` (default), `"openai"` or `"embedded"`.
     pub backend: TranslateBackendKind,
-    /// Server address, `http://` only (the feature is meant for a local server, so no TLS).
+    /// Server address (`http://` or `https://`).
     /// `None` means the default of the backend (see [`TranslateConfig::endpoint`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
@@ -249,6 +251,13 @@ pub struct TranslateConfig {
     /// For the embedded backend: a file name in `models_dir` (`.gguf` may be left out) or an
     /// absolute path.
     pub model: String,
+    /// Environment variable containing a bearer token for an OpenAI-compatible server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Whether to use the local GGUF model when the configured server cannot be reached.
+    pub offline_fallback: bool,
+    /// File name or absolute path of the local fallback GGUF model.
+    pub fallback_model: String,
     /// Target language code (`ko`, `en`, `ja`, ...).
     pub target: String,
     /// How long the model stays loaded after the last request (Ollama and embedded).
@@ -281,6 +290,9 @@ impl Default for TranslateConfig {
             backend: TranslateBackendKind::default(),
             endpoint: None,
             model: DEFAULT_TRANSLATE_MODEL.to_string(),
+            api_key_env: None,
+            offline_fallback: true,
+            fallback_model: DEFAULT_FALLBACK_MODEL.to_string(),
             target: "ko".to_string(),
             keep_alive_minutes: 30,
             word_with_sentence: true,
@@ -325,16 +337,12 @@ impl TranslateConfig {
         };
         let endpoint = take::<Option<String>>(t, "endpoint", None, notes).and_then(|e| {
             let e = e.trim().to_string();
-            if is_http_endpoint(&e) {
+            if is_supported_endpoint(&e) {
                 Some(e)
             } else {
-                if e.to_ascii_lowercase().starts_with("https://") {
-                    notes.push(format!(
-                        "translate.endpoint: {e:?}: https is not supported (local http:// servers only)"
-                    ));
-                } else {
-                    notes.push(format!("translate.endpoint: {e:?} is not an http:// address"));
-                }
+                notes.push(format!(
+                    "translate.endpoint: {e:?} is not a valid http:// or https:// address"
+                ));
                 None
             }
         });
@@ -369,6 +377,22 @@ impl TranslateConfig {
         };
         let passage_prompt = prompt_from(t, "passage_prompt", "{text}", notes);
         let word_prompt = prompt_from(t, "word_prompt", "{word}", notes);
+        let api_key_env = take::<Option<String>>(t, "api_key_env", None, notes).and_then(|name| {
+            let name = name.trim();
+            if name.is_empty() {
+                notes.push("translate.api_key_env: empty".to_string());
+                None
+            } else {
+                Some(name.to_string())
+            }
+        });
+        let fallback_model = take(t, "fallback_model", d.fallback_model.clone(), notes);
+        let fallback_model = if fallback_model.trim().is_empty() {
+            notes.push("translate.fallback_model: empty".to_string());
+            d.fallback_model.clone()
+        } else {
+            fallback_model.trim().to_string()
+        };
         let models_dir = take::<Option<PathBuf>>(t, "models_dir", None, notes)
             .filter(|p| !p.as_os_str().is_empty());
         let threads = take::<i64>(t, "threads", i64::from(d.threads), notes);
@@ -390,6 +414,9 @@ impl TranslateConfig {
             backend,
             endpoint,
             model,
+            api_key_env,
+            offline_fallback: take(t, "offline_fallback", d.offline_fallback, notes),
+            fallback_model,
             target,
             keep_alive_minutes,
             word_with_sentence: take(t, "word_with_sentence", d.word_with_sentence, notes),
@@ -417,11 +444,13 @@ impl TranslateConfig {
     }
 }
 
-/// `http://` followed by something.
-fn is_http_endpoint(e: &str) -> bool {
-    e.len() > "http://".len()
-        && e.get(..7)
-            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+/// `http://` or `https://` followed by something.
+fn is_supported_endpoint(e: &str) -> bool {
+    ["http://", "https://"].iter().any(|prefix| {
+        e.len() > prefix.len()
+            && e.get(..prefix.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+    })
 }
 
 /// An own instruction template: `None` (and a note) when it lacks `placeholder`.
@@ -834,6 +863,9 @@ mod tests {
         assert_eq!(t.endpoint, None);
         assert_eq!(t.endpoint(), "http://127.0.0.1:11434");
         assert_eq!(t.model, "translategemma:4b");
+        assert_eq!(t.api_key_env, None);
+        assert!(t.offline_fallback);
+        assert_eq!(t.fallback_model, DEFAULT_FALLBACK_MODEL);
         assert_eq!(t.target, "ko");
         assert_eq!(t.keep_alive_minutes, 30);
         assert!(t.word_with_sentence);
@@ -850,6 +882,9 @@ mod tests {
             backend = "openai"
             endpoint = "http://192.168.0.5:8080/"
             model = "qwen2.5:7b"
+            api_key_env = "SERVICE_API_KEY"
+            offline_fallback = false
+            fallback_model = "local.gguf"
             target = "JA"
             keep_alive_minutes = 5
             word_with_sentence = false
@@ -862,6 +897,9 @@ mod tests {
         assert_eq!(t.endpoint.as_deref(), Some("http://192.168.0.5:8080/"));
         assert_eq!(t.endpoint(), "http://192.168.0.5:8080");
         assert_eq!(t.model, "qwen2.5:7b");
+        assert_eq!(t.api_key_env.as_deref(), Some("SERVICE_API_KEY"));
+        assert!(!t.offline_fallback);
+        assert_eq!(t.fallback_model, "local.gguf");
         assert_eq!(t.target, "ja");
         assert_eq!(t.keep_alive_minutes, 5);
         assert!(!t.word_with_sentence);
@@ -875,6 +913,15 @@ mod tests {
         assert_eq!(t.endpoint(), "http://127.0.0.1:8080");
         let t = load_str("[translate]\nbackend = \"OpenAI\"\n").translate;
         assert_eq!(t.backend, TranslateBackendKind::OpenAi);
+    }
+
+    #[test]
+    fn https_endpoints_are_accepted() {
+        let t = load_str(
+            "[translate]\nbackend = \"openai\"\nendpoint = \"https://api.example.test/v1\"\n",
+        )
+        .translate;
+        assert_eq!(t.endpoint(), "https://api.example.test/v1");
     }
 
     #[test]
@@ -904,11 +951,11 @@ mod tests {
     }
 
     #[test]
-    fn an_https_endpoint_falls_back_to_the_default() {
+    fn https_endpoint_is_accepted() {
         let t =
             load_str("[translate]\nendpoint = \"https://example.com\"\nmodel = \"m\"\n").translate;
-        assert_eq!(t.endpoint, None);
-        assert_eq!(t.endpoint(), "http://127.0.0.1:11434");
+        assert_eq!(t.endpoint.as_deref(), Some("https://example.com"));
+        assert_eq!(t.endpoint(), "https://example.com");
         assert_eq!(t.model, "m");
         let t = load_str("[translate]\nendpoint = \"HTTP://localhost:1\"\n").translate;
         assert_eq!(t.endpoint(), "HTTP://localhost:1");
@@ -925,6 +972,9 @@ mod tests {
                 backend: TranslateBackendKind::OpenAi,
                 endpoint: Some("http://127.0.0.1:9000".into()),
                 model: "x".into(),
+                api_key_env: Some("SERVICE_API_KEY".into()),
+                offline_fallback: false,
+                fallback_model: "offline.gguf".into(),
                 target: "de".into(),
                 keep_alive_minutes: 3,
                 word_with_sentence: false,

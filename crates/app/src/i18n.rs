@@ -574,6 +574,11 @@ pub const TABLE: &[Row] = &[
         "모델 준비 중…",
         "Preparing the model…",
     ),
+    (
+        "translate.local_fallback_active",
+        "로컬 대체 모델 사용 중",
+        "Using the local fallback model",
+    ),
     ("translate.unavailable", "사용 불가", "Unavailable"),
     ("translate.working", "번역 중…", "Translating…"),
     (
@@ -602,6 +607,16 @@ pub const TABLE: &[Row] = &[
         "translate.err.model_missing_openai",
         "서버에 모델 {model} 이 없습니다. 서버에 올리거나 보기 ▸ 번역 모델에서 고르세요",
         "The server has no model {model}. Load it on the server or pick one in View ▸ Translation Model",
+    ),
+    (
+        "translate.err.missing_api_key",
+        "환경 변수 {name} 가 설정되지 않았습니다",
+        "The environment variable {name} is not set",
+    ),
+    (
+        "translate.err.fallback",
+        "번역 서버에 연결할 수 없어 로컬 모델로 전환하려 했지만 실패했습니다.\n서버: {server}\n로컬 모델: {local}\n기본 모델은 .deb 설치 후 refdesk-install-model, tar 압축 해제 후 ./install-model.sh 로 설치할 수 있습니다. 내장 엔진도 빌드에 포함되어야 합니다.",
+        "The translation server is unavailable and the local fallback failed.\nServer: {server}\nLocal model: {local}\nInstall the default model with refdesk-install-model (.deb) or ./install-model.sh (release tarball); the executable must also include the embedded engine.",
     ),
     (
         "translate.err.http",

@@ -79,9 +79,9 @@ fi
 if [ "$bundle" -eq 1 ]; then
     echo "installing the bundled executable from $here"
 elif [ "$dry_run" -eq 1 ]; then
-    echo "would run: cargo build --release -p refdesk (skipped in a dry run)"
+    echo "would run: cargo build --release -p refdesk --features embedded (skipped in a dry run)"
 else
-    (cd "$root" && cargo build --release -p refdesk)
+    (cd "$root" && cargo build --release -p refdesk --features embedded)
     if [ ! -x "$binary" ]; then
         echo "install.sh: build finished but $binary is missing" >&2
         exit 1

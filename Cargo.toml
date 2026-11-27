@@ -4,7 +4,7 @@ members = ["crates/core", "crates/app"]
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "AGPL-3.0-or-later"
@@ -34,8 +34,8 @@ xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
 unicode-normalization = "0.1.26"
 png = "0.18.1"
 regex = "1.13.2"
-# Blocking HTTP client for the local translation server. Plain http:// only: no TLS features.
-ureq = { version = "3.5.2", default-features = false }
+# Blocking HTTP client for local and OpenAI-compatible translation endpoints.
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 # In-process inference engine for the optional `embedded` translation backend (WP-83). Pinned:
 # the crate does not aim for a stable API. Default features (openmp, common) stay off.
 llama-cpp-2 = { version = "=0.1.161", default-features = false }

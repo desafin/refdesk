@@ -174,9 +174,9 @@ Every command is also in the menus and the command palette.
 
 ## Translation
 
-refdesk asks a language model running on your machine. Settings are in the `[translate]` table of
-`~/.config/refdesk/config.toml`. Only `http://` addresses are accepted, as the feature is meant for
-local servers. **If you enter the address of another machine, the text to translate is sent there.**
+refdesk can use a model on your machine or an OpenAI-compatible HTTPS service. Settings are in the
+`[translate]` table of `~/.config/refdesk/config.toml`. **The text to translate is sent to the
+configured server; use only a service you trust.**
 
 - **Translation mode** (`F2`, View ▸ Translation Mode, or the "Translate" button in the status bar):
   rest the pointer on a word for half a second to see its meaning and the translation of its sentence;
@@ -196,6 +196,18 @@ local servers. **If you enter the address of another machine, the text to transl
 - `refdesk --translate "The watchdog supervises each process."` checks the setup from the command line.
 
 ### Ollama (default)
+
+Ollama and its model are installed separately; neither is included with refdesk. Install
+[Ollama](https://ollama.com/download), start it (on Linux, run `ollama serve` if it is not already
+running), then download the default model:
+
+```sh
+ollama pull translategemma:4b
+ollama list
+```
+
+Keep Ollama running and turn on Translation Mode in refdesk. The defaults below already point to
+Ollama on this machine with the model you just downloaded.
 
 ```toml
 [translate]
@@ -220,16 +232,40 @@ llama-server -m model.gguf --port 8080
 backend = "openai"
 endpoint = "http://127.0.0.1:8080"  # default for this backend
 model = "model name"                # as listed by the server's /v1/models
+# endpoint = "https://api.example.com" # the client adds /v1/... to this base
+# api_key_env = "OPENAI_API_KEY"    # reads this environment variable; the key is not saved in config
 ```
 
 View ▸ Translation Model lists the models the server offers. A model picked there is used at once and
 remembered; "Use the Model of the Settings File" goes back to `model` in `config.toml`. When the server
 cannot be reached or the model is missing, the status bar says so; hover it for the reason and a fix.
 
+### Offline fallback
+
+Release builds include the llama.cpp engine, but model weights are not bundled. With the default
+`offline_fallback = true`, refdesk uses the configured server first and switches to the local model
+when the server cannot be reached. The status bar indicates when the local model is active.
+
+Install the optional TranslateGemma model after reviewing and accepting Google's Gemma Terms. It is
+about 2.5 GB; the script verifies its SHA-256 before installing it:
+
+```sh
+# From an unpacked release tarball:
+./install-model.sh
+
+# After installing the .deb package:
+refdesk-install-model
+```
+
+The model is stored in `~/.local/share/refdesk/models/` (or `$XDG_DATA_HOME/refdesk/models/` when
+`XDG_DATA_HOME` is set). It is not downloaded or installed automatically. You can set
+`offline_fallback = false` to disable fallback, or change `fallback_model` and `models_dir` in
+`[translate]`.
+
 ### Without a server (built-in engine)
 
-refdesk can run a GGUF model itself through llama.cpp (`backend = "embedded"`). This is an optional
-build feature and not part of the default build:
+refdesk can also use a GGUF model directly through llama.cpp (`backend = "embedded"`). Release
+builds include the engine; locally built binaries need the optional feature:
 
 ```sh
 sudo apt install cmake libclang-dev glslc libvulkan-dev spirv-headers

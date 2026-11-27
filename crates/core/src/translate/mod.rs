@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod embedded;
+mod fallback;
 mod http;
 pub mod ollama;
 pub mod openai;
@@ -29,6 +30,7 @@ use crate::store::{Paths, TranslateBackendKind, TranslateConfig};
 
 pub use cache::{MAX_CACHE_ENTRIES, TranslationCache};
 pub use embedded::EmbeddedBackend;
+pub use fallback::FallbackBackend;
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
 pub use pretranslate::{
@@ -123,6 +125,17 @@ pub enum TranslateError {
     /// memory) or the engine reported an error.
     #[error("the embedded translation engine failed: {0}")]
     Engine(String),
+    /// The configured server was unreachable and the local fallback also failed.
+    #[error("server unavailable ({server}); local fallback failed ({local})")]
+    Fallback {
+        /// The configured server's error.
+        server: Box<TranslateError>,
+        /// The embedded model's error.
+        local: Box<TranslateError>,
+    },
+    /// The configured environment variable for an OpenAI-compatible API key was not set.
+    #[error("the environment variable {0} is not set")]
+    MissingApiKey(String),
 }
 
 /// A translation server. Implementations block, so they are called from worker threads only.
@@ -146,6 +159,11 @@ pub trait TranslateBackend: Send + Sync {
     /// The name that goes into cache keys: model and target language.
     fn identity(&self) -> String;
 
+    /// Whether this backend is currently translating with a local fallback.
+    fn local_fallback_active(&self) -> bool {
+        false
+    }
+
     /// Gives back the memory the model holds, now (translation mode off, another model picked).
     /// The next request loads it again. Does not block. Server backends leave this to the
     /// server's own keep-alive.
@@ -156,17 +174,26 @@ pub trait TranslateBackend: Send + Sync {
 /// the model picked in the app first (see `store::effective_translate_config`). The embedded
 /// backend without `models_dir` uses the models folder of [`Paths::from_env`].
 pub fn backend_from_config(config: &TranslateConfig) -> Arc<dyn TranslateBackend> {
-    match config.backend {
+    let dir = config
+        .models_dir
+        .clone()
+        .unwrap_or_else(|| Paths::from_env().models_dir());
+    if config.backend == TranslateBackendKind::Embedded {
+        return Arc::new(EmbeddedBackend::new(config, dir));
+    }
+    let primary: Arc<dyn TranslateBackend> = match config.backend {
         TranslateBackendKind::Ollama => Arc::new(OllamaBackend::new(config)),
         TranslateBackendKind::OpenAi => Arc::new(OpenAiBackend::new(config)),
-        TranslateBackendKind::Embedded => {
-            let dir = config
-                .models_dir
-                .clone()
-                .unwrap_or_else(|| Paths::from_env().models_dir());
-            Arc::new(EmbeddedBackend::new(config, dir))
-        }
+        TranslateBackendKind::Embedded => unreachable!("handled above"),
+    };
+    if !config.offline_fallback {
+        return primary;
     }
+    let mut local_config = config.clone();
+    local_config.backend = TranslateBackendKind::Embedded;
+    local_config.model = config.fallback_model.clone();
+    let local: Arc<dyn TranslateBackend> = Arc::new(EmbeddedBackend::new(&local_config, dir));
+    Arc::new(FallbackBackend::new(primary, local))
 }
 
 /// The cache identity shared by both backends: `"{model}|{target}"`.

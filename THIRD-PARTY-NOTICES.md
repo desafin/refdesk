@@ -1,6 +1,6 @@
 # Third-party notices
 
-The refdesk executable (Linux x86_64, default features)
+The refdesk executable (Linux x86_64, default features; here with features `embedded`)
 contains the following software besides refdesk itself. refdesk is licensed under the
 GNU Affero General Public License v3.0 or later (`LICENSE`); the source code of everything
 listed here is available at the given locations or from crates.io.
@@ -46,7 +46,7 @@ fontconfig at run time.
 
 ## Rust crates
 
-290 crates, from `cargo tree -p refdesk -e normal,no-proc-macro`. License texts and
+301 crates, from `cargo tree -p refdesk -e normal,no-proc-macro`. License texts and
 copyright notices are in each crate's source package.
 
 | Crate | Version | License | Repository |
@@ -142,6 +142,7 @@ copyright notices are in each crate's source package.
 | futures-task | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-util | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | gethostname | 1.1.0 | Apache-2.0 | https://codeberg.org/swsnr/gethostname.rs.git |
+| getrandom | 0.2.17 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | glifo | 0.3.0 | Apache-2.0 OR MIT | https://github.com/linebender/vello |
 | glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib | https://github.com/grovesNL/glow |
@@ -182,6 +183,8 @@ copyright notices are in each crate's source package.
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | linux-raw-sys | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | litemap | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| llama-cpp-2 | 0.1.161 | MIT OR Apache-2.0 | https://github.com/utilityai/llama-cpp-rs |
+| llama-cpp-sys-2 | 0.1.161 | MIT OR Apache-2.0 | https://github.com/utilityai/llama-cpp-rs |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | log | 0.4.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
@@ -236,10 +239,14 @@ copyright notices are in each crate's source package.
 | regex-syntax | 0.8.12 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | renderdoc-sys | 1.1.0 | MIT OR Apache-2.0 | https://github.com/ebkalderon/renderdoc-rs |
 | rfd | 0.18.0 | MIT | https://github.com/PolyMeilex/rfd |
+| ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | rustc-hash | 1.1.0 | Apache-2.0/MIT | https://github.com/rust-lang-nursery/rustc-hash |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
+| rustls-pki-types | 1.16.0 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
+| rustls-webpki | 0.103.17 | ISC | https://github.com/rustls/webpki |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
 | scoped-tls | 1.0.1 | MIT/Apache-2.0 | https://github.com/alexcrichton/scoped-tls |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
@@ -264,6 +271,7 @@ copyright notices are in each crate's source package.
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
 | strict-num | 0.1.1 | MIT | https://github.com/RazrFalcon/strict-num |
+| subtle | 2.6.1 | BSD-3-Clause | https://github.com/dalek-cryptography/subtle |
 | syn | 3.0.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | sys-locale | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
@@ -288,6 +296,7 @@ copyright notices are in each crate's source package.
 | unicode-script | 0.5.9 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-script |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
+| untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | ureq | 3.5.2 | MIT OR Apache-2.0 | https://github.com/algesten/ureq |
 | ureq-proto | 0.7.1 | MIT OR Apache-2.0 | https://github.com/algesten/ureq-proto |
 | url | 2.5.9 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
@@ -310,6 +319,7 @@ copyright notices are in each crate's source package.
 | wayland-sys | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
 | webbrowser | 1.2.7 | MIT OR Apache-2.0 | https://github.com/amodm/webbrowser-rs |
+| webpki-roots | 1.0.12 | CDLA-Permissive-2.0 | https://github.com/rustls/webpki-roots |
 | wgpu | 30.0.2 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-core | 30.0.2 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-core-deps-windows-linux-android | 30.0.2 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
@@ -336,6 +346,7 @@ copyright notices are in each crate's source package.
 | zcheapstr | 1.4.0 | MIT | https://github.com/z-galaxy/zcheapstr/ |
 | zerocopy | 0.8.65 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zerofrom | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| zeroize | 1.9.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.9 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |

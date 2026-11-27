@@ -62,23 +62,25 @@ pub(crate) struct Client {
     agent: ureq::Agent,
     base: String,
     model: String,
+    bearer_token: Option<String>,
 }
 
 impl Client {
-    /// `base` is an `http://` address without a trailing `/`; `model` names the model in
-    /// `ModelMissing` errors.
-    pub fn new(base: String, model: String) -> Client {
+    /// `base` is an `http://` or `https://` address without a trailing `/`; `model` names the
+    /// model in `ModelMissing` errors.
+    pub fn new(base: String, model: String, bearer_token: Option<String>) -> Client {
         let config = ureq::Agent::config_builder()
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .http_status_as_error(false)
-            // The server is local: never send the document text through a proxy from the
-            // environment.
+            // Contact the configured endpoint directly; do not send document text through an
+            // environment-configured proxy.
             .proxy(None)
             .build();
         Client {
             agent: ureq::Agent::new_with_config(config),
             base,
             model,
+            bearer_token,
         }
     }
 
@@ -156,21 +158,34 @@ impl Client {
             Some(body) => {
                 let bytes = serde_json::to_vec(&body)
                     .map_err(|e| TranslateError::Protocol(e.to_string()))?;
-                self.agent
+                let request = self
+                    .agent
                     .post(url)
                     .config()
                     .timeout_global(Some(timeout))
                     .build()
-                    .header("content-type", "application/json")
-                    .send(&bytes[..])
+                    .header("content-type", "application/json");
+                match &self.bearer_token {
+                    Some(token) => request
+                        .header("authorization", format!("Bearer {token}"))
+                        .send(&bytes[..]),
+                    None => request.send(&bytes[..]),
+                }
             }
-            None => self
-                .agent
-                .get(url)
-                .config()
-                .timeout_global(Some(timeout))
-                .build()
-                .call(),
+            None => {
+                let request = self
+                    .agent
+                    .get(url)
+                    .config()
+                    .timeout_global(Some(timeout))
+                    .build();
+                match &self.bearer_token {
+                    Some(token) => request
+                        .header("authorization", format!("Bearer {token}"))
+                        .call(),
+                    None => request.call(),
+                }
+            }
         };
         let response = sent.map_err(|e| self.request_error(&e))?;
         let status = response.status().as_u16();
@@ -184,6 +199,7 @@ impl Client {
                 .unwrap_or_default();
             return Err(self.status_error(status, &text, on_404));
         }
+
         if whole {
             let text = body
                 .with_config()

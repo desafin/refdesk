@@ -32,7 +32,7 @@ impl OllamaBackend {
     /// Nothing is contacted until a call.
     pub fn new(config: &TranslateConfig) -> OllamaBackend {
         OllamaBackend {
-            client: Client::new(config.endpoint(), config.model.clone()),
+            client: Client::new(config.endpoint(), config.model.clone(), None),
             prompts: Prompts::from_config(config),
             keep_alive: format!("{}m", config.keep_alive_minutes),
         }

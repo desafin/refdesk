@@ -59,6 +59,10 @@ pub struct FailureHint {
     pub endpoint: String,
     /// The model in use.
     pub model: String,
+    /// The local fallback model file.
+    pub fallback_model: String,
+    /// The local models folder.
+    pub models_dir: String,
 }
 
 impl FailureHint {
@@ -71,6 +75,11 @@ impl FailureHint {
             backend: config.backend,
             endpoint,
             model: config.model.clone(),
+            fallback_model: config.fallback_model.clone(),
+            models_dir: config
+                .models_dir_or(&Paths::from_env())
+                .display()
+                .to_string(),
         }
     }
 }
@@ -102,6 +111,21 @@ pub fn error_text(e: &TranslateError, hint: &FailureHint) -> String {
         (TranslateError::Unreachable(message), TranslateBackendKind::Embedded) => engine(message),
         (TranslateError::NotBuilt, _) => tr("translate.err.not_built").to_owned(),
         (TranslateError::Engine(message), _) => engine(message),
+        (TranslateError::MissingApiKey(name), _) => {
+            tr("translate.err.missing_api_key").replace("{name}", name)
+        }
+        (TranslateError::Fallback { server, local }, _) => {
+            let local_hint = FailureHint {
+                backend: TranslateBackendKind::Embedded,
+                endpoint: hint.models_dir.clone(),
+                model: hint.fallback_model.clone(),
+                fallback_model: hint.fallback_model.clone(),
+                models_dir: hint.models_dir.clone(),
+            };
+            tr("translate.err.fallback")
+                .replace("{server}", &error_text(server, hint))
+                .replace("{local}", &error_text(local, &local_hint))
+        }
         (TranslateError::Http { status, message }, _) => tr("translate.err.http")
             .replace("{status}", &status.to_string())
             .replace("{message}", message),
@@ -701,7 +725,7 @@ pub fn button_label(mode: bool) -> &'static str {
     }
 }
 
-/// The "Translate" toggle of the status bar, with the readiness next to it while the mode is on.
+/// The "Translate" toggle, with fallback state and readiness next to it.
 pub fn status_button(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
     let t = &state.translate;
     let shortcut = crate::commands::shortcut_text(ui.ctx(), "view.translate_mode");
@@ -716,6 +740,9 @@ pub fn status_button(ui: &mut Ui, state: &AppState, queue: &mut Vec<Action>) {
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, t.mode, label));
     if response.clicked() {
         queue.push(Action::ToggleTranslateMode);
+    }
+    if t.backend.local_fallback_active() {
+        ui.weak(tr("translate.local_fallback_active"));
     }
     if !t.mode {
         return;
@@ -1020,6 +1047,8 @@ mod tests {
             backend: TranslateBackendKind::Ollama,
             endpoint: "http://127.0.0.1:11434".into(),
             model: "translategemma:4b".into(),
+            fallback_model: "translategemma-4b-it.Q4_K_M.gguf".into(),
+            models_dir: "/home/u/.local/share/refdesk/models".into(),
         }
     }
 
@@ -1129,6 +1158,8 @@ mod tests {
             backend: TranslateBackendKind::Embedded,
             endpoint: "/home/u/.local/share/refdesk/models".into(),
             model: "translategemma:4b".into(),
+            fallback_model: "translategemma-4b-it.Q4_K_M.gguf".into(),
+            models_dir: "/home/u/.local/share/refdesk/models".into(),
         };
         let missing = error_text(&TranslateError::ModelMissing("m".into()), &h);
         assert!(

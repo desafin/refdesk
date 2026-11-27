@@ -23,15 +23,24 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct OpenAiBackend {
     client: Client,
     prompts: Prompts,
+    api_key_error: Option<TranslateError>,
 }
 
 impl OpenAiBackend {
     /// A backend for `config` (`endpoint`, `model`, `target`, prompts). Nothing is contacted
     /// until a call.
     pub fn new(config: &TranslateConfig) -> OpenAiBackend {
+        let (bearer_token, api_key_error) = match &config.api_key_env {
+            Some(name) => match std::env::var(name) {
+                Ok(token) if !token.trim().is_empty() => (Some(token.trim().to_string()), None),
+                _ => (None, Some(TranslateError::MissingApiKey(name.clone()))),
+            },
+            None => (None, None),
+        };
         OpenAiBackend {
-            client: Client::new(config.endpoint(), config.model.clone()),
+            client: Client::new(config.endpoint(), config.model.clone(), bearer_token),
             prompts: Prompts::from_config(config),
+            api_key_error,
         }
     }
 
@@ -44,6 +53,10 @@ impl OpenAiBackend {
         &self.prompts.model
     }
 
+    fn check_api_key(&self) -> Result<(), TranslateError> {
+        self.api_key_error.clone().map_or(Ok(()), Err)
+    }
+
     /// One streamed chat completion of `message` with at most `tokens` tokens.
     fn complete(
         &self,
@@ -53,6 +66,7 @@ impl OpenAiBackend {
         cancel: &AtomicBool,
         on_text: &mut dyn FnMut(&str),
     ) -> Result<(), TranslateError> {
+        self.check_api_key()?;
         let body = json!({
             "model": self.model(),
             "messages": [{"role": "user", "content": message}],
@@ -124,6 +138,7 @@ impl TranslateBackend for OpenAiBackend {
     }
 
     fn models(&self, cancel: &AtomicBool) -> Result<Vec<String>, TranslateError> {
+        self.check_api_key()?;
         let call = Call {
             body: None,
             path: "/v1/models",

@@ -4,6 +4,15 @@ All notable changes to refdesk are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-28
+
+### Translation
+
+- Added HTTPS and environment-variable bearer-token support for OpenAI-compatible servers.
+- Added automatic local-model fallback when the configured server is unavailable; release builds
+  include the llama.cpp engine without bundling model weights.
+- Added an installer that asks users to accept the Gemma Terms and verifies the downloaded model.
+
 ## [0.1.0] - 2026-11-27
 
 The first public release: a desktop viewer for reading several software documentation PDFs at
@@ -116,3 +125,4 @@ once, for Linux x86_64 (GNOME on Wayland; built on Ubuntu 24.04).
 - Korean and English user interface.
 
 [0.1.0]: https://github.com/desafin/refdesk/releases/tag/v0.1.0
+[0.2.0]: https://github.com/desafin/refdesk/releases/tag/v0.2.0

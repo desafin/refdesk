@@ -8,7 +8,7 @@
 #
 #   scripts/package.sh [--features LIST]
 #
-# The version comes from Cargo.toml. --features is passed to cargo (default: none). File times
+# The version comes from Cargo.toml. --features is passed to cargo (default: embedded). File times
 # are set to SOURCE_DATE_EPOCH (default: the time of the last commit) and archive members are
 # sorted, so the same executable gives the same bundles. Used as is by the release workflow.
 set -euo pipefail
@@ -16,7 +16,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-features=""
+features="embedded"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --features)
@@ -162,7 +162,7 @@ install -d "$stage/bin" "$stage/share/applications" "$stage/share/icons/hicolor/
 install -m 755 "$work/refdesk" "$stage/bin/refdesk"
 install -m 644 assets/refdesk.desktop "$stage/share/applications/refdesk.desktop"
 install -m 644 assets/refdesk.svg "$stage/share/icons/hicolor/scalable/apps/refdesk.svg"
-install -m 755 scripts/install.sh scripts/uninstall.sh "$stage/"
+install -m 755 scripts/install.sh scripts/uninstall.sh scripts/install-model.sh "$stage/"
 install -m 644 LICENSE README.md THIRD-PARTY-NOTICES.md "$stage/"
 clamp_times "$work/tar"
 
@@ -176,6 +176,7 @@ doc="$deb_root/usr/share/doc/refdesk"
 install -d "$deb_root/DEBIAN" "$deb_root/usr/bin" "$deb_root/usr/share/applications" \
     "$deb_root/usr/share/icons/hicolor/scalable/apps" "$doc"
 install -m 755 "$work/refdesk" "$deb_root/usr/bin/refdesk"
+install -m 755 scripts/install-model.sh "$deb_root/usr/bin/refdesk-install-model"
 install -m 644 assets/refdesk.desktop "$deb_root/usr/share/applications/refdesk.desktop"
 install -m 644 assets/refdesk.svg "$deb_root/usr/share/icons/hicolor/scalable/apps/refdesk.svg"
 {

@@ -36,6 +36,7 @@ const WAIT: Duration = Duration::from_secs(10);
 struct Recorded {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: serde_json::Value,
 }
 
@@ -133,6 +134,7 @@ fn serve(stream: TcpStream, reply: Reply, log: &(Mutex<Vec<Recorded>>, Condvar))
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
     let mut length = 0usize;
+    let mut headers = Vec::new();
     loop {
         let mut header = String::new();
         reader.read_line(&mut header).unwrap();
@@ -140,10 +142,12 @@ fn serve(stream: TcpStream, reply: Reply, log: &(Mutex<Vec<Recorded>>, Condvar))
         if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap();
+        if let Some((name, value)) = header.split_once(':') {
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().unwrap();
+            }
+            headers.push((name.to_ascii_lowercase(), value));
         }
     }
     let mut body = vec![0u8; length];
@@ -155,7 +159,12 @@ fn serve(stream: TcpStream, reply: Reply, log: &(Mutex<Vec<Recorded>>, Condvar))
     };
     {
         let (lock, cv) = log;
-        lock.lock().unwrap().push(Recorded { method, path, body });
+        lock.lock().unwrap().push(Recorded {
+            method,
+            path,
+            headers,
+            body,
+        });
         cv.notify_all();
     }
     let mut out = stream;
@@ -530,6 +539,28 @@ fn openai_pieces_arrive_until_done_and_comments_are_skipped() {
     assert_eq!(
         req.body["messages"][0]["content"],
         passage_prompt("m", "ko", text)
+    );
+}
+
+#[test]
+fn openai_sends_api_key_from_configured_environment_variable() {
+    let server = Server::start(vec![sse(&[&delta("번역"), "data: [DONE]"])]);
+    let mut config = openai_config(&server.endpoint(), "m");
+    config.api_key_env = Some("CARGO_MANIFEST_DIR".to_string());
+    let backend = OpenAiBackend::new(&config);
+
+    assert_eq!(
+        run(&backend, &TranslateRequest::passage("Translation")).1,
+        Ok(())
+    );
+    let expected = format!(
+        "Bearer {}",
+        std::env::var("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR for tests")
+    );
+    assert!(
+        server.requests(1)[0]
+            .headers
+            .contains(&("authorization".to_string(), expected))
     );
 }
 

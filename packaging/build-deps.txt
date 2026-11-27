@@ -6,6 +6,8 @@
 # (`make libs`) with gcc and embeds the fonts with `ld -r -b binary`; freetype-sys and the
 # mupdf wrapper are compiled by the cc crate; `strip` is used by scripts/package.sh.
 build-essential
+# llama.cpp's build script uses CMake when the embedded translation feature is included.
+cmake
 # libclang.so and clang's own headers for bindgen (mupdf-sys generates its bindings at build
 # time with bindgen's `runtime` feature, which dlopens libclang).
 libclang-dev

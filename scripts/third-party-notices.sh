@@ -8,14 +8,14 @@
 #   scripts/third-party-notices.sh [--check] [--features LIST]
 #
 # --check compares instead of writing and fails when the file is out of date.
-# --features is passed to cargo (default: none, the build that is released).
+# --features is passed to cargo (default: embedded, the build that is released).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 check=0
-features=""
+features="embedded"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --check) check=1 ;;

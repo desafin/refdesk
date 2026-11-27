@@ -1371,6 +1371,8 @@ mod tests {
             backend: refdesk_core::TranslateBackendKind::Ollama,
             endpoint: "http://127.0.0.1:11434".into(),
             model: "m".into(),
+            fallback_model: "translategemma-4b-it.Q4_K_M.gguf".into(),
+            models_dir: "/home/u/.local/share/refdesk/models".into(),
         };
         let running = PartState::Running;
         assert_eq!(

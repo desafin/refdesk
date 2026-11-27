@@ -1414,6 +1414,8 @@ mod tests {
             backend: TranslateBackendKind::Ollama,
             endpoint: "http://127.0.0.1:11434".into(),
             model: "translategemma:4b".into(),
+            fallback_model: "translategemma-4b-it.Q4_K_M.gguf".into(),
+            models_dir: "/home/u/.local/share/refdesk/models".into(),
         }
     }
 

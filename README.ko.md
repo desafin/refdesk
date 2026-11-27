@@ -63,8 +63,8 @@ Rust 와 MuPDF, egui 로 만들었다.
 <img src="docs/images/translate-selection.png" width="900" alt="선택한 문장의 번역이 뜬 팝업">
 
 번역 모드(`F2`)를 켜 두면 단어 위에 포인터를 두었을 때 문맥 속 뜻과 그 문장의 번역이 뜨고, 글을 선택하면
-선택한 글의 번역이 뜬다. 번역은 내 컴퓨터에서 도는 모델이 한다(기본은 Ollama, [번역](#번역) 참고).
-글은 설정한 서버 밖으로 나가지 않는다. 기본 대상 언어는 한국어다.
+선택한 글의 번역이 뜬다. 번역은 내 컴퓨터의 모델이나 설정한 서버가 한다(기본은 Ollama, [번역](#번역) 참고).
+글은 설정한 서버로 전송되므로 신뢰하는 서비스만 사용한다. 기본 대상 언어는 한국어다.
 
 ### 하이라이트와 책갈피
 
@@ -182,6 +182,18 @@ refdesk 는 내 컴퓨터에서 도는 언어 모델에 묻는다. 설정은 `~/
 
 ### Ollama (기본)
 
+Ollama 와 번역 모델은 refdesk 에 포함되지 않으므로 따로 설치해야 한다. [Ollama 공식 다운로드
+페이지](https://ollama.com/download)에서 설치한 뒤 Ollama 를 실행한다(Linux 에서 서버가 실행 중이
+아니면 `ollama serve` 를 실행한다). 터미널에서 기본 모델을 내려받고 설치 여부를 확인한다.
+
+```sh
+ollama pull translategemma:4b
+ollama list
+```
+
+Ollama 를 켜 둔 채 refdesk 에서 번역 모드(F2)를 켜면 된다. 아래 기본 설정은 이 컴퓨터의 Ollama 와
+내려받은 모델을 가리키므로 설정 파일을 바꿀 필요가 없다.
+
 ```toml
 [translate]
 backend = "ollama"                  # 기본값
@@ -205,16 +217,39 @@ llama-server -m model.gguf --port 8080
 backend = "openai"
 endpoint = "http://127.0.0.1:8080"  # 이 백엔드의 기본값
 model = "model name"                # 서버의 /v1/models 에 나오는 이름
+# endpoint = "https://api.example.com" # 뒤에 /v1/... 경로를 붙인다
+# api_key_env = "OPENAI_API_KEY"    # 이 환경 변수를 읽으며 키 자체는 설정 파일에 저장하지 않는다
 ```
 
 View ▸ Translation Model 에 서버가 가진 모델이 뜬다. 거기서 고른 모델은 바로 쓰이고 기억된다.
 "Use the Model of the Settings File" 은 `config.toml` 의 `model` 로 돌아간다. 서버에 닿지 않거나 모델이 없으면
 상태 표시줄에 그렇게 뜨고, 포인터를 올리면 이유와 해결 방법이 보인다.
 
+### 오프라인 대체 모델
+
+릴리즈에는 llama.cpp 엔진이 들어 있지만 모델 가중치는 포함되지 않는다. 기본값
+`offline_fallback = true` 에서는 설정한 서버를 먼저 쓰고, 서버에 연결할 수 없을 때 로컬 모델로 전환한다.
+로컬 모델을 쓰는 중이면 상태 표시줄에 표시된다.
+
+Google Gemma 약관을 읽고 동의한 뒤 TranslateGemma 모델을 설치한다. 약 2.5GB를 받으며 스크립트가
+설치 전에 SHA-256 을 확인한다.
+
+```sh
+# 압축을 푼 릴리즈 tar 파일에서:
+./install-model.sh
+
+# .deb 패키지를 설치한 뒤:
+refdesk-install-model
+```
+
+모델은 `~/.local/share/refdesk/models/` 에 저장된다(`XDG_DATA_HOME` 을 설정하면 그 아래 `refdesk/models/`).
+자동으로 내려받거나 설치하지 않는다.
+`offline_fallback = false` 로 대체 기능을 끄거나 `[translate]` 의 `fallback_model`, `models_dir` 를 바꿀 수 있다.
+
 ### 서버 없이 쓰기(내장 엔진)
 
-refdesk 가 llama.cpp 로 GGUF 모델을 직접 돌릴 수 있다(`backend = "embedded"`). 선택 빌드 기능이라 기본 빌드에는
-들어 있지 않다.
+refdesk 가 llama.cpp 로 GGUF 모델을 직접 돌릴 수 있다(`backend = "embedded"`). 릴리즈에는 엔진이 들어 있고,
+직접 빌드할 때는 선택 기능을 켜야 한다.
 
 ```sh
 sudo apt install cmake libclang-dev glslc libvulkan-dev spirv-headers
