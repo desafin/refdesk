@@ -1,7 +1,7 @@
 # refdesk 스펙 v0.2
 
 작성일 2026-11-25. 프로젝트 이름은 **refdesk**(실행 파일도 `refdesk`), UI 는 egui 로 확정했다.
-구조와 모듈 간 계약은 [ARCHITECTURE.md](ARCHITECTURE.md), 작업 분할은 [PLAN.md](PLAN.md) 에 있다.
+구조와 모듈 간 계약은 [ARCHITECTURE.md](ARCHITECTURE.md) 에 있다.
 
 ## 1. 목적
 

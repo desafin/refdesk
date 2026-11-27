@@ -285,7 +285,7 @@ Ollama 의 토큰/초는 `eval_count / eval_duration` 이라 짧은 요청에서
 
 - **기본 빌드에 주는 영향은 0 이어야 한다**: `cargo build` 의 기본 기능에 넣지 않는다. `llama-cpp-2` 는 CPU 전용이어도 `cmake` + `libclang` + C++ 컴파일러를 요구하고(`build.rs` 가 CMake 로 llama.cpp 전체를 컴파일, 45 s) 이 중 하나가 없으면 빌드가 죽는다. 그러므로 `refdesk` 의 `[features]` 에서 `dep:llama-cpp-2` 를 선택 의존으로 두고, `scripts/check.sh`(fmt, clippy, test)는 기본 기능으로만 돈다. `--all-features` 로 clippy 를 돌리는 곳이 있으면 거기서 깨진다.
 - **실행 파일이 바로 시작하려면 `libvulkan.so.1` / `libcuda.so.1` 이 있어야 한다**(`ldd` 의 NEEDED, 정적 링크가 아니라 로더가 요구). 해당 라이브러리가 없는 머신에서는 실행 파일이 아예 시작하지 않는다(**시험하지 않음, `ldd` 구조에서 추정**). 한 파일로 모든 사용자를 덮으려면 ggml 의 동적 백엔드(`dynamic-backends`, 런타임에 `.so` 로 GPU 백엔드 적재)가 필요한데 **써 보지 않았다**.
-- 대상 환경이 이 머신 하나(NVIDIA + AMD 내장, Ubuntu)라는 `CLAUDE.md` 의 전제에서는 `embedded-vulkan` 하나로 충분하다.
+- 대상 환경이 이 머신 하나(NVIDIA + AMD 내장, Ubuntu)라는 전제에서는 `embedded-vulkan` 하나로 충분하다.
 
 걸릴 만한 문제:
 
