@@ -194,7 +194,16 @@ fn menu_bar(ui: &mut Ui, state: &AppState, index: usize, queue: &mut Vec<Action>
                         button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
                     }
                     let enabled = (command.enabled)(state);
-                    if ui.add_enabled(enabled, button).clicked() {
+                    if command.id == "view.pretranslate" {
+                        button = button.selected(state.pretranslate.keeps_model());
+                    }
+                    let response = ui.add_enabled(enabled, button);
+                    if command.id.starts_with("view.pretranslate") {
+                        response
+                            .clone()
+                            .on_disabled_hover_text(tr("pretranslate.project_only"));
+                    }
+                    if response.clicked() {
                         queue.extend(command.run(state));
                     }
                     // The speed list sits with the two commands that step through it.
@@ -289,6 +298,9 @@ pub fn show_window(
         queue,
         &crate::session::recent_document_paths,
     );
+    if window_index == 0 {
+        crate::overlays::pretranslate::show_confirm(ui.ctx(), state, queue);
+    }
     let Some(window) = state.windows.get(window_index) else {
         return;
     };
@@ -357,7 +369,10 @@ pub fn show_window(
 
     let show_breadcrumb = state.show_breadcrumb;
     let overlay_open = state.palette.open.is_some();
-    let translate = state.translate.view_env(overlay_open);
+    let translate = state
+        .translate
+        .view_env(overlay_open)
+        .with_pretranslate(state.pretranslate.lookup());
     let AppState {
         windows,
         tabs,
@@ -634,7 +649,7 @@ impl DockHost for WindowHost<'_> {
                     };
                     let (breadcrumb, overlay) = (self.show_breadcrumb, self.overlay_open);
                     let history = self.search_history;
-                    pdf.ui.translate.env = Some(self.translate.clone());
+                    pdf.ui.translate.env = Some(self.translate.for_doc(doc.path()));
                     draw_pdf_tab_marked(ui, pdf, doc, cx, breadcrumb, overlay, history, marks);
                 }
                 None => {

@@ -11,6 +11,7 @@ use refdesk_core::{DiffOptions, DocumentHandle, Location, Notifier, Place, Rect,
 // `OpenTarget` lives in core because it travels between processes (`refdesk_core::ipc`).
 use crate::overlays::capture;
 use crate::overlays::palette::{self, PaletteMode};
+use crate::overlays::pretranslate;
 use crate::overlays::translate;
 use crate::overlays::{link_hints, pinned_preview, region_zoom};
 use crate::panels::explorer;
@@ -115,6 +116,17 @@ pub enum Action {
     RefreshTranslateModels,
     /// A translation was asked for while loading the model had failed: try loading it again.
     RetryTranslateWarmUp,
+    /// Switch background translation on or off for the open project (TR-15).
+    TogglePretranslate,
+    /// Pause or resume background translation (TR-18).
+    TogglePretranslatePause,
+    /// Remove the translations made ahead in the open project (TR-19); unconfirmed, ask first.
+    ClearPretranslations {
+        /// The user confirmed.
+        confirmed: bool,
+    },
+    /// Close the confirmation of `ClearPretranslations`.
+    CancelClearPretranslations,
     /// Set the interface theme; kept in `prefs.json` (VIEW-7).
     SetTheme(refdesk_core::Theme),
     /// Set the page colours; kept in `prefs.json` (VIEW-7).
@@ -486,6 +498,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
         Action::SetTranslateModel(model) => translate::set_model(state, model, ctx),
         Action::RefreshTranslateModels => translate::refresh_models(state, ctx),
         Action::RetryTranslateWarmUp => translate::retry_warm_up(state, ctx),
+        Action::TogglePretranslate => pretranslate::toggle(state, ctx),
+        Action::TogglePretranslatePause => pretranslate::toggle_pause(state, ctx),
+        Action::ClearPretranslations { confirmed } => pretranslate::clear(state, confirmed, ctx),
+        Action::CancelClearPretranslations => pretranslate::cancel_clear(state),
         Action::SetTheme(theme) => crate::theme::set_theme(state, theme, ctx),
         Action::SetPageColors(pref) => crate::theme::set_page_colors(state, pref, ctx),
         Action::ShowNotice(text) => {

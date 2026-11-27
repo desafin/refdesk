@@ -428,6 +428,8 @@ pub struct AppState {
     pub capture_clipboard: Option<Arc<dyn Clipboard>>,
     /// Translation mode, backend, cache and model list (WP-81). Only `dispatch` changes it.
     pub translate: TranslateApp,
+    /// Background translation of the open project (WP-93). Only `dispatch` changes it.
+    pub pretranslate: crate::overlays::pretranslate::PretranslateApp,
     /// Session bookkeeping: focus order, fingerprints, window sizes (WP-41).
     pub memory: Memory,
     /// Bookmarks, marks and highlights (`annotations.json`, WP-74). Only `dispatch` changes them.
@@ -477,6 +479,7 @@ impl AppState {
             show_breadcrumb: true,
             capture_clipboard: None,
             translate: TranslateApp::default(),
+            pretranslate: Default::default(),
             memory: Memory::default(),
             marks: crate::panels::marks::MarksApp::default(),
             project: crate::panels::project::ProjectApp::default(),

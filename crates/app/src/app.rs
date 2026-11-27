@@ -85,6 +85,7 @@ fn start_prefs(state: &mut AppState, ctx: &egui::Context) {
     crate::panels::marks::load_into(state);
     apply_scroll_speed(state, ctx);
     crate::overlays::translate::start(state, ctx);
+    crate::overlays::pretranslate::start(state, ctx);
     theme::apply_theme_setting(state, ctx);
 }
 
@@ -135,6 +136,8 @@ impl eframe::App for RefdeskApp {
         global_search::tick(&mut self.state, ctx);
         // WP-81: the model warm-up, the model list and the delayed save of translations.
         crate::overlays::translate::tick(&mut self.state, ctx);
+        // WP-93: background translation follows the project, the focus and the power supply.
+        crate::overlays::pretranslate::tick(&mut self.state, ctx);
         // WP-74: highlights for the views, the mark letter's wait, the delayed save of marks.
         crate::panels::marks::tick(&mut self.state, ctx);
         // WP-41: save the session two seconds after it last changed.
@@ -160,6 +163,7 @@ impl eframe::App for RefdeskApp {
     fn on_exit(&mut self) {
         self.saver.save_now(&mut self.state);
         crate::overlays::translate::save_now(&mut self.state);
+        crate::overlays::pretranslate::save_now(&mut self.state);
         crate::panels::marks::save_now(&mut self.state);
     }
 }

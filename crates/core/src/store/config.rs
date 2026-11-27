@@ -271,6 +271,8 @@ pub struct TranslateConfig {
     pub threads: u32,
     /// Embedded backend: context size in tokens (prompt and answer together).
     pub context_tokens: u32,
+    /// Background translation goes on while the machine runs on battery (TR-18).
+    pub pretranslate_on_battery: bool,
 }
 
 impl Default for TranslateConfig {
@@ -288,6 +290,7 @@ impl Default for TranslateConfig {
             gpu_layers: GpuLayers::All,
             threads: 0,
             context_tokens: DEFAULT_CONTEXT_TOKENS,
+            pretranslate_on_battery: false,
         }
     }
 }
@@ -396,6 +399,12 @@ impl TranslateConfig {
             gpu_layers: take(t, "gpu_layers", d.gpu_layers, notes),
             threads,
             context_tokens,
+            pretranslate_on_battery: take(
+                t,
+                "pretranslate_on_battery",
+                d.pretranslate_on_battery,
+                notes,
+            ),
         }
     }
 
@@ -925,6 +934,7 @@ mod tests {
                 gpu_layers: GpuLayers::Count(20),
                 threads: 6,
                 context_tokens: 2048,
+                pretranslate_on_battery: true,
             },
             ..Config::default()
         };

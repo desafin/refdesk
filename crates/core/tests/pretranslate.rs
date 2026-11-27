@@ -795,16 +795,26 @@ impl Signal {
     }
 
     /// Waits until `cond` holds (looked at whenever something happened, and every 20 ms).
+    ///
+    /// `cond` runs without the counter's lock: it may take the fake's lock, which the fake holds
+    /// while it bumps the counter.
     fn wait(&self, what: &str, cond: impl Fn() -> bool) {
         let deadline = Instant::now() + WAIT;
-        let mut n = self.n.lock().unwrap();
-        while !cond() {
+        loop {
+            let seen = *self.n.lock().unwrap();
+            if cond() {
+                return;
+            }
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            n = self
-                .cv
-                .wait_timeout(n, Duration::from_millis(20))
-                .unwrap()
-                .0;
+            let n = self.n.lock().unwrap();
+            if *n == seen {
+                drop(
+                    self.cv
+                        .wait_timeout(n, Duration::from_millis(20))
+                        .unwrap()
+                        .0,
+                );
+            }
         }
     }
 }

@@ -10,14 +10,15 @@
 //! ([`WordTimer`]), which word counts ([`word_target`]), what is asked ([`word_requests`],
 //! [`selection_requests`]), the size and place ([`clamp_size`], [`popup_rect`]) and the texts
 //! shown ([`part_text`]). The UI thread never calls a backend: every request is a
-//! [`TranslateJob`] (R-1), or a cache hit.
+//! [`TranslateJob`] (R-1), or a cache hit, or the translations made ahead in a project (TR-17):
+//! when every sentence a selection touches is stored, the popup shows them at once.
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use egui::{Color32, Id, Key, Order, RichText, Ui, vec2};
-use refdesk_core::translate::{prepare_passage, sentence_around};
+use refdesk_core::translate::{Assembled, assemble, prepare_passage, sentence_around};
 use refdesk_core::{
     PageText, Point, Rect, Selection, Size, TranslateBackend, TranslateError, TranslateJob,
     TranslateRequest, TranslateState, TranslationCache,
@@ -30,6 +31,7 @@ use crate::views::links;
 use crate::views::pdf_view::PdfViewUiState;
 use crate::views::selection::{self, PageTexts};
 
+use super::pretranslate::{Lookup, PopupPre};
 use super::translate::{FailureHint, Readiness, error_text};
 
 /// The pointer has to rest on a word this long (seconds) before its popup opens.
@@ -346,6 +348,58 @@ pub struct ViewEnv {
     pub overlay_open: bool,
     /// Names for the texts that explain a failure.
     pub hint: FailureHint,
+    /// The stores of the open project documents (background translation, TR-17).
+    pub pre_lookup: Option<Lookup>,
+    /// What this view's document has of them (see [`ViewEnv::for_doc`]).
+    pub pre: Option<PopupPre>,
+}
+
+impl ViewEnv {
+    /// With the stores of background translation.
+    pub fn with_pretranslate(mut self, lookup: Lookup) -> ViewEnv {
+        self.pre_lookup = Some(lookup);
+        self
+    }
+
+    /// The environment of the view of the document opened from `path`.
+    pub fn for_doc(&self, path: &std::path::Path) -> ViewEnv {
+        let mut env = self.clone();
+        env.pre = self.pre_lookup.as_ref().map(|l| l.resolve(path));
+        env
+    }
+
+    /// Tells background translation that a popup's own job starts.
+    fn foreground_started(&self) {
+        let hub = self
+            .pre
+            .as_ref()
+            .map(|p| &p.hub)
+            .or(self.pre_lookup.as_ref().map(|l| &l.hub));
+        if let Some(hub) = hub {
+            hub.foreground_started();
+        }
+    }
+
+    /// The stored translation of a selection (`(page, text, characters)` per page), when every
+    /// segment it touches was translated ahead by the backend in use. A miss tells background
+    /// translation which pages to do first.
+    fn stored(&self, parts: &[(u32, &PageText, Range<u32>)]) -> Option<Assembled> {
+        let pre = self.pre.as_ref()?;
+        let (doc, store) = pre.doc.as_ref()?;
+        let store = store.read().unwrap_or_else(PoisonError::into_inner);
+        if store.identity() != self.backend.identity() {
+            return None;
+        }
+        match assemble(&store, parts) {
+            Ok(a) => Some(a),
+            Err(pages) => {
+                for page in pages {
+                    pre.hub.missed(doc, page);
+                }
+                None
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for ViewEnv {
@@ -426,6 +480,8 @@ pub struct Popup {
     pub sentence: Option<Part>,
     /// The passage was cut to 2,000 characters.
     pub truncated: bool,
+    /// Something shown came from the translations made ahead (TR-17).
+    pub pretranslated: bool,
     /// The page the popup sits at and the lines it stays clear of (page space, R-5).
     anchor_page: u32,
     anchor_rects: Vec<Rect>,
@@ -525,6 +581,7 @@ fn start_part(env: &ViewEnv, req: TranslateRequest, ctx: &egui::Context) -> (Par
         );
     }
     let job = TranslateJob::start(Arc::clone(&env.backend), req.clone(), notifier(ctx));
+    env.foreground_started();
     let retry = matches!(env.readiness, Readiness::Failed(_));
     (
         Part {
@@ -536,6 +593,17 @@ fn start_part(env: &ViewEnv, req: TranslateRequest, ctx: &egui::Context) -> (Par
         },
         retry,
     )
+}
+
+/// A part whose translation was made ahead: the text of the sentences and their translation.
+fn stored_part(stored: &Assembled) -> Part {
+    Part {
+        req: TranslateRequest::passage(stored.source.clone()),
+        job: None,
+        text: stored.translation.clone(),
+        state: PartState::Done,
+        cached: true,
+    }
 }
 
 /// Takes what the jobs of the popup have so far; finished translations go into the cache.
@@ -589,12 +657,17 @@ fn open_word(
     let sentence = sentence_around(&page, key.range());
     let (main_req, second_req) = word_requests(&word, &sentence, env.word_with_sentence);
     let (main, retry_a) = start_part(env, main_req, ctx);
-    let (sentence_part, retry_b) = match second_req {
-        Some(r) => {
+    // The sentence may have been translated ahead (TR-17).
+    let stored = second_req
+        .as_ref()
+        .and_then(|_| env.stored(&[(key.page, &page, key.range())]));
+    let (sentence_part, retry_b) = match (second_req, &stored) {
+        (Some(_), Some(a)) => (Some(stored_part(a)), false),
+        (Some(r), None) => {
             let (p, retry) = start_part(env, r, ctx);
             (Some(p), retry)
         }
-        None => (None, false),
+        (None, _) => (None, false),
     };
     let rects = page.rects(key.range());
     view.popup = Some(Popup {
@@ -603,6 +676,7 @@ fn open_word(
         main,
         sentence: sentence_part,
         truncated: false,
+        pretranslated: stored.is_some(),
         anchor_page: key.page,
         anchor_rects: rects.clone(),
         highlight: rects,
@@ -642,14 +716,43 @@ pub fn open_selection(
     };
     let (main_req, second_req, truncated) =
         selection_requests(&text, sentence, env.word_with_sentence);
-    let (main, retry_a) = start_part(env, main_req, ctx);
-    let (sentence_part, retry_b) = match second_req {
-        Some(r) => {
-            let (p, retry) = start_part(env, r, ctx);
-            (Some(p), retry)
+    // What was translated ahead (TR-17): every sentence the selection touches, or for one word
+    // the sentence it is in.
+    let pages: Vec<(u32, Arc<PageText>, Range<u32>)> = (first.page..=last.page)
+        .filter_map(|p| {
+            let t = texts(p)?;
+            let r = sel.range_on(p, t.chars.len() as u32)?;
+            Some((p, t, r))
+        })
+        .collect();
+    let parts: Vec<(u32, &PageText, Range<u32>)> = pages
+        .iter()
+        .map(|(p, t, r)| (*p, t.as_ref(), r.clone()))
+        .collect();
+    let wanted = !main_req.is_word() || second_req.is_some();
+    let stored = if wanted { env.stored(&parts) } else { None };
+    let (main, retry_a, sentence_part, retry_b, source) = match (&stored, second_req) {
+        (Some(a), None) if !main_req.is_word() => {
+            // The sentences, whole: the translation is theirs.
+            (stored_part(a), false, None, false, source_line(&a.source))
         }
-        None => (None, false),
+        (Some(a), Some(_)) => {
+            let (main, retry) = start_part(env, main_req, ctx);
+            (main, retry, Some(stored_part(a)), false, source_line(&text))
+        }
+        (_, second) => {
+            let (main, retry_a) = start_part(env, main_req, ctx);
+            let (part, retry_b) = match second {
+                Some(r) => {
+                    let (p, retry) = start_part(env, r, ctx);
+                    (Some(p), retry)
+                }
+                None => (None, false),
+            };
+            (main, retry_a, part, retry_b, source_line(&text))
+        }
     };
+    let truncated = truncated && stored.is_none();
     // The popup sits at the last line of the selection.
     let anchor_rects = texts(last.page)
         .and_then(|p| {
@@ -661,10 +764,11 @@ pub fn open_selection(
     view.timer.close();
     view.popup = Some(Popup {
         target: Target::Selection(sel),
-        source: source_line(&text),
+        source,
         main,
         sentence: sentence_part,
         truncated,
+        pretranslated: stored.is_some(),
         anchor_page: last.page,
         anchor_rects,
         highlight: Vec::new(),
@@ -919,6 +1023,14 @@ pub fn show(ui: &Ui, state: &mut PdfViewUiState, view_rect: egui::Rect, tab: cra
                         if let Some(text) = sentence_text {
                             ui.separator();
                             ui.add(egui::Label::new(RichText::new(text).small()).wrap());
+                        }
+                        if popup.pretranslated {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(tr("translate.pretranslated")).small().weak(),
+                                )
+                                .wrap(),
+                            );
                         }
                         if popup.truncated {
                             ui.add(
@@ -2134,5 +2246,270 @@ mod widget_tests {
             h.popup(tab).map(|p| &p.target),
             Some(Target::Selection(_))
         ));
+    }
+}
+
+/// Popups that show the translations made ahead (TR-17).
+#[cfg(test)]
+mod pretranslate_tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::RwLock;
+
+    use refdesk_core::translate::{
+        Outcome, PretranslateStore, SharedStore, StoredSegment, segments, text_hash,
+    };
+    use refdesk_core::{Quad, TextBlock, TextChar, TextLine, TextPos};
+
+    use crate::overlays::pretranslate::{Hub, Lookup};
+    use crate::overlays::translate::TranslateApp;
+    use crate::overlays::translate::fake::{self, Log};
+
+    const DOC: &str = "/project/spec.pdf";
+
+    /// A page whose blocks are lists of lines (characters 10 pt wide).
+    fn page(blocks: &[&[&str]]) -> Arc<PageText> {
+        let mut pt = PageText::default();
+        let mut y = 72.0;
+        for lines in blocks {
+            let first = pt.lines.len() as u32;
+            for text in *lines {
+                let start = pt.chars.len() as u32;
+                for (i, ch) in text.chars().enumerate() {
+                    let x = 72.0 + i as f32 * 10.0;
+                    pt.chars.push(TextChar {
+                        ch,
+                        quad: Quad {
+                            ul: Point::new(x, y),
+                            ur: Point::new(x + 10.0, y),
+                            ll: Point::new(x, y + 12.0),
+                            lr: Point::new(x + 10.0, y + 12.0),
+                        },
+                        size: 12.0,
+                    });
+                }
+                pt.lines.push(TextLine {
+                    chars: start..pt.chars.len() as u32,
+                    bounds: Rect::new(72.0, y, 72.0 + text.len() as f32 * 10.0, y + 12.0),
+                });
+                y += 16.0;
+            }
+            pt.blocks.push(TextBlock {
+                lines: first..pt.lines.len() as u32,
+                bounds: Rect::new(72.0, 72.0, 600.0, y),
+            });
+            y += 8.0;
+        }
+        Arc::new(pt)
+    }
+
+    fn find(pt: &PageText, needle: &str) -> Range<u32> {
+        let all: String = pt.chars.iter().map(|c| c.ch).collect();
+        let byte = all.find(needle).expect("needle");
+        let start = all[..byte].chars().count() as u32;
+        start..start + needle.chars().count() as u32
+    }
+
+    fn ahead(text: &str) -> String {
+        format!("<{text}>")
+    }
+
+    /// Every segment of the pages stored as translated ("<text>"), except those `skip` names.
+    fn store_of(identity: &str, pages: &[Arc<PageText>], skip: &[&str]) -> SharedStore {
+        let mut s = PretranslateStore::new("f00d", identity, pages.len() as u32);
+        for (p, text) in pages.iter().enumerate() {
+            let segs = segments(text)
+                .into_iter()
+                .map(|g| StoredSegment {
+                    hash: text_hash(&g.text),
+                    outcome: if skip.contains(&g.text.as_str()) {
+                        Outcome::Skipped
+                    } else {
+                        Outcome::Translated(ahead(&g.text))
+                    },
+                    chars: g.chars,
+                })
+                .collect();
+            s.set_page(p as u32, segs);
+        }
+        Arc::new(RwLock::new(s))
+    }
+
+    struct Setup {
+        log: Arc<Log>,
+        hub: Arc<Hub>,
+        env: ViewEnv,
+        ctx: egui::Context,
+    }
+
+    fn setup(store: SharedStore) -> Setup {
+        let log = Log::new();
+        let t = TranslateApp::new(fake::factory(&log));
+        let hub = Arc::new(Hub::default());
+        let lookup = Lookup::single(Arc::clone(&hub), Path::new(DOC), store);
+        let env = t
+            .view_env(false)
+            .with_pretranslate(lookup)
+            .for_doc(Path::new(DOC));
+        Setup {
+            log,
+            hub,
+            env,
+            ctx: egui::Context::default(),
+        }
+    }
+
+    fn select(
+        view: &mut TranslateView,
+        s: &Setup,
+        pages: &[Arc<PageText>],
+        from: TextPos,
+        to: TextPos,
+    ) {
+        let texts = |p: u32| pages.get(p as usize).cloned();
+        open_selection(
+            view,
+            &s.env,
+            Selection {
+                anchor: from,
+                focus: to,
+            },
+            &texts,
+            0,
+            &s.ctx,
+        );
+    }
+
+    fn at(page: u32, ch: u32) -> TextPos {
+        TextPos { page, ch }
+    }
+
+    #[test]
+    fn a_selection_whose_sentences_are_all_stored_shows_them_at_once() {
+        let pages = vec![page(&[&["First one. The watchdog runs. Last one."]])];
+        let s = setup(store_of("translategemma:4b|ko", &pages, &[]));
+        let mut view = TranslateView::default();
+        // From the middle of "watchdog" to the middle of "Last".
+        let from = find(&pages[0], "chdog").start;
+        let to = find(&pages[0], "Last").start + 2;
+        select(&mut view, &s, &pages, at(0, from), at(0, to));
+        let popup = view.popup().expect("popup");
+        assert!(popup.pretranslated);
+        assert!(popup.main.cached);
+        assert_eq!(popup.main.state, PartState::Done);
+        assert_eq!(
+            popup.main.text,
+            format!("{} {}", ahead("The watchdog runs."), ahead("Last one."))
+        );
+        // The original line is the whole sentences, not the selected part.
+        assert_eq!(popup.source, "The watchdog runs. Last one.");
+        assert!(s.log.requests().is_empty(), "no backend asked");
+        assert!(
+            !s.env
+                .pre
+                .as_ref()
+                .is_some_and(|p| p.hub.busy.load(std::sync::atomic::Ordering::Relaxed))
+        );
+    }
+
+    #[test]
+    fn a_missing_sentence_is_translated_on_the_spot_and_its_page_goes_first() {
+        let pages = vec![
+            page(&[&["First one. The watchdog runs."]]),
+            page(&[&["Another page here. And more of it."]]),
+        ];
+        // Only page 0 is stored.
+        let mut st = PretranslateStore::new("f00d", "translategemma:4b|ko", 2);
+        let first = store_of("translategemma:4b|ko", &pages[..1], &[]);
+        st.set_page(0, first.read().unwrap().page(0).unwrap().to_vec());
+        let s = setup(Arc::new(RwLock::new(st)));
+        let mut view = TranslateView::default();
+        let end = pages[1].chars.len() as u32;
+        select(&mut view, &s, &pages, at(0, 11), at(1, end));
+        let popup = view.popup().expect("popup");
+        assert!(!popup.pretranslated);
+        assert!(!popup.main.cached);
+        s.log.wait("the request", |i| i.requests.len() == 1);
+        let asked = &s.log.requests()[0].1;
+        assert!(
+            asked.text.starts_with("The watchdog runs."),
+            "{}",
+            asked.text
+        );
+        assert_eq!(s.hub.misses(), vec![(Path::new(DOC).to_path_buf(), 1)]);
+        // A popup's own job: background translation waits.
+        assert!(s.hub.busy.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_skipped_segment_stands_as_it_is_and_pages_join() {
+        let pages = vec![
+            page(&[&["SWS_EM_01004"], &["The process reports its state."]]),
+            page(&[&["It shall do so in time."]]),
+        ];
+        let s = setup(store_of("translategemma:4b|ko", &pages, &["SWS_EM_01004"]));
+        let mut view = TranslateView::default();
+        let end = pages[1].chars.len() as u32;
+        select(&mut view, &s, &pages, at(0, 0), at(1, end));
+        let popup = view.popup().expect("popup");
+        assert_eq!(
+            popup.main.text,
+            format!(
+                "SWS_EM_01004 {} {}",
+                ahead("The process reports its state."),
+                ahead("It shall do so in time.")
+            )
+        );
+        assert_eq!(
+            popup.source,
+            source_line("SWS_EM_01004 The process reports its state. It shall do so in time.")
+        );
+        assert!(s.log.requests().is_empty());
+    }
+
+    #[test]
+    fn the_word_popup_takes_its_sentence_from_the_store() {
+        let pages = vec![page(&[&["First one. The watchdog runs. Last one."]])];
+        let s = setup(store_of("translategemma:4b|ko", &pages, &[]));
+        let mut view = TranslateView::default();
+        let r = find(&pages[0], "watchdog");
+        let texts = |p: u32| pages.get(p as usize).cloned();
+        let key = WordKey {
+            page: 0,
+            start: r.start,
+            end: r.end,
+        };
+        open_word(&mut view, &s.env, key, &texts, 0, &s.ctx);
+        let popup = view.popup().expect("popup");
+        let sentence = popup.sentence.as_ref().expect("sentence part");
+        assert!(sentence.cached);
+        assert_eq!(sentence.text, ahead("The watchdog runs."));
+        assert!(popup.pretranslated);
+        // The meaning of the word is still asked.
+        s.log.wait("the word", |i| i.requests.len() == 1);
+        assert!(s.log.requests()[0].1.is_word());
+
+        // A one-word selection does the same.
+        let s = setup(store_of("translategemma:4b|ko", &pages, &[]));
+        let mut view = TranslateView::default();
+        select(&mut view, &s, &pages, at(0, r.start), at(0, r.end));
+        let popup = view.popup().expect("popup");
+        assert!(popup.main.req.is_word());
+        assert_eq!(
+            popup.sentence.as_ref().map(|p| p.text.as_str()),
+            Some(ahead("The watchdog runs.").as_str())
+        );
+    }
+
+    #[test]
+    fn a_store_of_another_model_is_not_used() {
+        let pages = vec![page(&[&["First one. The watchdog runs. Last one."]])];
+        let s = setup(store_of("qwen2.5:7b|ko", &pages, &[]));
+        let mut view = TranslateView::default();
+        select(&mut view, &s, &pages, at(0, 0), at(0, 10));
+        let popup = view.popup().expect("popup");
+        assert!(!popup.pretranslated);
+        s.log.wait("the request", |i| i.requests.len() == 1);
+        assert_eq!(s.log.requests()[0].1.text, "First one.");
     }
 }

@@ -222,6 +222,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState, tab: Option<TabId>, queue: &mut V
             zoom_controls(ui, state, tab_id, queue);
             ui.separator();
             crate::overlays::translate::status_button(ui, state, queue);
+            crate::overlays::pretranslate::status_indicator(ui, state, queue);
             if let Some(progress) = state.preload.progress(doc_id) {
                 ui.separator();
                 ui.weak(preload_text(progress));

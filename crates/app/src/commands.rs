@@ -108,6 +108,11 @@ fn has_workspace(state: &AppState) -> bool {
     state.workspace.is_some()
 }
 
+/// The workspace is a project (background translation, TR-15).
+fn has_project(state: &AppState) -> bool {
+    state.pretranslate.has_project()
+}
+
 /// Folds or unfolds a sidebar section of the focused window (WS-7).
 fn toggle_section(state: &AppState, section: SidebarSection) -> Option<Action> {
     Some(Action::ToggleSidebarSection {
@@ -873,6 +878,24 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: always,
         action: |_| Some(Action::ToggleTranslateMode),
+    },
+    Command {
+        id: "view.pretranslate",
+        name_key: "cmd.view.pretranslate",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_project,
+        action: |_| Some(Action::TogglePretranslate),
+    },
+    Command {
+        id: "view.pretranslate_clear",
+        name_key: "cmd.view.pretranslate_clear",
+        menu: MenuGroup::View,
+        shortcut: None,
+        aliases: &[],
+        enabled: has_project,
+        action: |_| Some(Action::ClearPretranslations { confirmed: false }),
     },
     Command {
         id: "view.toggle_breadcrumb",

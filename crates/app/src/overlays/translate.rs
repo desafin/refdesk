@@ -327,6 +327,8 @@ impl TranslateApp {
             generation: self.generation,
             overlay_open,
             hint: self.hint(),
+            pre_lookup: None,
+            pre: None,
         }
     }
 
@@ -461,6 +463,10 @@ pub fn toggle_mode(state: &mut AppState, ctx: &egui::Context) {
             state.translate.start_models(ctx);
         }
         notice(state, tr("status.translate_on").to_owned(), ctx);
+    } else if state.pretranslate.keeps_model() {
+        // Background translation goes on with the model loaded (TR-15).
+        close_all_popups(state);
+        notice(state, tr("status.translate_off").to_owned(), ctx);
     } else {
         state.translate.readiness = Readiness::Off;
         state.translate.warm_up = None;
@@ -471,9 +477,31 @@ pub fn toggle_mode(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
+/// Background translation goes on (or resumes): the model is loaded as for translation mode,
+/// unless it already is or is loading.
+pub fn warm_up_for_background(state: &mut AppState, ctx: &egui::Context) {
+    if state.translate.readiness == Readiness::Off {
+        state.translate.start_warm_up(ctx);
+    }
+}
+
+/// Background translation went off: the model goes too when translation mode is off.
+pub fn release_if_unused(state: &mut AppState) {
+    if state.translate.mode {
+        return;
+    }
+    let t = &mut state.translate;
+    t.readiness = Readiness::Off;
+    t.warm_up = None;
+    t.backend.release();
+}
+
 /// `TranslateSelection`: translates the selection of a PDF tab once, in translation mode or not.
 pub fn translate_selection(state: &mut AppState, tab: TabId, ctx: &egui::Context) {
-    let env = state.translate.view_env(state.palette.open.is_some());
+    let env = state
+        .translate
+        .view_env(state.palette.open.is_some())
+        .with_pretranslate(state.pretranslate.lookup());
     let AppState { docs, tabs, .. } = state;
     let Some(Tab::Pdf(pdf)) = tabs.get_mut(tab) else {
         return;
@@ -481,6 +509,7 @@ pub fn translate_selection(state: &mut AppState, tab: TabId, ctx: &egui::Context
     let (Some(doc), Some(sel)) = (docs.get(pdf.doc), pdf.ui.selection.active()) else {
         return;
     };
+    let env = env.for_doc(doc.path());
     let generation = doc.info().map_or(0, |i| i.generation);
     let texts = |p: u32| doc.page_text(p);
     let retry = super::translate_popup::open_selection(
@@ -508,7 +537,7 @@ pub fn retry_warm_up(state: &mut AppState, ctx: &egui::Context) {
 
 /// `SetTranslateModel`: remembers the model picked in the app (`None`: the one of
 /// `config.toml`), builds the backend for it, drops popups and jobs, loads the new model in
-/// translation mode and fetches the list again.
+/// translation mode (or while background translation keeps it) and fetches the list again.
 pub fn set_model(state: &mut AppState, model: Option<String>, ctx: &egui::Context) {
     state.prefs.translate_model = model.filter(|m| !m.trim().is_empty());
     save_prefs(state);
@@ -516,7 +545,8 @@ pub fn set_model(state: &mut AppState, model: Option<String>, ctx: &egui::Contex
     state.translate.backend.release();
     state.translate.rebuild(&config, &prefs);
     close_all_popups(state);
-    if state.translate.mode {
+    if state.translate.mode || state.pretranslate.keeps_model() {
+        // Background translation needs the new model loaded too (TR-19).
         state.translate.start_warm_up(ctx);
     }
     state.translate.start_models(ctx);
