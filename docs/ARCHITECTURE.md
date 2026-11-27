@@ -591,6 +591,8 @@ impl TranslationCache { pub fn get(&mut self, identity: &str, req: &TranslateReq
 
 - 프로젝트 = 폴더 + 그 안의 `refdesk-project.toml`(`project::PROJECT_FILE`). refdesk 가 만든 자료는 폴더 안의 숨김 폴더 `.refdesk/`(`project::data_dir`)에 둔다 — 작업 폴더 훑기는 `.` 으로 시작하는 이름을 건너뛰므로 탐색기에 보이지 않는다. 어떤 폴더가 프로젝트인지는 `project::is_project(root)` 하나로 판단한다.
 - 프로젝트는 작업 폴더(§4.13)의 한 종류다. 열린 프로젝트 = 프로젝트 파일이 있는 작업 폴더. 탐색기·빠른 열기·세션은 작업 폴더의 것을 그대로 쓴다.
+- core 가 주는 것: `Project`(`create`, `open`, `name`, `rename`), `ImportJob`((원본, 대상 상대 경로) 쌍의 목록을 받아 백그라운드에서 복사, 충돌에서 멈춰 결정을 기다림, 취소), `SourceSurvey`(폴더 아래의 PDF 목록과 "이미 있음" 판정), 프로젝트 휴지통(`trash`, `restore`, `list_trash`, `empty_trash`), 폴더 만들기·이름 바꾸기. 프로젝트의 작업 폴더는 `ScanOptions { keep_empty_dirs: true }` 로 훑어 빈 폴더도 탐색기에 보인다(보통 작업 폴더는 PDF 없는 폴더를 숨긴다).
+- app: `panels/project.rs`. 바깥에서 오는 가져오기의 모든 입구(파일 선택기, 탐색기 우클릭, 붙여넣기)는 `Action::ImportIntoProject` 하나로 모인다. 끌어다 놓기는 하지 않는다(PROJ-6).
 - 가져오기는 복사다. 같은 내용인지는 `fingerprint_file` 로 본다. 복사는 임시 이름으로 쓴 뒤 이름을 바꾼다(중간에 끊겨도 반쪽 파일이 PDF 로 보이지 않게). 지우기는 `.refdesk/trash/` 로 옮긴다.
 
 ### 4.16 pretranslate — 미리 번역해 두기 (WP-92, TR-15 ~ 19)
