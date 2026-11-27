@@ -114,7 +114,8 @@ Download from [Releases](https://github.com/desafin/refdesk/releases):
 
 - `refdesk_<version>_amd64.deb` — for Ubuntu and Debian:
   `sudo apt install ./refdesk_<version>_amd64.deb`
-- `refdesk-<version>-x86_64-linux.tar.gz` — unpack it and run the `refdesk` program inside.
+- `refdesk-<version>-x86_64-linux.tar.gz` — unpack it and run `bin/refdesk`, or run `./install.sh` inside
+  to install it under `~/.local` (binary, desktop entry and icon). Built on Ubuntu 24.04; needs glibc 2.39 or newer.
 
 ### From source
 

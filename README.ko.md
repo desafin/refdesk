@@ -105,7 +105,8 @@ Rust 와 MuPDF, egui 로 만들었다.
 
 - `refdesk_<version>_amd64.deb` — Ubuntu, Debian 용:
   `sudo apt install ./refdesk_<version>_amd64.deb`
-- `refdesk-<version>-x86_64-linux.tar.gz` — 풀고 안의 `refdesk` 를 실행한다.
+- `refdesk-<version>-x86_64-linux.tar.gz` — 풀고 `bin/refdesk` 를 실행하거나, 안의 `./install.sh` 로
+  `~/.local` 에 설치한다(실행 파일, 데스크톱 항목, 아이콘). Ubuntu 24.04 에서 빌드한 것이라 glibc 2.39 이상이 필요하다.
 
 ### 소스에서 빌드
 
