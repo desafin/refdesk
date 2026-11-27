@@ -1,0 +1,880 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Example Platform — Process Manager Specification {{VERSION}}</title>
+<!--STYLE-->
+</head>
+<body>
+
+<section class="cover">
+  <div class="platform">Example Platform</div>
+  <div class="title">Process Manager<br>Specification</div>
+  <table class="meta">
+    <tr><td>Document ID</td><td>EP-SWS-PM</td></tr>
+    <tr><td>Version</td><td>{{VERSION}}</td></tr>
+    <tr><td>Date</td><td>{{DATE}}</td></tr>
+    <tr><td>Status</td><td>Released</td></tr>
+    <tr><td>Classification</td><td>Public</td></tr>
+  </table>
+  <div class="notice">
+    This is a fictional specification written to demonstrate the refdesk PDF viewer. The
+    Example Platform, its components and its requirements do not exist. Any resemblance to a
+    real product or standard is coincidental.
+  </div>
+</section>
+
+<section class="front">
+  <div class="front-page">
+    <div class="plain">Revision history</div>
+    <table class="grid">
+      <tr><th style="width:14%">Version</th><th style="width:18%">Date</th><th>Changes</th></tr>
+      <tr><td>0.9</td><td>2025-11-20</td><td>Draft for review.</td></tr>
+      <tr><td>1.0</td><td>2026-03-02</td><td>First release.</td></tr>
+      <!--v1.1--><tr><td>1.1</td><td>2026-09-14</td><td>Configurable startup timeout, restart
+      back-off, logical supervision (<a href="#sec-6-3">6.3</a>), new error code
+      <code>kInvalidTransition</code>, revised resource limits.</td></tr><!--/v1.1-->
+    </table>
+
+    <div class="plain" style="margin-top:9mm">Contents</div>
+    <!--TOC-->
+  </div>
+</section>
+
+<section class="main">
+
+<h1 id="sec-1">1 Introduction</h1>
+
+<h2 id="sec-1-1">1.1 Purpose</h2>
+<p>This document specifies the Process Manager of the Example Platform. The Process Manager is
+the first user-space component that the platform starts. It launches every other application
+process, watches over their execution, enforces their resource limits and terminates them in an
+orderly way when the machine changes its operating mode or shuts down.</p>
+<p>The intended readers are developers of platform components, integrators who write
+execution manifests for their applications, and test engineers who verify the platform against
+its requirements. Readers are expected to know POSIX process management and the basic concepts
+of the Example Platform described in the platform overview [EP-OVR].</p>
+
+<h2 id="sec-1-2">1.2 Scope</h2>
+<p>The specification covers the externally visible behaviour of the Process Manager: the process
+lifecycle (<a href="#sec-4">chapter 4</a>), resource management (<a href="#sec-5">chapter 5</a>),
+supervision (<a href="#sec-6">chapter 6</a>), error reporting (<a href="#sec-7">chapter 7</a>),
+the client library that applications link against (<a href="#sec-8">chapter 8</a>), and the
+execution manifest (<a href="#sec-9">chapter 9</a>).</p>
+<p>The following topics are out of scope and are covered by other documents:</p>
+<ul>
+  <li>The hardware watchdog driver and its timing. The interface the Process Manager uses is
+  described in the Watchdog Interface Specification [EP-SWS-WDG].</li>
+  <li>Persistent logging and the format of log records [EP-SWS-LOG].</li>
+  <li>Update and installation of application packages.</li>
+  <li>Security policies such as capabilities and mandatory access control, apart from the
+  identity a process is started with.</li>
+</ul>
+
+<h2 id="sec-1-3">1.3 Document conventions</h2>
+<p>Requirements are written in boxes. Each requirement has a unique identifier in square
+brackets, a short title and a body. The identifier never changes once a requirement has been
+released, even if the wording is revised. A requirement that is removed keeps its identifier
+reserved.</p>
+<div class="req" id="SWS_PM_00000">
+  <p><span class="rid">[SWS_PM_00000]</span> <span class="rtitle">Example requirement</span></p>
+  <p>The Process Manager <b>shall</b> behave as stated in the body of each requirement.</p>
+  <div class="trace">Derived from: none</div>
+</div>
+<p>The key words <b>shall</b>, <b>shall not</b>, <b>should</b> and <b>may</b> are used as
+follows. <b>Shall</b> states a mandatory behaviour that is verified by a test. <b>Should</b>
+states a recommended behaviour; an implementation that deviates from it documents the reason.
+<b>May</b> states a permitted behaviour.</p>
+<p>Code is written in <code>monospace</code>. Names of configuration parameters are written as
+<code>startup.timeout_ms</code>. Durations are given in milliseconds (ms) or seconds (s), memory
+sizes in mebibytes (MiB).</p>
+
+<h2 id="sec-1-4">1.4 Related documents</h2>
+<table class="grid">
+  <tr><th style="width:18%">Reference</th><th>Title</th><th style="width:14%">Version</th></tr>
+  <tr><td>[EP-OVR]</td><td>Example Platform — Overview</td><td>2.0</td></tr>
+  <tr><td>[EP-SWS-WDG]</td><td>Example Platform — Watchdog Interface Specification</td><td>1.0</td></tr>
+  <tr><td>[EP-SWS-LOG]</td><td>Example Platform — Logging Specification</td><td>1.2</td></tr>
+  <tr><td>[EP-MAN]</td><td>Example Platform — Manifest Schema</td><td>1.1</td></tr>
+</table>
+<div class="caption">Table 1: Related documents</div>
+
+<h1 id="sec-2">2 Terms and acronyms</h1>
+
+<h2 id="sec-2-1">2.1 Acronyms</h2>
+<table class="grid">
+  <tr><th style="width:18%">Acronym</th><th>Meaning</th></tr>
+  <tr><td>API</td><td>Application programming interface</td></tr>
+  <tr><td>FG</td><td>Function group</td></tr>
+  <tr><td>IPC</td><td>Inter-process communication</td></tr>
+  <tr><td>MiB</td><td>Mebibyte, 2<sup>20</sup> bytes</td></tr>
+  <tr><td>PID</td><td>Process identifier assigned by the operating system</td></tr>
+  <tr><td>PM</td><td>Process Manager, the component specified in this document</td></tr>
+  <tr><td>RG</td><td>Resource group</td></tr>
+  <tr><td>SWS</td><td>Software specification</td></tr>
+  <tr><td>WDG</td><td>Watchdog</td></tr>
+</table>
+<div class="caption">Table 2: Acronyms</div>
+
+<h2 id="sec-2-2">2.2 Terms</h2>
+<dl class="terms">
+  <dt>Application process</dt>
+  <dd>An operating system process that the Process Manager starts from an execution manifest.
+  A program may be started as several application processes with different arguments.</dd>
+  <dt>Execution manifest</dt>
+  <dd>The configuration file that tells the Process Manager how to start a program: its path,
+  arguments, environment, identity, dependencies and limits. See <a href="#sec-9">chapter 9</a>.</dd>
+  <dt>Function group</dt>
+  <dd>A named set of application processes that are started and stopped together. A machine has
+  several function groups; each is in exactly one of its states at a time.</dd>
+  <dt>Function group state</dt>
+  <dd>A named configuration of a function group, for example <code>Off</code>,
+  <code>Driving</code> or <code>Diagnostics</code>. It lists the processes that run in it.</dd>
+  <dt>Grace period</dt>
+  <dd>The time a process is given to exit after it has been asked to terminate, before it is
+  killed.</dd>
+  <dt>Reported state</dt>
+  <dd>The state that an application process announces to the Process Manager through the client
+  library, as opposed to the state the Process Manager observes from the operating system.</dd>
+  <dt>Supervision</dt>
+  <dd>The checks the Process Manager performs on a running process to find out whether it still
+  makes progress. See <a href="#sec-6">chapter 6</a>.</dd>
+</dl>
+
+<h1 id="sec-3">3 Architecture</h1>
+
+<h2 id="sec-3-1">3.1 Overview</h2>
+<p>The Process Manager runs as a single daemon, <code>ep-pm</code>, that the init system starts
+early during boot. It reads all execution manifests, computes the order in which processes must
+be started, and from then on reacts to three kinds of events: requests to change a function group
+state, state reports from application processes, and exit notifications from the operating
+system.</p>
+<div class="req" id="SWS_PM_00001">
+  <p><span class="rid">[SWS_PM_00001]</span> <span class="rtitle">Single instance</span></p>
+  <p>Exactly one Process Manager <b>shall</b> run on a machine. A second instance that is started
+  while the first one is running <b>shall</b> exit with status 1 without starting any process.</p>
+  <div class="trace">Derived from: EP-OVR-0031</div>
+</div>
+<div class="req" id="SWS_PM_00002">
+  <p><span class="rid">[SWS_PM_00002]</span> <span class="rtitle">Start before applications</span></p>
+  <p>The Process Manager <b>shall</b> be the parent of every application process. Application
+  processes <b>shall not</b> be started by the init system directly.</p>
+  <div class="trace">Derived from: EP-OVR-0032</div>
+</div>
+<p>Internally the Process Manager consists of four parts. The <i>manifest loader</i> parses and
+validates execution manifests. The <i>state engine</i> owns the function group states and
+decides which processes have to start or stop. The <i>launcher</i> creates processes, applies
+their identity and limits, and collects their exit status. The <i>supervisor</i> runs the checks
+described in <a href="#sec-6">chapter 6</a> and reports failures to the state engine.</p>
+<table class="grid">
+  <tr><th style="width:22%">Part</th><th>Responsibility</th><th style="width:22%">Specified in</th></tr>
+  <tr><td>Manifest loader</td><td>Parse, validate and merge execution manifests at start and on
+  request.</td><td><a href="#sec-9">Chapter 9</a></td></tr>
+  <tr><td>State engine</td><td>Hold function group states, compute start and stop sets, order them
+  by dependencies.</td><td><a href="#sec-3-2">3.2</a>, <a href="#sec-4">4</a></td></tr>
+  <tr><td>Launcher</td><td>Create processes, apply identity, environment and limits, reap
+  children.</td><td><a href="#sec-4-1">4.1</a>, <a href="#sec-5">5</a></td></tr>
+  <tr><td>Supervisor</td><td>Alive and deadline checks<!--v1.1-->, logical supervision<!--/v1.1-->,
+  watchdog service.</td><td><a href="#sec-6">Chapter 6</a></td></tr>
+</table>
+<div class="caption">Table 3: Internal parts of the Process Manager</div>
+
+<h2 id="sec-3-2">3.2 Process model</h2>
+
+<h3 id="sec-3-2-1">3.2.1 Process states</h3>
+<p>The Process Manager keeps one state machine per application process. The states and the
+transitions between them are shown in <a href="#fig-1">Figure 1</a>. A process enters
+<code>Starting</code> when the launcher has created it, and <code>Running</code> when it reports
+that its initialisation is complete (<a href="#SWS_PM_00020">[SWS_PM_00020]</a>). Any exit, whether
+requested or not, leads to <code>Terminated</code>.</p>
+
+<figure id="fig-1">
+<svg viewBox="0 25 640 235" xmlns="http://www.w3.org/2000/svg" font-family="DejaVu Sans, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f3b57"/>
+    </marker>
+  </defs>
+  <g stroke="#1f3b57" stroke-width="1.6" fill="#e8eef5">
+    <rect x="20" y="40" width="110" height="44" rx="10"/>
+    <rect x="200" y="40" width="110" height="44" rx="10"/>
+    <rect x="380" y="40" width="110" height="44" rx="10"/>
+    <rect x="380" y="200" width="110" height="44" rx="10"/>
+    <rect x="200" y="200" width="110" height="44" rx="10"/>
+    <rect x="530" y="120" width="96" height="44" rx="10" fill="#fbe9e7" stroke="#b23b2b"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="75" y="67">Idle</text>
+    <text x="255" y="67">Starting</text>
+    <text x="435" y="67">Running</text>
+    <text x="435" y="227">Terminating</text>
+    <text x="255" y="227">Terminated</text>
+    <text x="578" y="147" fill="#b23b2b">Failed</text>
+  </g>
+  <g stroke="#1f3b57" stroke-width="1.4" fill="none" marker-end="url(#arrow)">
+    <path d="M130,62 L198,62"/>
+    <path d="M310,62 L378,62"/>
+    <path d="M435,84 L435,198"/>
+    <path d="M380,222 L312,222"/>
+    <path d="M255,84 L255,198"/>
+    <path d="M490,62 C540,62 570,80 576,118"/>
+    <path d="M576,166 C570,210 530,222 492,222"/>
+    <path d="M200,222 C120,222 75,170 75,86"/>
+  </g>
+  <g font-size="11" fill="#333">
+    <text x="136" y="54">launch</text>
+    <text x="316" y="54">kRunning</text>
+    <text x="441" y="145">terminate</text>
+    <text x="318" y="214">exited</text>
+    <text x="262" y="145">exited during start</text>
+    <text x="497" y="50">check failed</text>
+    <text x="545" y="238">grace period</text>
+    <text x="106" y="160">restart</text>
+    <text x="106" y="174">(policy)</text>
+  </g>
+</svg>
+<div class="caption">Figure 1: Process states and transitions</div>
+</figure>
+
+<p>The <code>Failed</code> state is entered when a supervision check fails while the process is
+running. The Process Manager then terminates the process in the same way as a requested
+termination, except that the reason is recorded as a failure and the restart policy of
+<a href="#sec-4-2-2">4.2.2</a> applies.</p>
+<table class="grid">
+  <tr><th style="width:20%">State</th><th>Meaning</th><th style="width:30%">Left when</th></tr>
+  <tr><td><code>Idle</code></td><td>The process is configured but not started.</td><td>Its function
+  group enters a state that lists it.</td></tr>
+  <tr><td><code>Starting</code></td><td>The process exists and initialises itself.</td><td>It
+  reports <code>kRunning</code>, exits, or the startup timeout expires.</td></tr>
+  <tr><td><code>Running</code></td><td>The process has reported that it is ready.</td><td>It is
+  asked to terminate, exits, or fails a check.</td></tr>
+  <tr><td><code>Terminating</code></td><td>The process has been asked to exit.</td><td>It exits or
+  the grace period expires.</td></tr>
+  <tr><td><code>Terminated</code></td><td>The process has exited and has been reaped.</td><td>It is
+  started again.</td></tr>
+</table>
+<div class="caption">Table 4: Process states</div>
+
+<h3 id="sec-3-2-2">3.2.2 Function groups</h3>
+<p>Every application process belongs to exactly one function group. A function group has a set
+of named states, and each state lists the processes that run while the group is in it. The
+special state <code>Off</code> exists in every function group and lists no processes.</p>
+<div class="req" id="SWS_PM_00005">
+  <p><span class="rid">[SWS_PM_00005]</span> <span class="rtitle">Initial function group state</span></p>
+  <p>At start, the Process Manager <b>shall</b> put every function group into the state named by
+  its <code>initial_state</code> parameter, or into <code>Off</code> if the parameter is absent.</p>
+  <div class="trace">Derived from: EP-OVR-0040</div>
+</div>
+<div class="req" id="SWS_PM_00006">
+  <p><span class="rid">[SWS_PM_00006]</span> <span class="rtitle">State change</span></p>
+  <p>On a request to change a function group to another state, the Process Manager <b>shall</b>
+  terminate the processes that are not listed in the new state, then start the processes that are
+  listed in the new state and are not running. Processes listed in both states <b>shall</b> keep
+  running.</p>
+  <div class="trace">Derived from: EP-OVR-0041</div>
+</div>
+<p>A state change completes when every process to be stopped has reached <code>Terminated</code>
+and every process to be started has reached <code>Running</code>. The result is reported to the
+requester through <code>StateClient::SetState</code> (<a href="#sec-8-4">8.4</a>).</p>
+
+<h3 id="sec-3-2-3">3.2.3 Execution dependencies</h3>
+<p>A process may depend on other processes of the same function group. A dependency names the
+other process and the state it must have reached, either <code>Running</code> or
+<code>Terminated</code>. A dependency on <code>Terminated</code> is used for one-shot setup
+programs that must finish before the dependent process starts.</p>
+<div class="req" id="SWS_PM_00008">
+  <p><span class="rid">[SWS_PM_00008]</span> <span class="rtitle">Dependency order</span></p>
+  <p>The Process Manager <b>shall not</b> start a process before all processes it depends on have
+  reached the state required by the dependency.</p>
+  <div class="trace">Derived from: EP-OVR-0045</div>
+</div>
+<div class="req" id="SWS_PM_00009">
+  <p><span class="rid">[SWS_PM_00009]</span> <span class="rtitle">Dependency cycles</span></p>
+  <p>The manifest loader <b>shall</b> reject a set of manifests whose dependencies form a cycle.
+  The error <b>shall</b> name every process on the cycle.</p>
+  <div class="trace">Derived from: EP-MAN-0012</div>
+</div>
+<p>Processes without a dependency between them may be started in parallel. Termination follows
+the reverse order: a process is asked to terminate only after every process that depends on it
+has terminated.</p>
+
+<h1 id="sec-4">4 Process lifecycle</h1>
+
+<h2 id="sec-4-1">4.1 Startup</h2>
+
+<h3 id="sec-4-1-1">4.1.1 Startup sequence</h3>
+<p>For each process to start, the launcher performs the following steps in this order. A failure
+in any step ends the start attempt; the process goes to <code>Terminated</code> and the error is
+reported as <code>kStartFailed</code> (<a href="#sec-7-2">7.2</a>).</p>
+<ol>
+  <li>Create the process with <code>fork</code> or <code>posix_spawn</code>.</li>
+  <li>Place the process into its resource group (<a href="#sec-5-1">5.1</a>).</li>
+  <li>Apply the resource limits of <a href="#sec-5-2">5.2</a>.</li>
+  <li>Switch to the user and group identity of the manifest.</li>
+  <li>Set the working directory and replace the environment.</li>
+  <li>Execute the program with the arguments of the manifest.</li>
+</ol>
+<div class="req" id="SWS_PM_00012">
+  <p><span class="rid">[SWS_PM_00012]</span> <span class="rtitle">Start order</span></p>
+  <p>Within one state change, the Process Manager <b>shall</b> start processes in an order that
+  satisfies all execution dependencies (<a href="#SWS_PM_00008">[SWS_PM_00008]</a>). Among processes
+  that are ready to start at the same time, it <b>shall</b> start them in ascending order of their
+  <code>startup.priority</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0045, EP-OVR-0046</div>
+</div>
+<div class="req" id="SWS_PM_00013">
+  <p><span class="rid">[SWS_PM_00013]</span> <span class="rtitle">Environment</span></p>
+  <p>A started process <b>shall</b> receive only the environment variables listed in its manifest,
+  plus <code>EP_PROCESS_NAME</code> and <code>EP_FUNCTION_GROUP</code>. The environment of the
+  Process Manager itself <b>shall not</b> be inherited.</p>
+  <div class="trace">Derived from: EP-OVR-0050</div>
+</div>
+<div class="req" id="SWS_PM_00014">
+  <p><span class="rid">[SWS_PM_00014]</span> <span class="rtitle">Open file descriptors</span></p>
+  <p>A started process <b>shall</b> have only standard input, standard output and standard error
+  open, connected as configured in <code>stdio</code>. All other descriptors of the Process Manager
+  <b>shall</b> be closed before the program is executed.</p>
+  <div class="trace">Derived from: EP-OVR-0051</div>
+</div>
+
+<h3 id="sec-4-1-2">4.1.2 Startup timeout</h3>
+<p>A process that does not report <code>kRunning</code> in time is considered hung. The startup
+timeout starts when the program has been executed, not when the process was created, so that slow
+resource group setup does not count against the process.</p>
+<div class="req" id="SWS_PM_00016">
+  <p><span class="rid">[SWS_PM_00016]</span> <span class="rtitle">Startup timeout</span></p>
+  <!--v1.0--><p>The Process Manager <b>shall</b> terminate a process that has not reported
+  <code>kRunning</code> within 5 s after it was executed, and report <code>kStartTimeout</code>.</p><!--/v1.0-->
+  <!--v1.1--><p>The Process Manager <b>shall</b> terminate a process that has not reported
+  <code>kRunning</code> within the startup timeout configured in its manifest
+  (<code>startup.timeout_ms</code>, default 3000 ms) after it was executed, and report
+  <code>kStartTimeout</code>.</p><!--/v1.1-->
+  <div class="trace">Derived from: EP-OVR-0052</div>
+</div>
+<div class="req" id="SWS_PM_00017">
+  <p><span class="rid">[SWS_PM_00017]</span> <span class="rtitle">Termination after timeout</span></p>
+  <p>A process terminated because of a startup timeout <b>shall</b> be terminated as described in
+  <a href="#sec-4-3-1">4.3.1</a>, including its grace period.</p>
+  <div class="trace">Derived from: EP-OVR-0052</div>
+</div>
+<!--v1.1--><p>Integrators should measure the startup time of each process on the slowest supported
+hardware and set <code>startup.timeout_ms</code> to at least twice that value. A timeout that is
+too short makes the process fail on a busy machine and causes restarts that slow the machine down
+further.</p><!--/v1.1-->
+
+<h2 id="sec-4-2">4.2 Running</h2>
+
+<h3 id="sec-4-2-1">4.2.1 State reporting</h3>
+<p>An application process reports its own progress through the client library
+(<a href="#sec-8-3">8.3</a>). The report is the only way for the Process Manager to learn that a
+process has finished its initialisation; the existence of the operating system process alone is
+not enough.</p>
+<div class="req" id="SWS_PM_00020">
+  <p><span class="rid">[SWS_PM_00020]</span> <span class="rtitle">Running report</span></p>
+  <p>When a process in <code>Starting</code> reports <code>kRunning</code>, the Process Manager
+  <b>shall</b> move it to <code>Running</code> and start every process whose dependencies are now
+  satisfied.</p>
+  <div class="trace">Derived from: EP-OVR-0053</div>
+</div>
+<div class="req" id="SWS_PM_00021">
+  <p><span class="rid">[SWS_PM_00021]</span> <span class="rtitle">Unexpected reports</span></p>
+  <p>A report that does not fit the current state of the process, such as <code>kRunning</code>
+  from a process in <code>Running</code>, <b>shall</b> be ignored and logged at warning level.
+  <!--v1.1-->The call <b>shall</b> return <code>kInvalidTransition</code> to the caller.<!--/v1.1--></p>
+  <div class="trace">Derived from: EP-OVR-0053</div>
+</div>
+<p>Reports are delivered over a per-process IPC channel that the launcher creates before the
+program is executed. The channel is identified by the descriptor number in the environment
+variable <code>EP_PM_CHANNEL</code>; it is the only descriptor that is kept open in addition to the
+standard streams of <a href="#SWS_PM_00014">[SWS_PM_00014]</a>.</p>
+
+<h3 id="sec-4-2-2">4.2.2 Restart policy</h3>
+<p>A process that exits while its function group state still lists it has exited unexpectedly.
+What happens next is decided by the restart policy in its manifest.</p>
+<table class="grid">
+  <tr><th style="width:20%">Policy</th><th>Behaviour</th></tr>
+  <tr><td><code>never</code></td><td>The process stays in <code>Terminated</code>. The function
+  group remains in its state; the failure is reported.</td></tr>
+  <tr><td><code>on-failure</code></td><td>The process is started again if it exited with a
+  non-zero status, was killed by a signal or failed a supervision check.</td></tr>
+  <tr><td><code>always</code></td><td>The process is started again after every unexpected
+  exit.</td></tr>
+</table>
+<div class="caption">Table 5: Restart policies</div>
+<div class="req" id="SWS_PM_00024">
+  <p><span class="rid">[SWS_PM_00024]</span> <span class="rtitle">Restart limit</span></p>
+  <p>The Process Manager <b>shall</b> restart a process at most <code>restart.max_attempts</code>
+  times within <code>restart.window_s</code>. When the limit is reached, it <b>shall</b> leave the
+  process in <code>Terminated</code> and report <code>kRestartLimit</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0060</div>
+</div>
+<div class="req" id="SWS_PM_00025">
+  <p><span class="rid">[SWS_PM_00025]</span> <span class="rtitle">Dependents of a restarted process</span></p>
+  <p>Before a process is restarted, the processes that depend on it being <code>Running</code>
+  <b>shall</b> be terminated. They <b>shall</b> be started again once the restarted process has
+  reached <code>Running</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0061</div>
+</div>
+<!--v1.1--><p>Restarting a process immediately after it has failed tends to fail again for the same
+reason, for example when a server it connects to is still starting. Version 1.1 therefore adds a
+delay between attempts that grows with every failure.</p>
+<div class="req" id="SWS_PM_00026">
+  <p><span class="rid">[SWS_PM_00026]</span> <span class="rtitle">Restart back-off</span></p>
+  <p>The Process Manager <b>shall</b> wait before each restart attempt. The first delay is
+  <code>restart.delay_ms</code>; each further delay within the same window is twice the previous
+  one, up to <code>restart.max_delay_ms</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0062</div>
+</div><!--/v1.1-->
+
+<h2 id="sec-4-3">4.3 Termination</h2>
+
+<h3 id="sec-4-3-1">4.3.1 Requested termination</h3>
+<p>A process is asked to terminate when its function group leaves a state that lists it, when the
+machine shuts down, or when a supervision check fails. The process is expected to release its
+resources, report <code>kTerminating</code> and exit with status 0.</p>
+<div class="req" id="SWS_PM_00030">
+  <p><span class="rid">[SWS_PM_00030]</span> <span class="rtitle">Termination signal</span></p>
+  <p>To ask a process to terminate, the Process Manager <b>shall</b> send it <code>SIGTERM</code>
+  and move it to <code>Terminating</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0070</div>
+</div>
+<div class="req" id="SWS_PM_00031">
+  <p><span class="rid">[SWS_PM_00031]</span> <span class="rtitle">Grace period</span></p>
+  <p>The Process Manager <b>shall</b> give a terminating process <code>termination.grace_ms</code>
+  to exit. The grace period starts when <code>SIGTERM</code> is sent.</p>
+  <div class="trace">Derived from: EP-OVR-0071</div>
+</div>
+<pre><span class="c">// Typical handling of SIGTERM in an application process.</span>
+<span class="k">static</span> std::atomic&lt;<span class="t">bool</span>&gt; stop_requested{<span class="k">false</span>};
+
+<span class="k">extern</span> <span class="s">"C"</span> <span class="t">void</span> on_sigterm(<span class="t">int</span>) { stop_requested = <span class="k">true</span>; }
+
+<span class="t">int</span> main() {
+    std::signal(SIGTERM, on_sigterm);
+    ep::pm::ProcessClient client;
+    Server server = Server::Open();
+    client.ReportState(ep::pm::ProcessState::kRunning);
+
+    <span class="k">while</span> (!stop_requested) {
+        server.Poll(std::chrono::milliseconds(100));
+    }
+
+    client.ReportState(ep::pm::ProcessState::kTerminating);
+    server.Close();
+    <span class="k">return</span> 0;
+}</pre>
+
+<h3 id="sec-4-3-2">4.3.2 Forced termination</h3>
+<p>If a process does not exit within its grace period, it is killed. A process that has been
+killed cannot clean up, so integrators should choose a grace period that covers the slowest
+expected shutdown.</p>
+<div class="req" id="SWS_PM_00033">
+  <p><span class="rid">[SWS_PM_00033]</span> <span class="rtitle">Kill after grace period</span></p>
+  <p>When the grace period of a terminating process expires, the Process Manager <b>shall</b> send
+  <code>SIGKILL</code> to every process in its process group and report
+  <code>kKilled</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0072</div>
+</div>
+<div class="req" id="SWS_PM_00034">
+  <p><span class="rid">[SWS_PM_00034]</span> <span class="rtitle">Orphaned children</span></p>
+  <p>Processes created by an application process <b>shall</b> be terminated together with it.
+  The Process Manager <b>shall</b> use the resource group of <a href="#sec-5-1">5.1</a> to find them,
+  not the parent relation, because a child may have been re-parented.</p>
+  <div class="trace">Derived from: EP-OVR-0073</div>
+</div>
+
+<h1 id="sec-5">5 Resource management</h1>
+
+<h2 id="sec-5-1">5.1 Resource groups</h2>
+<p>Each application process runs in its own resource group, implemented as a control group of
+the operating system. The resource group holds the process and every process it creates. Limits
+are set on the resource group, so they apply to the program as a whole and cannot be escaped by
+creating children.</p>
+<div class="req" id="SWS_PM_00040">
+  <p><span class="rid">[SWS_PM_00040]</span> <span class="rtitle">One group per process</span></p>
+  <p>The launcher <b>shall</b> create a resource group named after the function group and the
+  process, <code>ep/&lt;function-group&gt;/&lt;process&gt;</code>, and place the new process into it
+  before the program is executed.</p>
+  <div class="trace">Derived from: EP-OVR-0080</div>
+</div>
+<div class="req" id="SWS_PM_00041">
+  <p><span class="rid">[SWS_PM_00041]</span> <span class="rtitle">Removal</span></p>
+  <p>The resource group <b>shall</b> be removed after the last process in it has exited.</p>
+  <div class="trace">Derived from: EP-OVR-0080</div>
+</div>
+
+<h2 id="sec-5-2">5.2 Limits</h2>
+<p>The manifest may set the limits below for a process. A limit that is not set takes the default
+value of the table. Values are checked by the manifest loader; a value outside the allowed range
+makes the manifest invalid.</p>
+<table class="grid">
+  <tr><th style="width:30%">Parameter</th><th>Meaning</th><th style="width:13%">Default</th><th style="width:17%">Range</th></tr>
+  <tr><td><code>limits.memory_mib</code></td><td>Memory the process may use, including page cache charged to it.</td>
+  <!--v1.0--><td class="num">256</td><td class="num">16 – 4096</td><!--/v1.0--><!--v1.1--><td class="num">512</td><td class="num">16 – 8192</td><!--/v1.1--></tr>
+  <tr><td><code>limits.cpu_percent</code></td><td>Share of one CPU core, averaged over 100 ms.</td>
+  <td class="num">100</td><td class="num">1 – 800</td></tr>
+  <tr><td><code>limits.max_processes</code></td><td>Processes and threads in the resource group.</td>
+  <!--v1.0--><td class="num">64</td><!--/v1.0--><!--v1.1--><td class="num">128</td><!--/v1.1--><td class="num">1 – 4096</td></tr>
+  <tr><td><code>limits.open_files</code></td><td>Open file descriptors per process.</td>
+  <td class="num">1024</td><td class="num">16 – 65536</td></tr>
+  <tr><td><code>startup.timeout_ms</code></td><td>Startup timeout, see <a href="#SWS_PM_00016">[SWS_PM_00016]</a>.</td>
+  <!--v1.0--><td class="num">5000</td><td class="num">fixed</td><!--/v1.0--><!--v1.1--><td class="num">3000</td><td class="num">100 – 60000</td><!--/v1.1--></tr>
+  <tr><td><code>termination.grace_ms</code></td><td>Grace period, see <a href="#SWS_PM_00031">[SWS_PM_00031]</a>.</td>
+  <td class="num">2000</td><td class="num">0 – 30000</td></tr>
+  <tr><td><code>restart.max_attempts</code></td><td>Restart limit, see <a href="#SWS_PM_00024">[SWS_PM_00024]</a>.</td>
+  <!--v1.0--><td class="num">3</td><!--/v1.0--><!--v1.1--><td class="num">5</td><!--/v1.1--><td class="num">0 – 100</td></tr>
+  <tr><td><code>restart.window_s</code></td><td>Window of the restart limit.</td>
+  <td class="num">60</td><td class="num">1 – 3600</td></tr>
+</table>
+<div class="caption">Table 6: Resource limits and their defaults</div>
+<div class="req" id="SWS_PM_00043">
+  <p><span class="rid">[SWS_PM_00043]</span> <span class="rtitle">Memory limit</span></p>
+  <p>When a process exceeds <code>limits.memory_mib</code>, the operating system terminates it.
+  The Process Manager <b>shall</b> report this exit as <code>kMemoryLimit</code> rather than as
+  a plain signal, and apply the restart policy.</p>
+  <div class="trace">Derived from: EP-OVR-0081</div>
+</div>
+
+<h2 id="sec-5-3">5.3 Scheduling</h2>
+<p>The scheduling policy and priority are applied to the main thread before the program is
+executed and are inherited by every thread the program creates. A program may lower its own
+priority but not raise it above the configured value.</p>
+<table class="grid">
+  <tr><th style="width:24%">Policy</th><th>Use</th><th style="width:22%">Priority range</th></tr>
+  <tr><td><code>other</code></td><td>Default time-sharing scheduling for most processes.</td><td>nice −10 to 19</td></tr>
+  <tr><td><code>batch</code></td><td>Long computations that should not disturb interactive work.</td><td>nice 0 to 19</td></tr>
+  <tr><td><code>fifo</code></td><td>Real-time tasks with short, bounded work per activation.</td><td>1 to 80</td></tr>
+  <tr><td><code>round-robin</code></td><td>Real-time tasks of equal priority that share a core.</td><td>1 to 80</td></tr>
+</table>
+<div class="caption">Table 7: Scheduling policies</div>
+<div class="req" id="SWS_PM_00046">
+  <p><span class="rid">[SWS_PM_00046]</span> <span class="rtitle">Real-time budget</span></p>
+  <p>The manifest loader <b>shall</b> reject a process with policy <code>fifo</code> or
+  <code>round-robin</code> unless its manifest also sets <code>limits.cpu_percent</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0085</div>
+</div>
+
+<h1 id="sec-6">6 Supervision</h1>
+<p>Supervision finds processes that still exist but no longer do their work, for example because
+they are stuck in a loop or wait forever on a lock. Each check is configured per process. A failed
+check moves the process to <code>Failed</code> (<a href="#fig-1">Figure 1</a>).</p>
+
+<h2 id="sec-6-1">6.1 Alive supervision</h2>
+<p>Alive supervision checks that a process calls <code>ProcessClient::ReportAlive</code>
+regularly. The expected interval and the tolerated deviation are set in the manifest.</p>
+<div class="req" id="SWS_PM_00050">
+  <p><span class="rid">[SWS_PM_00050]</span> <span class="rtitle">Alive check</span></p>
+  <p>For a process with <code>supervision.alive_interval_ms</code> set, the supervisor <b>shall</b>
+  count the alive reports in each interval. If the count is below
+  <code>supervision.alive_min</code> or above <code>supervision.alive_max</code> in
+  <code>supervision.alive_failures</code> consecutive intervals, the check fails.</p>
+  <div class="trace">Derived from: EP-OVR-0090</div>
+</div>
+<div class="req" id="SWS_PM_00051">
+  <p><span class="rid">[SWS_PM_00051]</span> <span class="rtitle">Start of alive supervision</span></p>
+  <p>Alive supervision of a process <b>shall</b> start when the process reaches
+  <code>Running</code> and stop when it leaves <code>Running</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0090</div>
+</div>
+
+<h2 id="sec-6-2">6.2 Deadline supervision</h2>
+<p>Deadline supervision checks the time between two checkpoints in the code. A process marks the
+start and the end of a monitored section with <code>ReportCheckpoint</code>; the supervisor
+compares the elapsed time with the minimum and maximum of the manifest.</p>
+<div class="req" id="SWS_PM_00053">
+  <p><span class="rid">[SWS_PM_00053]</span> <span class="rtitle">Deadline check</span></p>
+  <p>For each configured pair of checkpoints, the supervisor <b>shall</b> fail the check if the
+  end checkpoint is reported earlier than <code>min_ms</code> or later than <code>max_ms</code>
+  after the start checkpoint, or not at all within <code>max_ms</code>.</p>
+  <div class="trace">Derived from: EP-OVR-0091</div>
+</div>
+<pre><span class="c"># Deadline supervision in the execution manifest</span>
+[[supervision.deadline]]
+name     = <span class="s">"frame"</span>
+start    = 10        <span class="c"># checkpoint id reported before the work</span>
+end      = 11        <span class="c"># checkpoint id reported after the work</span>
+min_ms   = 2
+max_ms   = 40</pre>
+
+<!--v1.1--><h2 id="sec-6-3">6.3 Logical supervision</h2>
+<p>Logical supervision checks that checkpoints are reported in an allowed order. The manifest
+describes the allowed order as a graph: each checkpoint lists the checkpoints that may follow it.
+This finds processes that skip a step of their work, for example a control loop that publishes
+results without reading new input.</p>
+<div class="req" id="SWS_PM_00056">
+  <p><span class="rid">[SWS_PM_00056]</span> <span class="rtitle">Logical check</span></p>
+  <p>For a process with a <code>supervision.logical</code> graph, the supervisor <b>shall</b> fail
+  the check when a checkpoint is reported that is not a successor of the previously reported
+  checkpoint in the graph.</p>
+  <div class="trace">Derived from: EP-OVR-0093</div>
+</div>
+<div class="req" id="SWS_PM_00057">
+  <p><span class="rid">[SWS_PM_00057]</span> <span class="rtitle">Graph entry</span></p>
+  <p>The first checkpoint after the process reaches <code>Running</code> <b>shall</b> be one of the
+  entry checkpoints of the graph; any other checkpoint fails the check.</p>
+  <div class="trace">Derived from: EP-OVR-0093</div>
+</div>
+<pre><span class="c"># Logical supervision: read (20) must come before compute (21) and publish (22)</span>
+[supervision.logical]
+entry = [20]
+edges = { 20 = [21], 21 = [22], 22 = [20] }</pre><!--/v1.1-->
+
+<!--v1.0--><h2 id="sec-6-3">6.3 Interaction with the watchdog</h2><!--/v1.0-->
+<!--v1.1--><h2 id="sec-6-4">6.4 Interaction with the watchdog</h2><!--/v1.1-->
+<p>The supervisor services the hardware watchdog through the interface of [EP-SWS-WDG]. As long
+as all supervised processes pass their checks, the watchdog is triggered regularly. If the
+Process Manager itself stops working, the watchdog is no longer triggered and resets the
+machine.</p>
+<div class="req" id="SWS_PM_00059">
+  <p><span class="rid">[SWS_PM_00059]</span> <span class="rtitle">Watchdog service</span></p>
+  <p>The supervisor <b>shall</b> trigger the watchdog at the interval returned by
+  <code>WatchdogClient::GetTimeout</code> divided by three. It <b>shall</b> stop triggering only
+  when a process whose manifest sets <code>supervision.critical = true</code> fails a check and
+  cannot be restarted.</p>
+  <div class="trace">Derived from: EP-OVR-0095, EP-SWS-WDG SWS_WDG_00004</div>
+</div>
+<div class="note"><b>Note:</b> The watchdog timeout is fixed by the hardware and read once at start.
+See chapter 3 of [EP-SWS-WDG] for the supported timeouts.</div>
+
+<h1 id="sec-7">7 Error handling</h1>
+
+<h2 id="sec-7-1">7.1 Error classification</h2>
+<p>Errors are divided into three classes. <i>Configuration errors</i> are found by the manifest
+loader before any process is started; they stop the affected function group from entering the
+requested state. <i>Process errors</i> concern one application process and are handled by the
+restart policy. <i>Platform errors</i> concern the Process Manager itself, for example a failure
+to create a resource group, and are reported to the platform health monitor.</p>
+<div class="req" id="SWS_PM_00062">
+  <p><span class="rid">[SWS_PM_00062]</span> <span class="rtitle">Error reporting</span></p>
+  <p>Every error <b>shall</b> be logged with its code from <a href="#sec-7-2">7.2</a>, the process
+  name, the function group and, for process errors, the exit status or signal.</p>
+  <div class="trace">Derived from: EP-SWS-LOG SWS_LOG_00010</div>
+</div>
+
+<h2 id="sec-7-2">7.2 Error codes</h2>
+<table class="grid">
+  <tr><th style="width:27%">Code</th><th style="width:8%">Value</th><th>Meaning</th><th style="width:15%">Class</th></tr>
+  <tr><td><code>kOk</code></td><td class="num">0</td><td>No error.</td><td>—</td></tr>
+  <tr><td><code>kInvalidManifest</code></td><td class="num">1</td><td>A manifest cannot be parsed or a value is out of range.</td><td>Configuration</td></tr>
+  <tr><td><code>kDependencyCycle</code></td><td class="num">2</td><td>Dependencies form a cycle (<a href="#SWS_PM_00009">[SWS_PM_00009]</a>).</td><td>Configuration</td></tr>
+  <tr><td><code>kStartFailed</code></td><td class="num">3</td><td>A step of the startup sequence failed.</td><td>Process</td></tr>
+  <tr><td><code>kStartTimeout</code></td><td class="num">4</td><td>No <code>kRunning</code> report in time (<a href="#SWS_PM_00016">[SWS_PM_00016]</a>).</td><td>Process</td></tr>
+  <tr><td><code>kKilled</code></td><td class="num">5</td><td>Killed after the grace period (<a href="#SWS_PM_00033">[SWS_PM_00033]</a>).</td><td>Process</td></tr>
+  <tr><td><code>kMemoryLimit</code></td><td class="num">6</td><td>Terminated for exceeding its memory limit.</td><td>Process</td></tr>
+  <tr><td><code>kSupervisionFailed</code></td><td class="num">7</td><td>A supervision check failed.</td><td>Process</td></tr>
+  <tr><td><code>kRestartLimit</code></td><td class="num">8</td><td>Restart limit reached (<a href="#SWS_PM_00024">[SWS_PM_00024]</a>).</td><td>Process</td></tr>
+  <tr><td><code>kResourceGroup</code></td><td class="num">9</td><td>A resource group could not be created or removed.</td><td>Platform</td></tr>
+  <!--v1.1--><tr><td><code>kInvalidTransition</code></td><td class="num">10</td><td>A state report does not fit the current state (<a href="#SWS_PM_00021">[SWS_PM_00021]</a>).</td><td>Process</td></tr><!--/v1.1-->
+</table>
+<div class="caption">Table 8: Error codes</div>
+
+<h1 id="sec-8">8 API reference</h1>
+
+<h2 id="sec-8-1">8.1 Header and namespace</h2>
+<p>The client library is a C++17 library. All declarations are in the namespace
+<code>ep::pm</code> and in the header <code>&lt;ep/pm/client.h&gt;</code>. The library is
+thread-safe: every function may be called from any thread. Functions do not throw; errors are
+returned as <code>ErrorCode</code>.</p>
+
+<h2 id="sec-8-2">8.2 Types</h2>
+<pre><span class="k">namespace</span> ep::pm {
+
+<span class="k">enum class</span> <span class="t">ProcessState</span> : std::uint8_t {
+    kRunning     = 0,  <span class="c">// initialisation complete</span>
+    kTerminating = 1,  <span class="c">// about to exit</span>
+};
+
+<span class="k">enum class</span> <span class="t">ErrorCode</span> : std::int32_t {
+    kOk = 0, kInvalidManifest = 1, kDependencyCycle = 2, kStartFailed = 3,
+    kStartTimeout = 4, kKilled = 5, kMemoryLimit = 6, kSupervisionFailed = 7,
+    kRestartLimit = 8, kResourceGroup = 9,<!--v1.1--> kInvalidTransition = 10,<!--/v1.1-->
+};
+
+<span class="k">using</span> <span class="t">CheckpointId</span> = std::uint32_t;
+
+}  <span class="c">// namespace ep::pm</span></pre>
+
+<h2 id="sec-8-3">8.3 ProcessClient</h2>
+<p><code>ProcessClient</code> is used by an application process to talk about itself. Each process
+creates at most one instance, usually at the start of <code>main</code>.</p>
+<pre><span class="k">class</span> <span class="t">ProcessClient</span> {
+<span class="k">public</span>:
+    <span class="c">// Connects to the channel named by EP_PM_CHANNEL.</span>
+    ProcessClient();
+
+    <span class="c">// Reports the state of the calling process (4.2.1).</span>
+    <span class="t">ErrorCode</span> ReportState(<span class="t">ProcessState</span> state);
+
+    <span class="c">// Alive supervision (6.1). Cheap; may be called from a hot loop.</span>
+    <span class="t">void</span> ReportAlive();
+
+    <span class="c">// Deadline<!--v1.1--> and logical<!--/v1.1--> supervision (6.2<!--v1.1-->, 6.3<!--/v1.1-->).</span>
+    <span class="t">void</span> ReportCheckpoint(<span class="t">CheckpointId</span> id);
+};</pre>
+<div class="req" id="SWS_PM_00070">
+  <p><span class="rid">[SWS_PM_00070]</span> <span class="rtitle">Constructor without channel</span></p>
+  <p>If <code>EP_PM_CHANNEL</code> is not set, the constructor <b>shall</b> create a client whose
+  functions do nothing and return <code>kOk</code>, so that a program can also run outside the
+  platform.</p>
+  <div class="trace">Derived from: EP-OVR-0100</div>
+</div>
+<div class="req" id="SWS_PM_00071">
+  <p><span class="rid">[SWS_PM_00071]</span> <span class="rtitle">Non-blocking reports</span></p>
+  <p><code>ReportAlive</code> and <code>ReportCheckpoint</code> <b>shall not</b> block. If the channel
+  is full, the report <b>shall</b> be dropped and counted; the count is sent with the next report
+  that fits.</p>
+  <div class="trace">Derived from: EP-OVR-0101</div>
+</div>
+<div class="req" id="SWS_PM_00072">
+  <p><span class="rid">[SWS_PM_00072]</span> <span class="rtitle">Time stamps</span></p>
+  <p>Each report <b>shall</b> carry a time stamp of the monotonic clock taken in the calling thread,
+  so that the supervisor measures the time of the call and not the time of delivery.</p>
+  <div class="trace">Derived from: EP-OVR-0101</div>
+</div>
+
+<h2 id="sec-8-4">8.4 StateClient</h2>
+<p><code>StateClient</code> is used by the platform component that decides the operating mode of
+the machine, to change function group states. Its use is restricted to processes whose manifest
+sets <code>permissions.state_control = true</code>.</p>
+<pre><span class="k">class</span> <span class="t">StateClient</span> {
+<span class="k">public</span>:
+    StateClient();
+
+    <span class="c">// Requests a state change (SWS_PM_00006) and waits for its result.</span>
+    <span class="t">ErrorCode</span> SetState(std::string_view function_group,
+                       std::string_view state,
+                       std::chrono::milliseconds timeout);
+
+    <span class="c">// The current state of a function group, or an empty string if unknown.</span>
+    std::string GetState(std::string_view function_group) <span class="k">const</span>;
+};</pre>
+<div class="req" id="SWS_PM_00075">
+  <p><span class="rid">[SWS_PM_00075]</span> <span class="rtitle">Concurrent requests</span></p>
+  <p>If a state change of a function group is requested while another change of the same group is
+  in progress, the Process Manager <b>shall</b> finish the first change before starting the second
+  one. Requests for different function groups <b>may</b> run in parallel.</p>
+  <div class="trace">Derived from: EP-OVR-0105</div>
+</div>
+
+<h1 id="sec-9">9 Configuration</h1>
+
+<h2 id="sec-9-1">9.1 Manifest format</h2>
+<p>Execution manifests are TOML files in <code>/etc/ep/manifests/</code>, one file per program.
+A file may define several processes of the same program. The schema is defined in [EP-MAN]; the
+example below shows the parameters used in this document.</p>
+<pre><span class="c"># /etc/ep/manifests/telemetry.toml</span>
+[program]
+path = <span class="s">"/opt/ep/bin/telemetry"</span>
+user = <span class="s">"telemetry"</span>
+
+[[process]]
+name           = <span class="s">"telemetry-collector"</span>
+function_group = <span class="s">"Machine"</span>
+states         = [<span class="s">"Driving"</span>, <span class="s">"Diagnostics"</span>]
+arguments      = [<span class="s">"--mode"</span>, <span class="s">"collect"</span>]
+environment    = { RUST_LOG = <span class="s">"info"</span> }
+depends_on     = [{ process = <span class="s">"time-sync"</span>, state = <span class="s">"Running"</span> }]
+
+  [process.startup]
+  priority   = 20<!--v1.1-->
+  timeout_ms = 4000<!--/v1.1-->
+
+  [process.restart]
+  policy       = <span class="s">"on-failure"</span>
+  max_attempts = 3
+  window_s     = 60<!--v1.1-->
+  delay_ms     = 250
+  max_delay_ms = 8000<!--/v1.1-->
+
+  [process.limits]
+  memory_mib  = 192
+  cpu_percent = 50</pre>
+<div class="req" id="SWS_PM_00080">
+  <p><span class="rid">[SWS_PM_00080]</span> <span class="rtitle">Unknown parameters</span></p>
+  <p>The manifest loader <b>shall</b> reject a manifest that contains a parameter not defined in
+  [EP-MAN], naming the file, the line and the parameter.</p>
+  <div class="trace">Derived from: EP-MAN-0003</div>
+</div>
+<div class="req" id="SWS_PM_00081">
+  <p><span class="rid">[SWS_PM_00081]</span> <span class="rtitle">Reloading</span></p>
+  <p>On <code>SIGHUP</code>, the Process Manager <b>shall</b> read the manifests again. Changes
+  <b>shall</b> apply to processes started after the reload; running processes <b>shall</b> keep
+  the configuration they were started with.</p>
+  <div class="trace">Derived from: EP-MAN-0004</div>
+</div>
+
+<h2 id="sec-9-2">9.2 Parameters</h2>
+<p>The table lists the parameters of a <code>[[process]]</code> entry that are not limits. The
+limits are listed in <a href="#sec-5-2">Table 6</a>.</p>
+<table class="grid">
+  <tr><th style="width:30%">Parameter</th><th>Meaning</th><th style="width:16%">Required</th></tr>
+  <tr><td><code>name</code></td><td>Unique name of the process on the machine.</td><td>yes</td></tr>
+  <tr><td><code>function_group</code></td><td>The function group the process belongs to.</td><td>yes</td></tr>
+  <tr><td><code>states</code></td><td>Function group states in which the process runs.</td><td>yes</td></tr>
+  <tr><td><code>arguments</code></td><td>Command line arguments after the program path.</td><td>no</td></tr>
+  <tr><td><code>environment</code></td><td>Environment variables (<a href="#SWS_PM_00013">[SWS_PM_00013]</a>).</td><td>no</td></tr>
+  <tr><td><code>depends_on</code></td><td>Execution dependencies (<a href="#sec-3-2-3">3.2.3</a>).</td><td>no</td></tr>
+  <tr><td><code>stdio</code></td><td><code>null</code>, <code>log</code> or <code>inherit</code>.</td><td>no</td></tr>
+  <tr><td><code>scheduling.policy</code></td><td>Scheduling policy (<a href="#sec-5-3">Table 7</a>).</td><td>no</td></tr>
+  <tr><td><code>restart.policy</code></td><td>Restart policy (<a href="#sec-4-2-2">Table 5</a>).</td><td>no</td></tr>
+  <!--v1.1--><tr><td><code>restart.delay_ms</code></td><td>First restart delay (<a href="#SWS_PM_00026">[SWS_PM_00026]</a>).</td><td>no</td></tr>
+  <tr><td><code>restart.max_delay_ms</code></td><td>Largest restart delay.</td><td>no</td></tr><!--/v1.1-->
+  <tr><td><code>supervision.critical</code></td><td>Stop the watchdog if this process fails for good (<a href="#SWS_PM_00059">[SWS_PM_00059]</a>).</td><td>no</td></tr>
+</table>
+<div class="caption">Table 9: Process parameters</div>
+<div class="req" id="SWS_PM_00083">
+  <p><span class="rid">[SWS_PM_00083]</span> <span class="rtitle">Unique names</span></p>
+  <p>The manifest loader <b>shall</b> reject a set of manifests in which two processes have the same
+  <code>name</code>.</p>
+  <div class="trace">Derived from: EP-MAN-0005</div>
+</div>
+
+<h1 id="sec-10">10 Requirements traceability</h1>
+<p>The table lists every requirement of this document with the section that contains it. Select
+an identifier to go to the requirement.</p>
+<table class="grid">
+  <tr><th style="width:24%">Requirement</th><th>Title</th><th style="width:14%">Section</th></tr>
+  <tr><td><a href="#SWS_PM_00001">SWS_PM_00001</a></td><td>Single instance</td><td>3.1</td></tr>
+  <tr><td><a href="#SWS_PM_00002">SWS_PM_00002</a></td><td>Start before applications</td><td>3.1</td></tr>
+  <tr><td><a href="#SWS_PM_00005">SWS_PM_00005</a></td><td>Initial function group state</td><td>3.2.2</td></tr>
+  <tr><td><a href="#SWS_PM_00006">SWS_PM_00006</a></td><td>State change</td><td>3.2.2</td></tr>
+  <tr><td><a href="#SWS_PM_00008">SWS_PM_00008</a></td><td>Dependency order</td><td>3.2.3</td></tr>
+  <tr><td><a href="#SWS_PM_00009">SWS_PM_00009</a></td><td>Dependency cycles</td><td>3.2.3</td></tr>
+  <tr><td><a href="#SWS_PM_00012">SWS_PM_00012</a></td><td>Start order</td><td>4.1.1</td></tr>
+  <tr><td><a href="#SWS_PM_00013">SWS_PM_00013</a></td><td>Environment</td><td>4.1.1</td></tr>
+  <tr><td><a href="#SWS_PM_00014">SWS_PM_00014</a></td><td>Open file descriptors</td><td>4.1.1</td></tr>
+  <tr><td><a href="#SWS_PM_00016">SWS_PM_00016</a></td><td>Startup timeout</td><td>4.1.2</td></tr>
+  <tr><td><a href="#SWS_PM_00017">SWS_PM_00017</a></td><td>Termination after timeout</td><td>4.1.2</td></tr>
+  <tr><td><a href="#SWS_PM_00020">SWS_PM_00020</a></td><td>Running report</td><td>4.2.1</td></tr>
+  <tr><td><a href="#SWS_PM_00021">SWS_PM_00021</a></td><td>Unexpected reports</td><td>4.2.1</td></tr>
+  <tr><td><a href="#SWS_PM_00024">SWS_PM_00024</a></td><td>Restart limit</td><td>4.2.2</td></tr>
+  <tr><td><a href="#SWS_PM_00025">SWS_PM_00025</a></td><td>Dependents of a restarted process</td><td>4.2.2</td></tr>
+  <!--v1.1--><tr><td><a href="#SWS_PM_00026">SWS_PM_00026</a></td><td>Restart back-off</td><td>4.2.2</td></tr><!--/v1.1-->
+  <tr><td><a href="#SWS_PM_00030">SWS_PM_00030</a></td><td>Termination signal</td><td>4.3.1</td></tr>
+  <tr><td><a href="#SWS_PM_00031">SWS_PM_00031</a></td><td>Grace period</td><td>4.3.1</td></tr>
+  <tr><td><a href="#SWS_PM_00033">SWS_PM_00033</a></td><td>Kill after grace period</td><td>4.3.2</td></tr>
+  <tr><td><a href="#SWS_PM_00034">SWS_PM_00034</a></td><td>Orphaned children</td><td>4.3.2</td></tr>
+  <tr><td><a href="#SWS_PM_00040">SWS_PM_00040</a></td><td>One group per process</td><td>5.1</td></tr>
+  <tr><td><a href="#SWS_PM_00041">SWS_PM_00041</a></td><td>Removal</td><td>5.1</td></tr>
+  <tr><td><a href="#SWS_PM_00043">SWS_PM_00043</a></td><td>Memory limit</td><td>5.2</td></tr>
+  <tr><td><a href="#SWS_PM_00046">SWS_PM_00046</a></td><td>Real-time budget</td><td>5.3</td></tr>
+  <tr><td><a href="#SWS_PM_00050">SWS_PM_00050</a></td><td>Alive check</td><td>6.1</td></tr>
+  <tr><td><a href="#SWS_PM_00051">SWS_PM_00051</a></td><td>Start of alive supervision</td><td>6.1</td></tr>
+  <tr><td><a href="#SWS_PM_00053">SWS_PM_00053</a></td><td>Deadline check</td><td>6.2</td></tr>
+  <!--v1.1--><tr><td><a href="#SWS_PM_00056">SWS_PM_00056</a></td><td>Logical check</td><td>6.3</td></tr>
+  <tr><td><a href="#SWS_PM_00057">SWS_PM_00057</a></td><td>Graph entry</td><td>6.3</td></tr><!--/v1.1-->
+  <tr><td><a href="#SWS_PM_00059">SWS_PM_00059</a></td><td>Watchdog service</td><td><!--v1.0-->6.3<!--/v1.0--><!--v1.1-->6.4<!--/v1.1--></td></tr>
+  <tr><td><a href="#SWS_PM_00062">SWS_PM_00062</a></td><td>Error reporting</td><td>7.1</td></tr>
+  <tr><td><a href="#SWS_PM_00070">SWS_PM_00070</a></td><td>Constructor without channel</td><td>8.3</td></tr>
+  <tr><td><a href="#SWS_PM_00071">SWS_PM_00071</a></td><td>Non-blocking reports</td><td>8.3</td></tr>
+  <tr><td><a href="#SWS_PM_00072">SWS_PM_00072</a></td><td>Time stamps</td><td>8.3</td></tr>
+  <tr><td><a href="#SWS_PM_00075">SWS_PM_00075</a></td><td>Concurrent requests</td><td>8.4</td></tr>
+  <tr><td><a href="#SWS_PM_00080">SWS_PM_00080</a></td><td>Unknown parameters</td><td>9.1</td></tr>
+  <tr><td><a href="#SWS_PM_00081">SWS_PM_00081</a></td><td>Reloading</td><td>9.1</td></tr>
+  <tr><td><a href="#SWS_PM_00083">SWS_PM_00083</a></td><td>Unique names</td><td>9.2</td></tr>
+</table>
+<div class="caption">Table 10: Requirements and their sections</div>
+
+</section>
+</body>
+</html>

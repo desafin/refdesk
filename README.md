@@ -1,140 +1,259 @@
 # refdesk
 
-소프트웨어 기술문서 PDF 를 여러 개 띄워 놓고 읽는 Linux 데스크톱 뷰어.
+[한국어](README.ko.md)
 
-## 현재 상태
+A Linux desktop viewer for reading several large technical PDF documents side by side: specifications,
+reference manuals, standards. Written in Rust with MuPDF and egui.
 
-개발 초기다. 작업 공간 뼈대만 있고, 지금 실행하면 제목이 "refdesk" 인 빈 창이 뜬다.
+<img src="docs/images/overview.png" width="900" alt="refdesk with the file explorer, the outline and two documents side by side">
 
-## 대상 환경
+## Why
 
-Ubuntu 26.04, GNOME, Wayland 한 종류만 지원한다. 다른 OS, 배포판, X11 은 고려하지 않는다.
+Working with software specifications means reading several long documents at once: a requirement
+points to a section in another chapter, which refers to a second document, and the next release of
+the same document changes a few sentences somewhere in 400 pages. A general-purpose PDF viewer
+handles one document at a time well. refdesk is built for the other case:
 
-## 빌드와 실행
+- many documents open in tabs and splits, in one or more windows, restored as you left them;
+- following cross-references without losing your place;
+- searching all open documents at once;
+- comparing two versions of a document;
+- looking up an English word or sentence without leaving the page.
 
-Rust 1.95 가 필요하다(`rust-toolchain.toml` 이 지정한다). 시스템 개발 패키지는 따로 필요하지 않다.
+## Features
+
+The pictures show the demo documents in [`assets/demo/`](assets/demo/): a fictional
+"Example Platform" specification in two versions and a second document it refers to.
+
+### Documents side by side
+
+Open a folder and its PDFs appear in the explorer on the left; click a file to preview it, double-click
+to keep it open. Tabs can be split left/right or up/down (`Ctrl+\`, `Ctrl+Shift+\`, or drag a tab to the
+edge of a pane) and moved to their own window. The outline below the explorer follows the page you
+are reading, and the section path above the page (`4 Process lifecycle › 4.1 Startup › 4.1.2 Startup
+timeout`) takes you to any of those sections. On restart, windows, tabs and reading positions come back.
+
+### Link previews
+
+<img src="docs/images/link-preview.png" width="900" alt="A link preview under the pointer and a pinned preview">
+
+Rest the pointer on an internal link and the target appears in a popup, with its page and section, so
+you can read a referenced requirement or table without jumping. The pin keeps a preview open: pinned
+previews can be moved, resized and scrolled, and "Go there" jumps to the target. When you do follow a
+link, `Alt+←` brings you back to the exact spot.
+
+### Find in all open documents
+
+<img src="docs/images/find-all.png" width="900" alt="Search results grouped by document in the sidebar, matches highlighted on the page">
+
+`Ctrl+Shift+F` searches every open document as you type. Results are grouped by document, with the
+page label and the surrounding text; click one to go there. All matches stay highlighted in every view
+until you clear the search, and `F4` / `Shift+F4` step through the results across documents.
+`Ctrl+F` searches the current document only. Both remember earlier searches (`↑` / `↓` in the field).
+
+### Comparing two versions
+
+<img src="docs/images/compare.png" width="900" alt="Two versions side by side with changes marked and the change list on the right">
+
+Compare two PDFs (`refdesk --diff old.pdf new.pdf`, "Compare with Current Document" in the explorer's
+context menu, or "Compare Documents…" in the command palette). The comparison works on the text, so a paragraph added at the
+start does not make every later page "different". Both sides scroll together; removed text is marked
+on the left, added text on the right, changed words in both. The change list groups changes by
+section; `F7` / `Shift+F7` move between them. Repeated headers, footers and page numbers are ignored.
+
+### Translation popups
+
+<img src="docs/images/translate-word.png" width="900" alt="A popup with the meaning of the word under the pointer and the translation of its sentence">
+
+<img src="docs/images/translate-selection.png" width="900" alt="A popup with the translation of the selected sentences">
+
+With translation mode on (`F2`), resting the pointer on a word shows its meaning in context and the
+translation of its sentence; selecting text shows the translation of the selection. The translation
+comes from a model on your machine (Ollama by default, see [Translation](#translation)); the text does
+not leave the server you configure. The default target language is Korean.
+
+### Highlights and bookmarks
+
+<img src="docs/images/marks.png" width="900" alt="Two highlights in different colours and the Marks view in the sidebar">
+
+Select text and press `Ctrl+H`, or pick a colour from the context menu, to highlight it. `Ctrl+D`
+bookmarks the current place under the current section's title. The "Marks" view in the sidebar lists
+bookmarks and highlights for this document or all documents, filtered by colour or text. Marks are
+stored by refdesk; the PDF files are not modified.
+
+### Thumbnails and dark pages
+
+<img src="docs/images/pages-dark.png" width="900" alt="Page thumbnails in the sidebar and pages shown in dark colours">
+
+The "Pages" view shows thumbnails of the current document. `Ctrl+I` switches the pages to dark
+colours: the lightness is inverted but hues are kept, so red stays red and diagrams remain readable.
+The interface theme (light, dark, follow the system) is in View ▸ Theme.
+
+### Projects
+
+<img src="docs/images/projects.png" width="900" alt="The start screen with recent projects and a project in the explorer">
+
+A project is a folder that collects the PDFs for one piece of work. File ▸ New Project… creates one
+(by default under `~/Documents/refdesk/`); File ▸ Import PDFs… (`Ctrl+Shift+I`) and File ▸ Import from
+Folder… copy PDFs into it, leaving the originals where they are. The explorer can create folders,
+rename, and delete; deleted files go to the project's trash and can be restored. Recent projects are
+on the start screen.
+
+### Command palette
+
+<img src="docs/images/command-palette.png" width="900" alt="The command palette filtered by &quot;find&quot;">
+
+`Ctrl+Shift+P` lists every command with its shortcut; `Ctrl+P` jumps to an open tab, a recent document
+or a file in the open folder by name.
+
+## Install
+
+### Release packages
+
+Download from [Releases](https://github.com/desafin/refdesk/releases):
+
+- `refdesk_<version>_amd64.deb` — for Ubuntu and Debian:
+  `sudo apt install ./refdesk_<version>_amd64.deb`
+- `refdesk-<version>-x86_64-linux.tar.gz` — unpack it and run the `refdesk` program inside.
+
+### From source
+
+You need Rust (the version is pinned in `rust-toolchain.toml`; `rustup` installs it) and, because
+MuPDF is compiled during the build, a C compiler and libclang (on Ubuntu:
+`sudo apt install build-essential libclang-dev`).
 
 ```sh
-cargo build -p refdesk        # 빌드
-cargo run -p refdesk          # 실행(창이 뜬다)
-scripts/check.sh              # fmt, clippy, test
+cargo build --release -p refdesk
+./target/release/refdesk file.pdf
+scripts/install.sh        # optional: binary to ~/.local/bin, desktop entry and icon
 ```
 
-## 프로젝트
+`scripts/install.sh --set-default` also makes refdesk the default PDF viewer.
 
-PDF 를 프로젝트 단위로 모아 둔다. 프로젝트는 `refdesk-project.toml` 이 있는 폴더이고, 가져온 PDF 는 그 안에 **복사**된다(원본은 그대로).
+## Usage
 
-- **만들기**: 파일 ▸ 새 프로젝트… — 이름을 치면 위치가 `~/Documents/refdesk/이름` 으로 따라온다. PDF 가 든 기존 폴더를 고르면 그 PDF 들이 프로젝트의 문서가 된다.
-- **열기**: 파일 ▸ 프로젝트 열기…, 시작 화면의 "최근 프로젝트", 또는 프로젝트 폴더를 "폴더 열기"·명령줄(`refdesk ~/Documents/refdesk/이름`)로 연다. 다시 시작하면 마지막 프로젝트가 열린다.
-- **가져오기**: 파일 ▸ PDF 가져오기…(Ctrl+Shift+I, 여러 개를 한 번에 고를 수 있다), 파일 ▸ 폴더에서 가져오기…(폴더 아래 PDF 를 목록에서 골라 가져온다), 탐색기 머리글의 `+`, 탐색기 폴더의 우클릭 "여기로 가져오기…", 파일 관리자에서 복사한 파일을 Ctrl+V. 같은 내용의 파일은 건너뛰고, 이름만 같으면 교체 / 둘 다 보관 / 건너뛰기를 묻는다. 가져오는 동안 상태 표시줄에 진행이 보이고 취소할 수 있다.
-- **정리**: 탐색기 우클릭의 새 폴더, 이름 바꾸기, 프로젝트에서 지우기. 지운 것은 프로젝트 안 `.refdesk/trash/` 로 옮겨지고 파일 ▸ 프로젝트 휴지통 보기에서 되살린다.
+```
+refdesk [folder] [file[#page=N]]...     open a folder and/or files
+refdesk --find text [folder] [file...]  open, then search all open documents
+refdesk --diff old.pdf new.pdf          compare two files
+refdesk --translate "text"              translate with the configured model and exit
+```
 
-## 번역 (로컬 AI 모델)
+If refdesk is already running, files open as tabs in the running window.
 
-영어 글을 이 머신에서 도는 모델에 물어 한국어로 본다. 문서의 글은 설정한 서버 밖으로 나가지 않는다.
+### Keyboard shortcuts
 
-- **번역 모드**(F2, 보기 ▸ 번역 모드, 상태 표시줄의 "번역" 단추): 켜 두면 단어 위에 포인터를 0.5초 올렸을 때
-  그 단어의 뜻과 그 단어가 든 문장의 번역이 팝업으로 뜨고, 글을 끌어 선택하고 놓으면 선택한 글의 번역이 뜬다.
-  켠 상태는 다시 시작해도 기억한다. 켤 때 모델을 미리 올린다(상태 표시줄에 "모델 준비 중…").
-- **선택한 글 번역**(Shift+F2, 편집 메뉴, 우클릭 메뉴 "번역"): 번역 모드가 꺼져 있어도 지금 선택을 한 번 번역한다.
-- 팝업: 포인터가 단어와 팝업을 벗어나거나 스크롤·클릭·키를 누르면 닫힌다(팝업 위로 옮기면 남는다).
-  선택 번역의 팝업은 선택이 풀리거나 Esc, "닫기" 까지 남는다. "복사" 는 번역을 클립보드에 넣는다.
-  2,000자가 넘는 선택은 앞부분만 번역한다.
-- 같은 글은 다시 묻지 않는다(`~/.local/state/refdesk/translations.json`, 최근 5,000개).
-- 명령줄에서 설정과 모델을 점검한다: `refdesk --translate "The watchdog supervises each process."`
+| Keys | Command |
+|---|---|
+| `Ctrl+O` / `Ctrl+Shift+O` | Open file / open folder |
+| `Ctrl+P` / `Ctrl+Shift+P` | Quick open / command palette |
+| `Ctrl+F`, `F3` / `Shift+F3` | Find in document, next / previous |
+| `Ctrl+Shift+F`, `F4` / `Shift+F4` | Find in all documents, next / previous result |
+| `Alt+←` / `Alt+→` | Back / forward |
+| `Ctrl+G` | Go to page |
+| `F` / `Shift+F` | Link hints: follow a visible link by typing its letters (in a new tab with `Shift`) |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in / out / actual size |
+| `Z` / `Shift+Z` | Zoom to a dragged area / previous zoom |
+| `Ctrl+I` | Toggle page colours (dark pages) |
+| `F9` / `Ctrl+Shift+E` | Toggle the sidebar / show the explorer |
+| `Ctrl+C` / `Ctrl+Shift+L` | Copy / copy the location (`file.pdf#page=N`) |
+| `Ctrl+Shift+C` | Capture an area of the page as an image |
+| `Ctrl+H` / `Ctrl+D` | Highlight selection / add bookmark |
+| `m` + letter / `'` + letter | Set a mark / go to a mark (capital letters work across documents) |
+| `F2` / `Shift+F2` | Translation mode / translate the selection |
+| `F7` / `Shift+F7` / `F8` | Next / previous change / change list (comparison) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+\` / `Ctrl+Shift+\` / `F6` | Split right / split down / focus the next pane |
+| `Ctrl+W` / `Ctrl+Shift+T` | Close tab / reopen closed tab |
+| `Ctrl+Shift+N` / `Ctrl+Alt+N` / `Ctrl+Shift+W` | New window / move tab to a new window / close window |
+| `Ctrl+Shift+I` | Import PDFs into the project |
+| `Ctrl+Q` | Quit |
 
-### 서버와 모델
+Every command is also in the menus and the command palette.
 
-설정은 `~/.config/refdesk/config.toml` 의 `[translate]` 다. 주소는 `http://` 만 받는다(로컬 서버용).
-**다른 머신의 주소를 넣으면 번역할 글이 그 머신으로 간다.**
+## Translation
 
-Ollama(기본):
+refdesk asks a language model running on your machine. Settings are in the `[translate]` table of
+`~/.config/refdesk/config.toml`. Only `http://` addresses are accepted, as the feature is meant for
+local servers. **If you enter the address of another machine, the text to translate is sent there.**
+
+- **Translation mode** (`F2`, View ▸ Translation Mode, or the "Translate" button in the status bar):
+  rest the pointer on a word for half a second to see its meaning and the translation of its sentence;
+  select text to translate the selection. The mode is remembered. Turning it on loads the model.
+- **Translate selection** (`Shift+F2`, or "Translate" in the context menu) works with the mode off.
+- Popups close when the pointer leaves the word and the popup, or on scroll, click or key press. A
+  selection's popup stays until the selection is cleared, `Esc` or "Close". "Copy" copies the translation.
+  Selections longer than 2,000 characters are translated up to that length.
+- Translations are cached (`~/.local/state/refdesk/translations.json`, the latest 5,000).
+- `refdesk --translate "The watchdog supervises each process."` checks the setup from the command line.
+
+### Ollama (default)
 
 ```toml
 [translate]
-backend = "ollama"                  # 기본값
-endpoint = "http://127.0.0.1:11434" # 기본값
-model = "translategemma:4b"         # 기본값. 먼저 `ollama pull translategemma:4b`
-target = "ko"
-keep_alive_minutes = 30             # 마지막 요청 뒤 모델을 메모리에 두는 시간(Ollama 만)
-word_with_sentence = true           # 단어 팝업에 문장 번역도 보인다
+backend = "ollama"                  # default
+endpoint = "http://127.0.0.1:11434" # default
+model = "translategemma:4b"         # default; first run `ollama pull translategemma:4b`
+target = "ko"                       # target language code
+keep_alive_minutes = 30             # how long Ollama keeps the model loaded after the last request
+word_with_sentence = true           # the word popup also translates the sentence
 ```
 
-OpenAI 호환 서버(llama.cpp 의 `llama-server`, LM Studio, vLLM 등):
+### OpenAI-compatible servers
+
+For llama.cpp's `llama-server`, LM Studio, vLLM and similar:
 
 ```sh
-llama-server -m 모델.gguf --port 8080
+llama-server -m model.gguf --port 8080
 ```
 
 ```toml
 [translate]
 backend = "openai"
-endpoint = "http://127.0.0.1:8080"  # openai 의 기본값
-model = "모델 이름"                   # 서버의 /v1/models 에 나오는 이름
+endpoint = "http://127.0.0.1:8080"  # default for this backend
+model = "model name"                # as listed by the server's /v1/models
 ```
 
-모델 바꾸기: **보기 ▸ 번역 모델** 에 서버가 가진 모델이 뜬다. 고르면 바로 바뀌고 다시 시작해도 기억한다
-(`~/.local/state/refdesk/prefs.json`). "설정 파일의 모델로" 는 앱에서 고른 것을 지우고 `config.toml` 의 `model` 로 돌아간다.
-모델이 바뀌면 예전 모델의 번역 기억은 쓰지 않는다.
+View ▸ Translation Model lists the models the server offers. A model picked there is used at once and
+remembered; "Use the Model of the Settings File" goes back to `model` in `config.toml`. When the server
+cannot be reached or the model is missing, the status bar says so; hover it for the reason and a fix.
 
-서버에 닿지 않거나 모델이 없으면 상태 표시줄에 "사용 불가" 가 뜨고, 그 위에 포인터를 올리면 이유와 해결 방법
-(`ollama pull 모델` 등)이 보인다.
+### Without a server (built-in engine)
 
-**백그라운드 번역**(보기 ▸ 백그라운드 번역, 프로젝트에서만): 켜 두면 프로젝트의 문서를 문장 단위로 미리 번역해
-프로젝트 안(`.refdesk/translations/`)에 저장한다. 지금 보는 쪽 주변부터, 열린 문서, 나머지 문서 순서로 하고, 직접 띄운
-번역 팝업이 언제나 먼저다. 끌어 선택한 문장들이 모두 미리 번역돼 있으면 기다림 없이 그 번역이 뜬다("미리 번역됨").
-상태 표시줄의 "번역 준비 37%" 를 누르면 일시 정지·재개한다. 배터리로 쓰는 동안에는 멈춘다(`[translate]
-pretranslate_on_battery = true` 로 바꾼다). 모델을 바꾸면 그 모델로 처음부터 다시 하고, "미리 번역한 것 지우기" 로 지운다.
-문서 하나에 1,000쪽이면 몇 시간이 걸린다 — 끄거나 앱을 닫아도 끝난 쪽은 남고 다음에 이어 간다.
-
-### 서버 없이 쓰기(내장 엔진)
-
-Ollama 같은 서버 없이 앱이 llama.cpp 로 GGUF 모델 파일을 직접 읽어 번역한다(`backend = "embedded"`).
-선택 빌드 기능이라 기본 빌드(`cargo build`)에는 들어 있지 않다. 기능 없이 빌드한 실행 파일에서 `embedded` 를 고르면
-"이 실행 파일에는 내장 번역 엔진이 들어 있지 않습니다" 가 뜬다.
-
-필요한 패키지(빌드할 때): `cmake`, `libclang-dev`, C++ 컴파일러, 그리고 GPU(Vulkan)용으로 `glslc`, `libvulkan-dev`, `spirv-headers`.
+refdesk can run a GGUF model itself through llama.cpp (`backend = "embedded"`). This is an optional
+build feature and not part of the default build:
 
 ```sh
 sudo apt install cmake libclang-dev glslc libvulkan-dev spirv-headers
-cargo build --release -p refdesk --features embedded-vulkan   # GPU(Vulkan). 실행 파일 +40MB 정도, libvulkan.so.1 필요
-cargo build --release -p refdesk --features embedded          # CPU 만. 실행 파일 +6MB 정도
+cargo build --release -p refdesk --features embedded-vulkan   # GPU through Vulkan, about +40 MB
+cargo build --release -p refdesk --features embedded          # CPU only, about +6 MB
 ```
 
-`embedded-cuda` 도 있으나 정적 cuBLAS 때문에 실행 파일이 0.7 ~ 1GB 가 된다. 속도는 Vulkan 과 같으므로(이 머신에서 잰 값) Vulkan 을 권한다.
-
-모델 파일: Ollama 가 받아 둔 모델 파일은 llama.cpp 가 읽지 못하므로 따로 받는다. 예를 들어 Hugging Face 의
-[`mradermacher/translategemma-4b-it-GGUF`](https://huggingface.co/mradermacher/translategemma-4b-it-GGUF) 의
-`translategemma-4b-it.Q4_K_M.gguf`(2.5GB, 약관 Gemma Terms of Use). 받은 파일은 모델 폴더
-`~/.local/share/refdesk/models/`(`$XDG_DATA_HOME/refdesk/models`)에 둔다. **보기 ▸ 번역 모델** 에 그 폴더의 `.gguf` 파일이 뜬다.
+Put a `.gguf` file in `~/.local/share/refdesk/models/` (Ollama's model files cannot be used); for
+example `translategemma-4b-it.Q4_K_M.gguf` from
+[mradermacher/translategemma-4b-it-GGUF](https://huggingface.co/mradermacher/translategemma-4b-it-GGUF)
+(2.5 GB, Gemma Terms of Use). View ▸ Translation Model lists the files in that folder.
 
 ```toml
 [translate]
 backend = "embedded"
-# models_dir = "/다른/폴더"           # 기본은 ~/.local/share/refdesk/models
-# model = "translategemma-4b-it.Q4_K_M" # 폴더 안의 파일 이름(.gguf 생략 가능) 또는 절대 경로.
-#                                       # 폴더에 없는 이름(기본값 translategemma:4b 등)이면 이름순 첫 .gguf 를 쓴다
-gpu_layers = "all"                    # GPU 에 올릴 층 수. 0 이면 CPU 만
-threads = 0                           # CPU 스레드. 0 = 논리 코어의 절반(최대 16)
-context_tokens = 4096                 # 프롬프트와 답을 합친 길이(토큰)
-keep_alive_minutes = 30               # 마지막 요청 뒤 이 시간이 지나면 모델을 내린다
+# models_dir = "/other/folder"          # default ~/.local/share/refdesk/models
+# model = "translategemma-4b-it.Q4_K_M" # a file in that folder (.gguf optional) or an absolute path
+gpu_layers = "all"                      # layers on the GPU; 0 = CPU only
+threads = 0                             # CPU threads; 0 = half the logical cores (at most 16)
+context_tokens = 4096                   # prompt plus answer, in tokens
+keep_alive_minutes = 30                 # unload the model after this long without requests
 ```
 
-이 머신(RTX 4070 Laptop)에서 모델 읽기 0.7초, 한 줄 번역 0.35 ~ 0.6초로 Ollama 와 같다. CPU 만으로는 한 줄에 2 ~ 3초.
-드라이버의 셰이더 캐시가 비어 있으면(처음 실행, 드라이버 갱신 뒤) Vulkan 은 첫 번역 전에 5 ~ 10초를 더 쓴다 —
-번역 모드를 켤 때 모델 준비에서 치른다. 내장 GPU 만 있으면 `"all"` 이어도 CPU 로 돈다(그쪽이 빠르다).
+While loaded, the model takes GPU memory (about 3.3 GB for the model above); it is released when
+translation mode is turned off, another model is picked, or after `keep_alive_minutes`. The engine runs
+inside the refdesk process, so a llama.cpp crash (for example out of GPU memory) closes refdesk; use
+the `ollama` or `openai` backend if you need isolation.
 
-알려진 점:
+### Custom prompts
 
-- 모델을 올려 둔 동안 앱이 GPU 메모리를 직접 잡는다(이 모델은 약 3.3GB). 번역 모드를 끄거나 다른 모델을 고르면,
-  또는 `keep_alive_minutes` 동안 요청이 없으면 내려 놓는다.
-- 엔진이 같은 프로세스 안에서 돈다. llama.cpp 가 죽으면(GPU 메모리 부족 등) 앱도 같이 죽는다.
-  격리가 필요하면 `ollama` 나 `openai`(`llama-server`) 백엔드를 쓴다.
-
-### 지시문 직접 정하기
-
-모델 이름이 `translategemma` 로 시작하면 그 모델의 정해진 틀을, 아니면 일반 지시문(식별자·숫자·단위는 그대로 두라는)을 쓴다.
-다른 모델에 맞춰 바꾸려면:
+Models whose name starts with `translategemma` get that model's prompt format; others get a general
+instruction that keeps identifiers, numbers and units unchanged. To use your own:
 
 ```toml
 [translate]
@@ -142,29 +261,60 @@ passage_prompt = "Translate into {target}. Keep identifiers as they are. Output 
 word_prompt = "Sentence: {sentence}\n\nWhat does '{word}' mean here? Answer with one or two {target} words."
 ```
 
-자리 표시: `{text}`(구절), `{word}`·`{sentence}`(단어와 그 문장), `{target}`(대상 언어 이름, 예: Korean).
-구절 틀에 `{text}` 가, 단어 틀에 `{word}` 가 없으면 경고를 남기고 내장 지시문을 쓴다.
+Placeholders: `{text}` (passage), `{word}` and `{sentence}`, `{target}` (language name, e.g. Korean).
 
-## 문서
+## Settings file
 
-| 파일 | 내용 |
-|---|---|
-| `docs/SPEC.md` | 무엇을 만드는가. 요구사항과 우선순위 |
-| `docs/ARCHITECTURE.md` | 구조, 모듈 간 계약, 불변 규칙 |
-| `docs/PLAN.md` | 작업 패키지와 완료 조건 |
-| `docs/REFERENCES.md` | 참고한 소스에서 볼 곳 |
+`~/.config/refdesk/config.toml` is yours to edit; refdesk never rewrites it. Values chosen in the menus
+(theme, scroll speed, translation model) are kept in `~/.local/state/refdesk/prefs.json` and take
+precedence. A wrong value falls back to its default and is logged.
 
-## 라이선스
+```toml
+theme = "system"           # "system", "light" or "dark"
+language = "auto"          # interface language: "auto", "en" or "ko"
+restore_session = true     # reopen the last windows and tabs at start
+default_zoom = "fit-width" # "fit-width", "fit-page" or a percentage such as 125
+texture_cache_mb = 2048    # memory for rendered pages
+scroll_speed = 2.5         # 0.25 to 10
 
-AGPL-3.0-or-later. PDF 엔진으로 쓰는 MuPDF 가 AGPL-3.0 이라 이 프로젝트도 같은 라이선스를 따른다.
-전문은 `LICENSE` 에 있다.
+[capture]
+scale = 2.0                # area captures are rendered at this multiple of the screen scale
+always_save = false        # also save every capture as PNG
+# dir = "/some/folder"     # default ~/Pictures/refdesk
 
-## 참고한 프로젝트
+[translate]
+# see Translation above
+```
 
-아래 프로젝트의 설계와 구현 방식을 참고했다. 그 소스는 이 저장소에 포함하지 않는다
-(`scripts/clone-references.sh` 로 로컬에 따로 받아 읽는다). 자세한 내용은 `docs/REFERENCES.md` 에 있다.
+Session, document history, search history, marks and the translation cache are under
+`~/.local/state/refdesk/`.
 
-뷰어
+## Limitations
+
+- Linux only. It has been used and checked on Ubuntu with GNOME on Wayland; other desktops and X11
+  are not tested regularly (the screenshots above were taken on a virtual X11 display).
+- Dragging files from the file manager into the window is not supported on Wayland; use File ▸ Open,
+  the explorer, or the project import commands.
+- Shortcuts cannot be changed yet.
+- Highlights are stored as positions on the page; if a document's content changes, they are not
+  moved to follow the text.
+- The comparison is text based: changes inside pictures are not detected.
+- Printing and editing the PDF itself (annotations, forms) are not supported.
+
+## License
+
+AGPL-3.0-or-later. refdesk uses MuPDF, which is licensed under the AGPL-3.0, so refdesk is released
+under the same license. The full text is in [`LICENSE`](LICENSE).
+
+The demo documents in `assets/demo/` are fictional and were written for this project.
+
+## Acknowledgements
+
+The design and implementation took ideas from the projects below. Their sources are not part of this
+repository (`scripts/clone-references.sh` fetches them for local reading); see
+[`docs/REFERENCES.md`](docs/REFERENCES.md).
+
+Viewers
 
 - sioyek — GPL-3.0
 - okular — GPL-2.0+
@@ -175,9 +325,9 @@ AGPL-3.0-or-later. PDF 엔진으로 쓰는 MuPDF 가 AGPL-3.0 이라 이 프로�
 - tdf — AGPL-3.0
 - zotero-reader — AGPL-3.0
 
-엔진과 바인딩
+Engines and bindings
 
-- mupdf, mupdf-rs — AGPL-3.0 (채택)
+- mupdf, mupdf-rs — AGPL-3.0 (used)
 - pdfium, pdfium-render — BSD-3/Apache-2.0, MIT/Apache-2.0
 - poppler — GPL-2/3
 - hayro — MIT/Apache-2.0
@@ -186,13 +336,13 @@ AGPL-3.0-or-later. PDF 엔진으로 쓰는 MuPDF 가 AGPL-3.0 이라 이 프로�
 
 UI
 
-- egui — MIT OR Apache-2.0 (채택)
-- egui_dock — MIT (채택)
-- egui_tiles — MIT OR Apache-2.0 (대안)
-- iced — MIT (대안)
-- gpui-component — Apache-2.0 (대안)
+- egui — MIT OR Apache-2.0 (used)
+- egui_dock — MIT (used)
+- egui_tiles — MIT OR Apache-2.0
+- iced — MIT
+- gpui-component — Apache-2.0
 
-Diff
+Comparison
 
 - pdf-diff-joshdata — CC0-1.0
 - diff-pdf — GPL-2.0
@@ -200,6 +350,6 @@ Diff
 - pdfcompare — Apache-2.0
 - pdf-diff-serhack — MIT
 - diff-pdf-visually — MIT OR Apache-2.0
-- similar — Apache-2.0 (채택)
+- similar — Apache-2.0 (used)
 - imara-diff — Apache-2.0
 - diff-match-patch — Apache-2.0

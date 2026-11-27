@@ -1,0 +1,177 @@
+/* Print style shared by the demo specifications. Rendered by headless Chrome (see build.py). */
+
+@page {
+  size: A4;
+  margin: 22mm 20mm 20mm 20mm;
+}
+
+@page front {
+  @bottom-center {
+    content: counter(page, lower-roman);
+    font: 8.5pt "DejaVu Sans", sans-serif;
+    color: #555;
+  }
+}
+
+@page cover {
+  margin: 0;
+}
+
+/* build.py adds the text of the top and bottom boxes and the `body-num` counter style, which
+   numbers the first body page 1. */
+@page main {
+  @top-left {
+    font: 8.5pt "DejaVu Sans", sans-serif;
+    color: #555;
+    border-bottom: 0.5pt solid #999;
+    vertical-align: bottom;
+    padding-bottom: 2mm;
+  }
+  @top-right {
+    font: 8.5pt "DejaVu Sans", sans-serif;
+    color: #555;
+    border-bottom: 0.5pt solid #999;
+    vertical-align: bottom;
+    padding-bottom: 2mm;
+  }
+  @bottom-left {
+    font: 8.5pt "DejaVu Sans", sans-serif;
+    color: #555;
+  }
+  @bottom-right {
+    content: "Page " counter(page, body-num);
+    font: 8.5pt "DejaVu Sans", sans-serif;
+    color: #555;
+  }
+}
+
+html {
+  font-family: "DejaVu Serif", serif;
+  font-size: 10pt;
+  line-height: 1.42;
+  color: #111;
+}
+
+body {
+  margin: 0;
+}
+
+.cover {
+  page: cover;
+  height: 297mm;
+  box-sizing: border-box;
+  padding: 55mm 25mm 25mm 25mm;
+  background: linear-gradient(180deg, #1f3b57 0, #1f3b57 92mm, #ffffff 92mm);
+  font-family: "DejaVu Sans", sans-serif;
+  position: relative;
+}
+.cover .platform { color: #bcd3e8; font-size: 13pt; letter-spacing: 0.08em; text-transform: uppercase; }
+.cover .title { color: #fff; font-size: 26pt; font-weight: bold; margin-top: 6mm; line-height: 1.15; }
+.cover table.meta { margin-top: 40mm; border-collapse: collapse; font-size: 10.5pt; }
+.cover table.meta td { padding: 1.6mm 6mm 1.6mm 0; border: none; }
+.cover table.meta td:first-child { color: #555; }
+.cover .notice {
+  position: absolute; left: 25mm; right: 25mm; bottom: 25mm;
+  font-size: 8.5pt; color: #555; border-top: 0.5pt solid #999; padding-top: 3mm;
+}
+
+.front { page: front; }
+.front-page { break-before: page; }
+.front .plain { font-family: "DejaVu Sans", sans-serif; font-size: 14pt; font-weight: bold; color: #1f3b57; margin: 0 0 4mm 0; }
+
+.main { page: main; }
+
+h1, h2, h3, h4 {
+  font-family: "DejaVu Sans", sans-serif;
+  color: #1f3b57;
+  break-after: avoid;
+}
+h1 { font-size: 16pt; margin: 0 0 4mm 0; break-before: page; }
+h2 { font-size: 12.5pt; margin: 7mm 0 2.5mm 0; }
+h3 { font-size: 11pt; margin: 5mm 0 2mm 0; }
+h4 { font-size: 10pt; margin: 4mm 0 1.5mm 0; }
+
+p { margin: 0 0 2.6mm 0; text-align: justify; hyphens: auto; }
+
+a { color: #1a5aa6; text-decoration: none; }
+
+.req {
+  border-left: 2.2pt solid #1f3b57;
+  background: #f1f5f9;
+  padding: 2mm 3mm 2mm 3.5mm;
+  margin: 3mm 0 3.5mm 0;
+  break-inside: avoid;
+}
+.req .rid { font-family: "DejaVu Sans Mono", monospace; font-size: 9pt; font-weight: bold; color: #1f3b57; }
+.req .rtitle { font-family: "DejaVu Sans", sans-serif; font-weight: bold; }
+.req .trace { font-family: "DejaVu Sans", sans-serif; font-size: 8.5pt; color: #444; margin-top: 1.2mm; }
+.req p { margin-bottom: 1mm; }
+
+.note {
+  border: 0.5pt solid #b9c4cf;
+  padding: 2mm 3mm;
+  margin: 3mm 0;
+  font-size: 9.5pt;
+  break-inside: avoid;
+}
+.note b:first-child { font-family: "DejaVu Sans", sans-serif; }
+
+table.grid {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 2mm 0 1.5mm 0;
+  font-size: 9pt;
+  break-inside: avoid;
+}
+table.grid th, table.grid td {
+  border: 0.5pt solid #8a99a8;
+  padding: 1.2mm 2mm;
+  vertical-align: top;
+  text-align: left;
+}
+table.grid th { background: #dfe7ef; font-family: "DejaVu Sans", sans-serif; }
+table.grid td.num { text-align: right; white-space: nowrap; }
+table.grid code { font-size: 8.5pt; }
+.caption {
+  font-family: "DejaVu Sans", sans-serif;
+  font-size: 9pt;
+  text-align: center;
+  margin: 1.5mm 0 4mm 0;
+  color: #333;
+}
+
+code, pre { font-family: "DejaVu Sans Mono", monospace; }
+code { font-size: 9pt; }
+pre {
+  font-size: 8.4pt;
+  line-height: 1.35;
+  background: #f6f7f8;
+  border: 0.5pt solid #ccd3da;
+  padding: 2.5mm 3mm;
+  margin: 2mm 0 3.5mm 0;
+  white-space: pre-wrap;
+  break-inside: avoid;
+}
+pre .c { color: #5a6b7a; }
+pre .k { color: #7a2a8c; }
+pre .t { color: #1a5aa6; }
+pre .s { color: #2a7a3a; }
+
+figure { margin: 4mm 0; break-inside: avoid; text-align: center; }
+figure svg { width: 100%; height: auto; }
+
+dl.terms dt { font-family: "DejaVu Sans", sans-serif; font-weight: bold; margin-top: 2mm; }
+dl.terms dd { margin: 0.5mm 0 0 8mm; }
+
+ul, ol { margin: 0 0 2.6mm 0; padding-left: 7mm; }
+li { margin-bottom: 1mm; }
+
+/* Table of contents, filled in by build.py. */
+.toc { font-family: "DejaVu Sans", sans-serif; font-size: 9.6pt; }
+.toc a { color: #111; display: flex; }
+.toc .l1 { font-weight: bold; margin-top: 2.2mm; }
+.toc .l2 { padding-left: 7mm; margin-top: 0.6mm; }
+.toc .l3 { padding-left: 15mm; margin-top: 0.4mm; font-size: 9.2pt; }
+.toc .t { flex: 0 1 auto; }
+.toc .dots { flex: 1 1 auto; border-bottom: 0.6pt dotted #777; margin: 0 1.5mm 1.1mm 1.5mm; }
+.toc .p { flex: 0 0 auto; }

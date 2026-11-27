@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Example Platform — Watchdog Interface Specification {{VERSION}}</title>
+<!--STYLE-->
+</head>
+<body>
+
+<section class="cover">
+  <div class="platform">Example Platform</div>
+  <div class="title">Watchdog Interface<br>Specification</div>
+  <table class="meta">
+    <tr><td>Document ID</td><td>EP-SWS-WDG</td></tr>
+    <tr><td>Version</td><td>{{VERSION}}</td></tr>
+    <tr><td>Date</td><td>{{DATE}}</td></tr>
+    <tr><td>Status</td><td>Released</td></tr>
+    <tr><td>Classification</td><td>Public</td></tr>
+  </table>
+  <div class="notice">
+    This is a fictional specification written to demonstrate the refdesk PDF viewer. The
+    Example Platform, its components and its requirements do not exist. Any resemblance to a
+    real product or standard is coincidental.
+  </div>
+</section>
+
+<section class="front">
+  <div class="front-page">
+    <div class="plain">Revision history</div>
+    <table class="grid">
+      <tr><th style="width:14%">Version</th><th style="width:18%">Date</th><th>Changes</th></tr>
+      <tr><td>1.0</td><td>2026-01-15</td><td>First release.</td></tr>
+    </table>
+    <div class="plain" style="margin-top:9mm">Contents</div>
+    <!--TOC-->
+  </div>
+</section>
+
+<section class="main">
+
+<h1 id="sec-1">1 Introduction</h1>
+<p>This document specifies the software interface to the hardware watchdog of the Example
+Platform. The watchdog is a timer outside the main processor. If it is not triggered before its
+timeout expires, it resets the machine. The Process Manager [EP-SWS-PM] is the only intended user
+of the interface: it triggers the watchdog as long as the supervised application processes behave
+correctly.</p>
+<p>The interface hides the differences between the watchdog devices of the supported boards.
+Applications never access the device directly.</p>
+
+<h2 id="sec-1-1">1.1 Related documents</h2>
+<table class="grid">
+  <tr><th style="width:18%">Reference</th><th>Title</th><th style="width:14%">Version</th></tr>
+  <tr><td>[EP-SWS-PM]</td><td>Example Platform — Process Manager Specification</td><td>1.0</td></tr>
+  <tr><td>[EP-OVR]</td><td>Example Platform — Overview</td><td>2.0</td></tr>
+</table>
+<div class="caption">Table 1: Related documents</div>
+
+<h2 id="sec-1-2">1.2 Acronyms</h2>
+<table class="grid">
+  <tr><th style="width:18%">Acronym</th><th>Meaning</th></tr>
+  <tr><td>PM</td><td>Process Manager</td></tr>
+  <tr><td>WDG</td><td>Watchdog</td></tr>
+  <tr><td>WDT</td><td>Watchdog timer, the hardware device</td></tr>
+</table>
+<div class="caption">Table 2: Acronyms</div>
+
+<h1 id="sec-2">2 Interface</h1>
+
+<h2 id="sec-2-1">2.1 WatchdogClient</h2>
+<p>The interface is a single class in <code>&lt;ep/wdg/client.h&gt;</code>. Opening the client arms
+the watchdog; from then on it must be triggered within the timeout.</p>
+<pre><span class="k">namespace</span> ep::wdg {
+
+<span class="k">class</span> <span class="t">WatchdogClient</span> {
+<span class="k">public</span>:
+    <span class="c">// Opens the watchdog device and arms it. Fails if it is already open.</span>
+    <span class="k">static</span> std::optional&lt;<span class="t">WatchdogClient</span>&gt; Open();
+
+    <span class="c">// The timeout of the device. Constant while the client is open.</span>
+    std::chrono::milliseconds GetTimeout() <span class="k">const</span>;
+
+    <span class="c">// Restarts the timer of the device.</span>
+    <span class="t">void</span> Trigger();
+
+    <span class="c">// The reason of the last reset: power-on, watchdog or software.</span>
+    <span class="t">ResetReason</span> GetLastResetReason() <span class="k">const</span>;
+};
+
+}  <span class="c">// namespace ep::wdg</span></pre>
+
+<h2 id="sec-2-2">2.2 Requirements</h2>
+<div class="req" id="SWS_WDG_00001">
+  <p><span class="rid">[SWS_WDG_00001]</span> <span class="rtitle">Exclusive access</span></p>
+  <p><code>WatchdogClient::Open</code> <b>shall</b> fail if another client is open on the machine.</p>
+  <div class="trace">Derived from: EP-OVR-0120</div>
+</div>
+<div class="req" id="SWS_WDG_00002">
+  <p><span class="rid">[SWS_WDG_00002]</span> <span class="rtitle">No disarming</span></p>
+  <p>Once armed, the watchdog <b>shall not</b> be disarmed by software. Closing the client or
+  ending the process that holds it <b>shall</b> leave the watchdog running.</p>
+  <div class="trace">Derived from: EP-OVR-0121</div>
+</div>
+<div class="req" id="SWS_WDG_00003">
+  <p><span class="rid">[SWS_WDG_00003]</span> <span class="rtitle">Trigger cost</span></p>
+  <p><code>WatchdogClient::Trigger</code> <b>shall</b> return within 50 µs and <b>shall not</b>
+  allocate memory.</p>
+  <div class="trace">Derived from: EP-OVR-0122</div>
+</div>
+<div class="req" id="SWS_WDG_00004">
+  <p><span class="rid">[SWS_WDG_00004]</span> <span class="rtitle">Trigger interval</span></p>
+  <p>The user of the interface <b>shall</b> trigger the watchdog at least three times per timeout.
+  The Process Manager does this as required by SWS_PM_00059 of [EP-SWS-PM].</p>
+  <div class="trace">Derived from: EP-OVR-0123</div>
+</div>
+
+<h1 id="sec-3">3 Timing</h1>
+<p>The timeout is fixed per board and cannot be changed at run time. The values below include the
+tolerance of the watchdog oscillator; the effective timeout may be up to the stated tolerance
+shorter than the nominal value, so the trigger interval must be computed from the minimum.</p>
+<table class="grid">
+  <tr><th>Board</th><th style="width:20%">Nominal timeout</th><th style="width:16%">Tolerance</th><th style="width:20%">Minimum timeout</th></tr>
+  <tr><td>EP-Board A (development)</td><td class="num">1000 ms</td><td class="num">±10 %</td><td class="num">900 ms</td></tr>
+  <tr><td>EP-Board B</td><td class="num">500 ms</td><td class="num">±5 %</td><td class="num">475 ms</td></tr>
+  <tr><td>EP-Board C</td><td class="num">250 ms</td><td class="num">±5 %</td><td class="num">238 ms</td></tr>
+</table>
+<div class="caption">Table 3: Watchdog timeouts by board</div>
+<div class="req" id="SWS_WDG_00006">
+  <p><span class="rid">[SWS_WDG_00006]</span> <span class="rtitle">Reported timeout</span></p>
+  <p><code>WatchdogClient::GetTimeout</code> <b>shall</b> return the minimum timeout of the board,
+  not the nominal one.</p>
+  <div class="trace">Derived from: EP-OVR-0124</div>
+</div>
+<div class="note"><b>Note:</b> With a minimum timeout of 238 ms the Process Manager triggers the
+watchdog about every 79 ms. Its deadline supervision checks (section 6.2 of [EP-SWS-PM]) run in the
+same loop and must finish well within that time.</div>
+
+<h1 id="sec-4">4 Reset reasons</h1>
+<p>After a reset the platform reads the reset reason from the device once and keeps it until the
+next reset. A reset by the watchdog is logged at error level by the Process Manager when it
+starts.</p>
+<table class="grid">
+  <tr><th style="width:26%">Value</th><th>Meaning</th></tr>
+  <tr><td><code>kPowerOn</code></td><td>The machine was switched on.</td></tr>
+  <tr><td><code>kWatchdog</code></td><td>The watchdog expired.</td></tr>
+  <tr><td><code>kSoftware</code></td><td>Software requested a reset.</td></tr>
+  <tr><td><code>kUnknown</code></td><td>The device does not report a reason.</td></tr>
+</table>
+<div class="caption">Table 4: Reset reasons</div>
+<div class="req" id="SWS_WDG_00008">
+  <p><span class="rid">[SWS_WDG_00008]</span> <span class="rtitle">Reason after watchdog reset</span></p>
+  <p><code>GetLastResetReason</code> <b>shall</b> return <code>kWatchdog</code> after a reset caused
+  by the watchdog, also when the reset happened while the device was being opened.</p>
+  <div class="trace">Derived from: EP-OVR-0125</div>
+</div>
+
+</section>
+</body>
+</html>
