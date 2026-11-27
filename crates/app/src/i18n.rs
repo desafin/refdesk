@@ -826,6 +826,17 @@ pub const TABLE: &[Row] = &[
         "프로젝트 휴지통 보기",
         "Show Project Trash",
     ),
+    (
+        "cmd.file.rename_project",
+        "프로젝트 이름 바꾸기…",
+        "Rename Project…",
+    ),
+    (
+        "project.rename.title",
+        "프로젝트 이름 바꾸기",
+        "Rename Project",
+    ),
+    ("project.rename.ok", "바꾸기", "Rename"),
     ("explorer.import_button", "PDF 가져오기", "Import PDFs"),
     (
         "explorer.import_tip",
@@ -1066,11 +1077,6 @@ pub const TABLE: &[Row] = &[
         "project.error.io",
         "파일을 다루지 못했습니다: {}",
         "File operation failed: {}",
-    ),
-    (
-        "project.folder_made",
-        "폴더를 만들었습니다(PDF 를 넣으면 탐색기에 보입니다): {}",
-        "Folder made (it shows in the explorer once it has a PDF): {}",
     ),
     ("project.restored", "되살렸습니다: {}", "Restored: {}"),
     (

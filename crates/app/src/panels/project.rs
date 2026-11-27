@@ -72,6 +72,11 @@ impl ProjectInfo {
     }
 }
 
+/// Whether `root` is a project folder (one look at the disk).
+pub fn is_project_folder(root: &Path) -> bool {
+    core_project::is_project(root)
+}
+
 /// The root and name of the open project, if the workspace is one.
 pub fn open_project(state: &AppState) -> Option<(&Path, &ProjectInfo)> {
     let ws = state.workspace.as_ref()?;
@@ -325,6 +330,12 @@ pub enum ProjectAction {
     Restore(String),
     /// Delete everything in the trash.
     EmptyTrash,
+    /// Show the dialog that renames the open project.
+    RenameProjectDialog,
+    /// Close that dialog.
+    CloseRenameProject,
+    /// Rename the open project (not its folder).
+    RenameProject(String),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1109,6 +1120,8 @@ pub struct ProjectApp {
     pub confirm_trash: Option<PathBuf>,
     /// The trash dialog's list, while it is open.
     pub trash: Option<Vec<TrashEntry>>,
+    /// The name field of "Rename Project…" and why the last name was refused, while it is open.
+    pub rename_project: Option<(String, Option<String>)>,
     /// After an import of several files: the first one, to be chosen in the explorer once the
     /// scan has it.
     select_after: Option<PathBuf>,
@@ -1378,11 +1391,8 @@ pub fn dispatch(state: &mut AppState, action: ProjectAction, ctx: &egui::Context
                 return;
             };
             match core_project::create_folder(root, &rel) {
-                Ok(_) => notice(
-                    state,
-                    tr("project.folder_made").replace("{}", &path_text(&rel)),
-                    ctx,
-                ),
+                // The project's scan lists empty folders: the new one is chosen once it is in.
+                Ok(path) => state.project.select_after = Some(path),
                 Err(e) => notice(state, error_text(&e), ctx),
             }
             crate::panels::explorer::refresh(state);
@@ -1411,6 +1421,13 @@ pub fn dispatch(state: &mut AppState, action: ProjectAction, ctx: &egui::Context
             crate::panels::explorer::refresh(state);
             reload_trash(state);
         }
+        ProjectAction::RenameProjectDialog => {
+            if let Some((_, info)) = open_project(state) {
+                state.project.rename_project = Some((info.name.clone(), None));
+            }
+        }
+        ProjectAction::CloseRenameProject => state.project.rename_project = None,
+        ProjectAction::RenameProject(name) => rename_project(state, &name),
         ProjectAction::EmptyTrash => {
             if let Some((root, _)) = open_project(state)
                 && let Err(e) = core_project::empty_trash(root)
@@ -1435,6 +1452,32 @@ fn error_text(e: &ProjectError) -> String {
             tr("project.error.path").replace("{}", &path(p))
         }
         ProjectError::Io { .. } => tr("project.error.io").replace("{}", &e.to_string()),
+    }
+}
+
+/// Renames the open project: the project file, the workspace's name (header, window title) and
+/// the recent projects. A refused name stays in the dialog with the reason.
+fn rename_project(state: &mut AppState, name: &str) {
+    let Some((root, _)) = open_project(state) else {
+        return;
+    };
+    let root = root.to_path_buf();
+    let result = Project::open(&root).and_then(|mut p| p.rename(name).map(|()| p));
+    match result {
+        Ok(project) => {
+            if let Some(info) = state.workspace.as_mut().and_then(|w| w.project.as_mut()) {
+                info.name = project.name().to_owned();
+                info.warning = None;
+            }
+            state.project.rename_project = None;
+            crate::session::record_folder(state, &root);
+        }
+        Err(e) => {
+            let text = error_text(&e);
+            if let Some((_, error)) = &mut state.project.rename_project {
+                *error = Some(text);
+            }
+        }
     }
 }
 
@@ -1712,6 +1755,37 @@ pub fn show_dialogs(ctx: &egui::Context, state: &mut AppState, queue: &mut Vec<A
     picker_dialog(ctx, state, queue);
     details_dialog(ctx, state, queue);
     trash_dialogs(ctx, state, queue);
+    rename_project_dialog(ctx, state, queue);
+}
+
+fn rename_project_dialog(ctx: &egui::Context, state: &mut AppState, queue: &mut Vec<Action>) {
+    let Some((text, error)) = &mut state.project.rename_project else {
+        return;
+    };
+    let mut open = true;
+    dialog_window(tr("project.rename.title"))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(tr("project.new.name"));
+                ui.add(egui::TextEdit::singleline(text).desired_width(280.0));
+            });
+            if let Some(error) = error {
+                ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+            }
+            ui.horizontal(|ui| {
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if named_button(ui, tr("project.rename.ok"), true).clicked() || enter {
+                    push(queue, ProjectAction::RenameProject(text.clone()));
+                }
+                if named_button(ui, tr("project.cancel"), true).clicked() {
+                    push(queue, ProjectAction::CloseRenameProject);
+                }
+            });
+        });
+    if !open {
+        push(queue, ProjectAction::CloseRenameProject);
+    }
 }
 
 fn push(queue: &mut Vec<Action>, action: ProjectAction) {
@@ -3315,6 +3389,120 @@ mod tests {
         env.has_file("x.pdf");
     }
 
+    #[test]
+    fn a_new_folder_shows_in_the_explorer_at_once_and_is_chosen() {
+        let mut env = Env::new("new-folder");
+        env.open_project("proj", "P");
+        env.project(ProjectAction::NewFolder {
+            rel: PathBuf::from("drafts/deep"),
+        });
+        env.has_file("drafts/deep");
+        let index = index_of(&env.state).expect("index");
+        let deep = index.find(Path::new("drafts/deep")).expect("deep");
+        env.settle("the selection", |s| {
+            s.windows[0].explorer.cursor() == Some(deep)
+        });
+        assert_eq!(index.file_count(), 0, "folders are not counted as files");
+        assert!(env.state.status_notice.is_none());
+        assert_eq!(import_target(&env.state), PathBuf::from("drafts/deep"));
+
+        // A plain folder still lists only the folders that hold PDFs.
+        let plain = env.dir.join("plain");
+        write(&plain.join("a.pdf"), &pdf("a"));
+        std::fs::create_dir_all(plain.join("empty")).expect("dir");
+        env.run(Action::OpenFolder(plain));
+        env.settle("the plain scan", |s| index_of(s).is_some());
+        let index = index_of(&env.state).expect("index");
+        assert!(index.find(Path::new("empty")).is_none());
+        assert_eq!(index.entries.len(), 1);
+    }
+
+    #[test]
+    fn importing_here_on_an_empty_folder_row_fills_it() {
+        let mut env = Env::new("import-empty");
+        let root = env.open_project("proj", "P");
+        env.project(ProjectAction::NewFolder {
+            rel: PathBuf::from("drafts"),
+        });
+        env.has_file("drafts");
+        let index = index_of(&env.state).expect("index");
+        let idx = index.find(Path::new("drafts")).expect("drafts");
+        let m = crate::panels::explorer::MenuContext {
+            on: MenuOn::Folder,
+            idx: Some(idx),
+            path: index.abs_path(idx),
+            rel: PathBuf::from("drafts"),
+            expanded: false,
+            filtering: false,
+            pick: None,
+            current: None,
+            window: crate::state::WindowId::MAIN,
+        };
+        let effect = menu_entries_for(MenuOn::Folder, true)
+            .find(|e| (e.name)(&m) == "explorer.menu.import_here")
+            .and_then(|e| (e.effect)(&m));
+        let Some(crate::panels::explorer::MenuEffect::Queue(action)) = effect else {
+            panic!("no import entry: {effect:?}");
+        };
+        assert_eq!(
+            action,
+            Action::Project(ProjectAction::ImportDialog {
+                into: PathBuf::from("drafts")
+            })
+        );
+        let x = env.dir.join("x.pdf");
+        write(&x, &pdf("x"));
+        *env.chooser.pdfs.lock().expect("lock") = vec![x];
+        env.run(action);
+        env.settle("the import to start", |s| {
+            s.project.import.is_some() || s.project.summary.is_some()
+        });
+        env.import_done();
+        assert!(root.join("drafts/x.pdf").is_file());
+        env.has_file("drafts/x.pdf");
+    }
+
+    #[test]
+    fn renaming_the_project_changes_its_name_everywhere_but_not_its_folder() {
+        let mut env = Env::new("rename-project");
+        let rename = crate::commands::command("file.rename_project").expect("command");
+        assert!(!(rename.enabled)(&env.state));
+        let root = env.open_project("proj", "Old Name");
+        let action = rename.run(&env.state).expect("enabled");
+        env.run(action);
+        assert_eq!(
+            env.state.project.rename_project,
+            Some(("Old Name".to_owned(), None))
+        );
+        env.project(ProjectAction::RenameProject("   ".into()));
+        assert!(
+            env.state
+                .project
+                .rename_project
+                .as_ref()
+                .is_some_and(|(_, e)| e.is_some())
+        );
+        env.project(ProjectAction::RenameProject("New Name".into()));
+        assert!(env.state.project.rename_project.is_none());
+        assert_eq!(Project::open(&root).expect("open").name(), "New Name");
+        assert!(root.is_dir());
+        let ws = env.state.workspace.as_ref().expect("workspace");
+        assert_eq!(ws.root, root);
+        assert_eq!(header_title(Some(&WorkspaceView::of(ws))).0, "New Name");
+        assert_eq!(
+            crate::windows::window_title(&env.state, 0),
+            tr("window.title").replace("{title}", "New Name")
+        );
+        let page = crate::session::start_page(&mut env.state, &env.ctx);
+        assert_eq!(
+            page.recent_projects
+                .iter()
+                .map(|p| (p.name.clone(), p.path.clone()))
+                .collect::<Vec<_>>(),
+            vec![("New Name".to_owned(), root)]
+        );
+    }
+
     // --- drawing and the accessibility tree ----------------------------------------------------
 
     fn button_labels(env: &mut Env) -> Vec<String> {
@@ -3415,6 +3603,7 @@ mod tests {
         });
         env.project(ProjectAction::ShowTrash);
         env.state.project.prompt = Some(root.clone());
+        env.project(ProjectAction::RenameProjectDialog);
         // A new egui window is measured, unseen, in its first frame.
         button_labels(&mut env);
         let labels = button_labels(&mut env);
@@ -3438,6 +3627,7 @@ mod tests {
             tr("project.trash.empty_button").to_owned(),
             tr("project.prompt.make").to_owned(),
             tr("project.prompt.folder").to_owned(),
+            tr("project.rename.ok").to_owned(),
         ] {
             assert!(labels.contains(&want), "{want}: {labels:?}");
         }

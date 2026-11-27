@@ -271,7 +271,18 @@ pub fn show(
         explorer_open,
         |ui| explorer::header_buttons(ui, view.as_ref(), &mut window.explorer, queue),
     );
-    if clicked {
+    // A project's header renames the project (WP-91).
+    if view.as_ref().is_some_and(|v| v.project.is_some()) {
+        clicked.context_menu(|ui| {
+            if ui.button(tr("cmd.file.rename_project")).clicked() {
+                queue.push(Action::Project(
+                    crate::panels::project::ProjectAction::RenameProjectDialog,
+                ));
+                ui.close();
+            }
+        });
+    }
+    if clicked.clicked() {
         queue.push(Action::ToggleSidebarSection {
             window: window_id,
             section: SidebarSection::Explorer,
@@ -324,7 +335,7 @@ pub fn show(
         outline_open,
         |ui| outline_buttons(ui, tabs, docs, focus_tab),
     );
-    if clicked {
+    if clicked.clicked() {
         queue.push(Action::ToggleSidebarSection {
             window: window_id,
             section: SidebarSection::Outline,
@@ -406,7 +417,7 @@ fn body_ui(ui: &mut Ui, rect: Rect, salt: &str) -> Ui {
     body
 }
 
-/// Draws a section header into `rect` and returns whether it was clicked (folding the section
+/// Draws a section header into `rect` and returns its response (folding the section on a click
 /// is the caller's job). `buttons` draws the small buttons, right to left from the right edge;
 /// they take their clicks before the header does.
 fn header(
@@ -417,7 +428,7 @@ fn header(
     tooltip: Option<&str>,
     open: bool,
     buttons: impl FnOnce(&mut Ui),
-) -> bool {
+) -> egui::Response {
     let response = ui.interact(
         rect,
         ui.make_persistent_id(("sidebar_header", salt)),
@@ -456,11 +467,10 @@ fn header(
     ui.painter()
         .galley(pos, galley, visuals.strong_text_color());
 
-    let response = match tooltip {
+    match tooltip {
         Some(text) => response.on_hover_text(text),
         None => response,
-    };
-    response.clicked()
+    }
 }
 
 /// The buttons of the table of contents header: fold every entry of the focused document.

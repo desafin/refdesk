@@ -365,6 +365,15 @@ pub static COMMANDS: &[Command] = &[
         action: |_| Some(Action::Project(ProjectAction::ShowTrash)),
     },
     Command {
+        id: "file.rename_project",
+        name_key: "cmd.file.rename_project",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: project::has_project,
+        action: |_| Some(Action::Project(ProjectAction::RenameProjectDialog)),
+    },
+    Command {
         id: "tab.close",
         name_key: "cmd.tab.close",
         menu: MenuGroup::File,

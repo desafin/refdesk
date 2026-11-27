@@ -14,9 +14,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use refdesk_core::workspace::scan;
+use refdesk_core::workspace::{scan, scan_with};
 use refdesk_core::{
-    EntryKind, Notifier, ScanLimits, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher, natural_cmp,
+    EntryKind, Notifier, ScanLimits, ScanOptions, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher,
+    natural_cmp,
 };
 
 /// Deadline for anything a background thread does.
@@ -65,6 +66,97 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 
 // ---------------------------------------------------------------------------------------------
 // scan
+
+const KEEP_EMPTY: ScanOptions = ScanOptions {
+    keep_empty_dirs: true,
+};
+
+fn run_scan_keeping_empty(root: &Path) -> WorkspaceIndex {
+    scan_with(
+        root,
+        &ScanLimits::default(),
+        KEEP_EMPTY,
+        &AtomicBool::new(false),
+    )
+    .unwrap()
+}
+
+#[test]
+fn scan_keeping_empty_folders_lists_them_in_their_place() {
+    let dir = tempfile::tempdir().unwrap();
+    touch_all(dir.path(), &["a.pdf", "docs/b.pdf", "docs/notes.txt"]);
+    fs::create_dir_all(dir.path().join("drafts")).unwrap();
+    fs::create_dir_all(dir.path().join("docs/empty")).unwrap();
+    let index = run_scan_keeping_empty(dir.path());
+    assert_eq!(
+        listing(&index),
+        ["docs/", "docs/empty/", "docs/b.pdf", "drafts/", "a.pdf"]
+    );
+    // Only PDFs count as files.
+    assert_eq!(index.file_count(), 2);
+    assert_eq!(index.dir_count(), 3);
+    assert!(index.find(Path::new("drafts")).is_some());
+    assert!(!index.has_children(index.find(Path::new("drafts")).unwrap()));
+}
+
+#[test]
+fn scan_keeping_empty_folders_keeps_a_deep_branch_without_pdfs() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("a/b/c/d")).unwrap();
+    touch(&dir.path().join("a/b/readme.txt"));
+    let index = run_scan_keeping_empty(dir.path());
+    assert_eq!(listing(&index), ["a/", "a/b/", "a/b/c/", "a/b/c/d/"]);
+    assert_eq!(index.file_count(), 0);
+    let d = index.find(Path::new("a/b/c/d")).unwrap();
+    assert_eq!(index.entry(d).unwrap().depth, 3);
+    assert_eq!(index.ancestors(d).len(), 3);
+}
+
+#[test]
+fn scan_keeping_empty_folders_still_leaves_out_hidden_names() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".refdesk/trash/1-0")).unwrap();
+    fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+    fs::create_dir_all(dir.path().join("shown/.inner")).unwrap();
+    touch(&dir.path().join("shown/.x.pdf"));
+    let index = run_scan_keeping_empty(dir.path());
+    assert_eq!(listing(&index), ["shown/"]);
+}
+
+#[test]
+fn the_default_scan_still_drops_folders_without_pdfs() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(&dir.path().join("docs/b.pdf"));
+    fs::create_dir_all(dir.path().join("drafts/deeper")).unwrap();
+    assert_eq!(listing(&run_scan(dir.path())), ["docs/", "docs/b.pdf"]);
+    let default = scan_with(
+        dir.path(),
+        &ScanLimits::default(),
+        ScanOptions::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(listing(&default), ["docs/", "docs/b.pdf"]);
+}
+
+#[test]
+fn a_background_scan_can_keep_empty_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("empty")).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    let notifier: Notifier = Arc::new(move || {
+        let _ = tx.lock().unwrap().send(());
+    });
+    let job = WorkspaceScan::start_with(
+        dir.path().to_path_buf(),
+        ScanLimits::default(),
+        KEEP_EMPTY,
+        notifier,
+    );
+    rx.recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(listing(&job.index().unwrap()), ["empty/"]);
+}
 
 #[test]
 fn scan_lists_folders_first_then_files_in_natural_order_before_their_children() {

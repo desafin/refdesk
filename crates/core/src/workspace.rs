@@ -52,8 +52,9 @@ pub struct WorkspaceEntry {
 ///
 /// `entries` is in pre-order: the order of the tree drawn from top to bottom with every folder
 /// expanded. Inside one folder the sub-folders come first, then the files, each by
-/// [`natural_cmp`] of the name. A folder with no PDF file anywhere below it is not in the list,
-/// and neither is anything whose name starts with `.`. The root itself is not an entry.
+/// [`natural_cmp`] of the name. A folder with no PDF file anywhere below it is not in the list
+/// (unless the scan was asked to keep them, [`ScanOptions`]), and neither is anything whose name
+/// starts with `.`. The root itself is not an entry.
 ///
 /// The lookups ([`children`], [`find`], ...) are built when the index is made. Do not change
 /// `entries` afterwards.
@@ -310,6 +311,15 @@ impl Default for ScanLimits {
     }
 }
 
+/// What a scan lists besides PDFs and the folders above them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Folders without any PDF below them are listed too (a project's explorer shows the folders
+    /// the user made before anything is imported into them). Names starting with `.` are still
+    /// left out.
+    pub keep_empty_dirs: bool,
+}
+
 /// One thing found in a folder, before it is put in the index.
 struct Child {
     name: OsString,
@@ -393,6 +403,7 @@ fn interrupted() -> io::Error {
 
 struct Scanner<'a> {
     limits: &'a ScanLimits,
+    keep_empty_dirs: bool,
     max_entries: usize,
     cancel: &'a AtomicBool,
     entries: Vec<WorkspaceEntry>,
@@ -482,7 +493,7 @@ impl Scanner<'_> {
             };
             if has_pdf {
                 found = true;
-            } else {
+            } else if !self.keep_empty_dirs {
                 self.entries.truncate(idx);
             }
         }
@@ -506,6 +517,21 @@ impl Scanner<'_> {
 ///
 /// `root` does not exist or cannot be read, or the scan was cancelled.
 pub fn scan(root: &Path, limits: &ScanLimits, cancel: &AtomicBool) -> io::Result<WorkspaceIndex> {
+    scan_with(root, limits, ScanOptions::default(), cancel)
+}
+
+/// [`scan`] with `options`: with [`ScanOptions::keep_empty_dirs`] a folder without any PDF below
+/// it is listed as well (in the same place a folder with PDFs would be).
+///
+/// # Errors
+///
+/// As [`scan`].
+pub fn scan_with(
+    root: &Path,
+    limits: &ScanLimits,
+    options: ScanOptions,
+    cancel: &AtomicBool,
+) -> io::Result<WorkspaceIndex> {
     if cancel.load(AtomicOrdering::Relaxed) {
         return Err(interrupted());
     }
@@ -513,6 +539,7 @@ pub fn scan(root: &Path, limits: &ScanLimits, cancel: &AtomicBool) -> io::Result
     let listing = list_dir(root)?;
     let mut scanner = Scanner {
         limits,
+        keep_empty_dirs: options.keep_empty_dirs,
         max_entries: limits.max_entries.min(u32::MAX as usize),
         cancel,
         entries: Vec::new(),
@@ -535,6 +562,7 @@ pub fn scan(root: &Path, limits: &ScanLimits, cancel: &AtomicBool) -> io::Result
 struct ScanShared {
     root: PathBuf,
     limits: ScanLimits,
+    options: ScanOptions,
     notifier: Notifier,
     cancel: AtomicBool,
     state: Mutex<ScanState>,
@@ -583,10 +611,21 @@ impl WorkspaceScan {
     /// Starts scanning `root` and returns at once. `notifier` is called each time a scan has
     /// finished, whether it worked or failed (never after the scan was dropped).
     pub fn start(root: PathBuf, limits: ScanLimits, notifier: Notifier) -> WorkspaceScan {
+        WorkspaceScan::start_with(root, limits, ScanOptions::default(), notifier)
+    }
+
+    /// [`WorkspaceScan::start`] with scan options (see [`scan_with`]).
+    pub fn start_with(
+        root: PathBuf,
+        limits: ScanLimits,
+        options: ScanOptions,
+        notifier: Notifier,
+    ) -> WorkspaceScan {
         let scan = WorkspaceScan {
             shared: Arc::new(ScanShared {
                 root,
                 limits,
+                options,
                 notifier,
                 cancel: AtomicBool::new(false),
                 state: Mutex::new(ScanState::default()),
@@ -647,7 +686,7 @@ impl WorkspaceScan {
 fn run_scans(shared: &ScanShared) {
     loop {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            scan(&shared.root, &shared.limits, &shared.cancel)
+            scan_with(&shared.root, &shared.limits, shared.options, &shared.cancel)
         }))
         .unwrap_or_else(|_| Err(io::Error::other("the folder scan failed unexpectedly")));
         if shared.cancelled() {
@@ -909,6 +948,7 @@ mod tests {
             shared: Arc::new(ScanShared {
                 root: dir.path().to_path_buf(),
                 limits: ScanLimits::default(),
+                options: ScanOptions::default(),
                 notifier,
                 cancel: AtomicBool::new(false),
                 state: Mutex::new(ScanState {

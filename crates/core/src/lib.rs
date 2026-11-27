@@ -71,6 +71,6 @@ pub use translate::{
     backend_from_config,
 };
 pub use workspace::{
-    EntryKind, ScanLimits, WorkspaceEntry, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher,
-    natural_cmp,
+    EntryKind, ScanLimits, ScanOptions, WorkspaceEntry, WorkspaceIndex, WorkspaceScan,
+    WorkspaceWatcher, natural_cmp,
 };

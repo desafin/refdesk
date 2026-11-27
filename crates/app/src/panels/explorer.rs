@@ -24,7 +24,9 @@ use egui::{
     EventFilter, FocusDirection, Id, Key, Modifiers, Pos2, Rect, RichText, ScrollArea, Sense,
     StrokeKind, TextEdit, TextStyle, Ui, WidgetInfo,
 };
-use refdesk_core::{EntryKind, ScanLimits, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher};
+use refdesk_core::{
+    EntryKind, ScanLimits, ScanOptions, WorkspaceIndex, WorkspaceScan, WorkspaceWatcher,
+};
 
 use crate::action::{Action, ExplorerOpen, explorer_click, notifier};
 use crate::i18n::tr;
@@ -1284,7 +1286,9 @@ impl WorkspaceView {
 
     /// The index, if it has a file to show.
     fn tree(&self) -> Option<&Arc<WorkspaceIndex>> {
-        self.index.as_ref().filter(|i| i.file_count() > 0)
+        // Without a project the index only has folders that hold PDFs; a project's may hold
+        // empty folders, which are shown too.
+        self.index.as_ref().filter(|i| !i.entries.is_empty())
     }
 
     /// The name shown in the section header: the project's name, else the folder's.
@@ -1303,11 +1307,16 @@ impl WorkspaceView {
 /// watcher, both on their own threads (R-1). The previous workspace is dropped, which cancels its
 /// scan and ends its watcher. Every window's explorer starts over.
 pub fn start_workspace(state: &mut AppState, root: PathBuf, ctx: &egui::Context) {
-    let scan = WorkspaceScan::start(root.clone(), ScanLimits::default(), notifier(ctx));
+    // A project lists its folders without PDFs too: the user made them (WP-91).
+    let project = crate::panels::project::ProjectInfo::read(&root);
+    let options = ScanOptions {
+        keep_empty_dirs: project.is_some(),
+    };
+    let scan =
+        WorkspaceScan::start_with(root.clone(), ScanLimits::default(), options, notifier(ctx));
     let watch = Arc::new(Mutex::new(WatchState::Starting));
     let changed = Arc::new(AtomicBool::new(false));
     start_watcher(&root, &watch, &changed, ctx);
-    let project = crate::panels::project::ProjectInfo::read(&root);
     state.workspace = Some(Workspace {
         root,
         scan,
@@ -1369,10 +1378,14 @@ fn start_watcher(
 /// the workspace only scans it again.
 pub fn open_folder(state: &mut AppState, path: &Path, ctx: &egui::Context) {
     let root = normalize_path(path);
+    // A folder that became a project (or stopped being one) is scanned anew, with the
+    // project's options (WP-91).
+    let same = state.workspace.as_ref().is_some_and(|ws| {
+        ws.root == root && ws.project.is_some() == crate::panels::project::is_project_folder(&root)
+    });
     match &mut state.workspace {
-        Some(ws) if ws.root == root => {
+        Some(ws) if same => {
             ws.scan.rescan();
-            // It may have become a project since it was opened (WP-91).
             ws.project = crate::panels::project::ProjectInfo::read(&root);
         }
         _ => start_workspace(state, root.clone(), ctx),
@@ -1575,7 +1588,7 @@ pub fn show_body(
         return;
     };
     show_edit(ui, explorer, queue);
-    if index.file_count() == 0 {
+    if index.entries.is_empty() {
         match &view.error {
             Some(err) => hint(ui, &tr("explorer.failed").replace("{}", err)),
             None if view.project.is_some() => empty_project(ui, explorer, window, queue),
