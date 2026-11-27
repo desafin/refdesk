@@ -587,6 +587,19 @@ impl TranslationCache { pub fn get(&mut self, identity: &str, req: &TranslateReq
 - 실측(2026-11-26, RTX 4070 Laptop 8GB, `translategemma:4b`, 100% GPU): 모델 올리기 17초, 단어 0.05 ~ 0.1초, 한 줄 0.35 ~ 0.6초, 85 토큰/초.
 - 테스트는 실제 Ollama 를 쓰지 않는다. 테스트가 직접 띄운 가짜 서버(`127.0.0.1:0`)에만 붙는다.
 
+### 4.15 project — 프로젝트 (WP-90, PROJ-1 ~ 5)
+
+- 프로젝트 = 폴더 + 그 안의 `refdesk-project.toml`(`project::PROJECT_FILE`). refdesk 가 만든 자료는 폴더 안의 숨김 폴더 `.refdesk/`(`project::data_dir`)에 둔다 — 작업 폴더 훑기는 `.` 으로 시작하는 이름을 건너뛰므로 탐색기에 보이지 않는다. 어떤 폴더가 프로젝트인지는 `project::is_project(root)` 하나로 판단한다.
+- 프로젝트는 작업 폴더(§4.13)의 한 종류다. 열린 프로젝트 = 프로젝트 파일이 있는 작업 폴더. 탐색기·빠른 열기·세션은 작업 폴더의 것을 그대로 쓴다.
+- 가져오기는 복사다. 같은 내용인지는 `fingerprint_file` 로 본다. 복사는 임시 이름으로 쓴 뒤 이름을 바꾼다(중간에 끊겨도 반쪽 파일이 PDF 로 보이지 않게). 지우기는 `.refdesk/trash/` 로 옮긴다.
+
+### 4.16 pretranslate — 미리 번역해 두기 (WP-92, TR-15 ~ 19)
+
+- 단위는 문장이다. `translate::segment` 가 쪽의 글을 문장 조각(쪽 안의 글자 범위 + 원문)으로 나눈다. 번역할 가치가 없는 조각은 표시해 건너뛴다.
+- 저장: `<프로젝트>/.refdesk/translations/<문서 지문>.<백엔드 identity 의 해시>.json` — 쪽마다 조각들의 (글자 범위, 원문의 해시, 번역). 형식 버전, 원자적 쓰기, 깨지면 버리고 다시 한다(R-8). 켜짐 여부와 일시 정지는 `.refdesk/pretranslate.json`.
+- `PretranslateJob`: 작업 스레드 하나가 조각을 하나씩 `TranslateBackend::translate` 로 보낸다(GPU 는 하나다). 조각 사이마다 취소·일시 정지·"앞에서 번역 중"(사용자가 띄운 팝업의 작업) 표시를 본다 — 앞의 작업이 도는 동안은 다음 조각을 보내지 않는다. 순서는 app 이 주는 우선순위(지금 쪽 주변 → 열린 문서 → 나머지)를 따른다.
+- 팝업은 선택한 글자 범위에 걸친 조각들을 저장소에서 찾아, 모두 있으면 그것을 이어 보이고 없으면 지금처럼 바로 번역한다.
+
 ### 4.12 testutil — 테스트용 PDF
 
 저장소에 외부 PDF 를 넣지 않는다. 내용과 좌표를 아는 PDF 를 테스트 코드에서 만든다.

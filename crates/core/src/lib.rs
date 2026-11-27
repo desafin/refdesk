@@ -14,6 +14,7 @@ pub mod link;
 pub mod model;
 pub mod nav;
 pub mod outline;
+pub mod project;
 pub mod recolor;
 pub mod search;
 pub mod store;
