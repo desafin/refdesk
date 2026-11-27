@@ -39,6 +39,17 @@ pub enum Action {
     OpenFileDialog,
     /// Make this folder the workspace and show it in the explorer (WS-1).
     OpenFolder(PathBuf),
+    /// Copy files and folders into the folder `into` (below the root) of the open project
+    /// (PROJ-2). Every way of importing from outside ends here. Without a project, PDFs open as
+    /// tabs and a single folder becomes the workspace (PROJ-7).
+    ImportIntoProject {
+        /// The files and folders to copy.
+        sources: Vec<PathBuf>,
+        /// The target folder below the project root.
+        into: PathBuf,
+    },
+    /// Projects: dialogs, imports, file management (`panels/project.rs`, WP-91).
+    Project(crate::panels::project::ProjectAction),
     /// Ask for the folder chooser (WS-1).
     OpenFolderDialog,
     /// Close the workspace folder. Open tabs stay.
@@ -413,6 +424,10 @@ pub fn dispatch(state: &mut AppState, action: Action, ctx: &egui::Context) {
             explorer::open_folder(state, &path, ctx);
             show_files_view(state);
         }
+        Action::ImportIntoProject { sources, into } => {
+            crate::panels::project::import_into(state, sources, into, ctx)
+        }
+        Action::Project(action) => crate::panels::project::dispatch(state, action, ctx),
         Action::OpenFolderDialog => {
             state.folder_dialog_requested = true;
             ctx.request_repaint();

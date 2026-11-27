@@ -30,7 +30,7 @@ use crate::i18n::tr;
 use crate::panels::toc::{TOC_WIDTH_RANGE, TocState};
 use crate::state::{AppState, DocId, PdfTab, Tab, TabId, WindowId, WindowState, normalize_path};
 use crate::views::pdf_view::PdfViewUiState;
-use crate::views::start_page::{RecentEntry, StartPage};
+use crate::views::start_page::{RecentEntry, RecentProject, StartPage};
 use crate::windows::dock::DockLayout;
 
 /// How long the state must stay unchanged before it is saved (SES-5).
@@ -153,6 +153,8 @@ pub struct Memory {
     db_dirty: bool,
     /// The start page's list, built once and dropped when `doc_db` changes.
     recent: Option<Arc<Vec<RecentEntry>>>,
+    /// The start page's recent projects, built once and dropped when a folder is opened.
+    recent_projects: Option<Arc<Vec<RecentProject>>>,
 }
 
 impl Default for Memory {
@@ -174,6 +176,7 @@ impl Default for Memory {
             seen_geom: HashMap::new(),
             db_dirty: false,
             recent: None,
+            recent_projects: None,
         }
     }
 }
@@ -493,8 +496,18 @@ fn restore_workspace(state: &mut AppState, saved: Option<&SessionWorkspace>, ctx
 /// Remembers that `root` was opened as the workspace, for the start page's recent folders.
 pub fn record_folder(state: &mut AppState, root: &Path) {
     let now = state.memory.now();
-    state.doc_db.record_folder(root, now);
+    // A project is listed with its name (WP-91).
+    let project = state
+        .workspace
+        .as_ref()
+        .filter(|w| w.root == root)
+        .and_then(|w| w.project.as_ref())
+        .map(|p| p.name.clone());
+    state
+        .doc_db
+        .record_project_folder(root, project.as_deref(), now);
     state.memory.db_dirty = true;
+    state.memory.recent_projects = None;
 }
 
 /// Creates the tab for one saved tab; `None` for kinds that are not restored.
@@ -903,6 +916,32 @@ pub fn recent_entries(state: &mut AppState) -> Arc<Vec<RecentEntry>> {
     list
 }
 
+/// The recent folders that were projects, newest first, with whether each still exists (looked
+/// at once, when the list is built).
+pub fn recent_projects(state: &mut AppState) -> Arc<Vec<RecentProject>> {
+    if let Some(list) = &state.memory.recent_projects {
+        return Arc::clone(list);
+    }
+    let list: Arc<Vec<RecentProject>> = Arc::new(
+        state
+            .doc_db
+            .recent_folders(usize::MAX)
+            .into_iter()
+            .filter_map(|f| {
+                let name = f.project.clone()?;
+                Some(RecentProject {
+                    exists: refdesk_core::project::is_project(&f.path),
+                    path: f.path.clone(),
+                    name,
+                })
+            })
+            .take(RECENT_FOLDER_COUNT)
+            .collect(),
+    );
+    state.memory.recent_projects = Some(Arc::clone(&list));
+    list
+}
+
 /// Everything the start page shows.
 pub fn start_page(state: &mut AppState, ctx: &egui::Context) -> StartPage {
     let shortcuts = START_PAGE_COMMANDS
@@ -919,8 +958,10 @@ pub fn start_page(state: &mut AppState, ctx: &egui::Context) -> StartPage {
             .doc_db
             .recent_folders(RECENT_FOLDER_COUNT)
             .into_iter()
+            .filter(|f| f.project.is_none())
             .map(|f| f.path.clone())
             .collect(),
+        recent_projects: recent_projects(state),
         shortcuts,
         now: state.memory.now(),
     }

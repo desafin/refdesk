@@ -120,6 +120,8 @@ impl eframe::App for RefdeskApp {
         poll_folder_dialog(&mut self.folder_dialog, &mut self.state.actions);
         // WP-71: the workspace watcher saw a change; scan again.
         explorer::poll_workspace(&self.state);
+        // WP-91: chooser and clipboard results, the running import, the folder picker.
+        crate::panels::project::tick(&mut self.state, ctx);
         if poll_remote_requests(&self.remote, &mut self.state.actions) {
             bring_to_front(ctx);
         }

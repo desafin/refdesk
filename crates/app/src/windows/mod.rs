@@ -120,6 +120,8 @@ fn draw_window(
         if !*keys_taken {
             *keys_taken = true;
             queue.extend(commands::handle_shortcuts(&ctx, state));
+            // Ctrl+V outside a text field imports the clipboard's files (WP-91).
+            queue.extend(crate::panels::project::take_paste(&ctx, state));
         }
     }
     Panel::top(Id::unique(("menu_bar", id))).show(ui, |ui| menu_bar(ui, state, index, queue));
@@ -152,9 +154,18 @@ pub fn window_title(state: &AppState, index: usize) -> String {
         .get(index)
         .and_then(|w| w.dock.focused_tab())
         .filter(|t| !matches!(state.tabs.get(*t), Some(Tab::Start) | None));
-    match active {
-        Some(tab) => tr("window.title").replace("{title}", &tab_title(state, tab)),
-        None => APP_ID.to_owned(),
+    // The main window names the open project (WP-91).
+    let project = (index == 0)
+        .then(|| crate::panels::project::open_project(state))
+        .flatten()
+        .map(|(_, p)| p.name.clone());
+    match (active, project) {
+        (Some(tab), Some(project)) => tr("window.title_project")
+            .replace("{title}", &tab_title(state, tab))
+            .replace("{project}", &project),
+        (None, Some(project)) => tr("window.title").replace("{title}", &project),
+        (Some(tab), None) => tr("window.title").replace("{title}", &tab_title(state, tab)),
+        (None, None) => APP_ID.to_owned(),
     }
 }
 
@@ -300,6 +311,10 @@ pub fn show_window(
             state.diff_dialog = None;
         }
     }
+    // The project dialogs show in the window that has the focus too (WP-91).
+    if window_index == state.focused_window_index() {
+        crate::panels::project::show_dialogs(ui.ctx(), state, queue);
+    }
 
     // Everything the tab bars and menus show is worked out before the window's layout is
     // borrowed for drawing.
@@ -321,6 +336,7 @@ pub fn show_window(
         status_bar::show(ui, state, window_focus, queue);
     });
     show_status_notice(ui, state, bar.response.rect);
+    crate::panels::project::show_status(ui, state, bar.response.rect, queue);
 
     if toc_open {
         // The sidebar: the explorer above, the contents of this window's focused tab below

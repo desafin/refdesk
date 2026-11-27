@@ -329,6 +329,8 @@ pub struct Workspace {
     pub watch: Arc<Mutex<WatchState>>,
     /// Set by the watcher when the folder changed; the app scans again and clears it.
     pub changed: Arc<AtomicBool>,
+    /// The project, when the folder has a project file (WP-91, PROJ-4).
+    pub project: Option<crate::panels::project::ProjectInfo>,
 }
 
 impl Workspace {
@@ -430,6 +432,8 @@ pub struct AppState {
     pub memory: Memory,
     /// Bookmarks, marks and highlights (`annotations.json`, WP-74). Only `dispatch` changes them.
     pub marks: crate::panels::marks::MarksApp,
+    /// Projects: dialogs, the running import and its queue (WP-91). Only `dispatch` changes it.
+    pub project: crate::panels::project::ProjectApp,
     next_window: u64,
 }
 
@@ -475,6 +479,7 @@ impl AppState {
             translate: TranslateApp::default(),
             memory: Memory::default(),
             marks: crate::panels::marks::MarksApp::default(),
+            project: crate::panels::project::ProjectApp::default(),
             next_window: 1,
         }
     }

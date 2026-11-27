@@ -11,6 +11,7 @@ use refdesk_core::{ItemKind, ZoomMode};
 use crate::action::Action;
 use crate::overlays::palette::PaletteMode;
 use crate::panels::marks::MarksAction;
+use crate::panels::project::{self, ProjectAction};
 use crate::panels::sidebar::SidebarSection;
 use crate::state::{AppState, PdfTab, Tab, TabId};
 use crate::windows::dock::SplitDir;
@@ -300,6 +301,68 @@ pub static COMMANDS: &[Command] = &[
         aliases: &[],
         enabled: has_workspace,
         action: |_| Some(Action::CloseFolder),
+    },
+    Command {
+        id: "file.new_project",
+        name_key: "cmd.file.new_project",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::Project(ProjectAction::NewDialog)),
+    },
+    Command {
+        id: "file.open_project",
+        name_key: "cmd.file.open_project",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::Project(ProjectAction::OpenDialog)),
+    },
+    Command {
+        id: "file.import",
+        name_key: "cmd.file.import",
+        menu: MenuGroup::File,
+        shortcut: Some(KeyboardShortcut::new(CTRL_SHIFT, Key::I)),
+        aliases: &[],
+        enabled: project::has_project,
+        action: |s| {
+            Some(Action::Project(ProjectAction::ImportDialog {
+                into: project::import_target(s),
+            }))
+        },
+    },
+    Command {
+        id: "file.import_folder",
+        name_key: "cmd.file.import_folder",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: project::has_project,
+        action: |s| {
+            Some(Action::Project(ProjectAction::ImportFolderDialog {
+                into: project::import_target(s),
+            }))
+        },
+    },
+    Command {
+        id: "file.import_paste",
+        name_key: "cmd.file.import_paste",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: always,
+        action: |_| Some(Action::Project(ProjectAction::Paste { text: None })),
+    },
+    Command {
+        id: "file.project_trash",
+        name_key: "cmd.file.project_trash",
+        menu: MenuGroup::File,
+        shortcut: None,
+        aliases: &[],
+        enabled: project::has_project,
+        action: |_| Some(Action::Project(ProjectAction::ShowTrash)),
     },
     Command {
         id: "tab.close",

@@ -28,6 +28,7 @@ use refdesk_core::{EntryKind, ScanLimits, WorkspaceIndex, WorkspaceScan, Workspa
 
 use crate::action::{Action, ExplorerOpen, explorer_click, notifier};
 use crate::i18n::tr;
+use crate::panels::project::{self, ProjectAction};
 use crate::panels::toc::{Fold, match_ranges, scroll_target, title_job, triangle};
 use crate::session;
 use crate::state::{AppState, WatchState, WindowId, Workspace, normalize_path};
@@ -40,6 +41,8 @@ const MAX_INDENT_DEPTH: u16 = 16;
 pub const ONE_LINE_BODY_H: f32 = 28.0;
 /// Height of the body when it shows an error and a button.
 const TWO_LINE_BODY_H: f32 = 52.0;
+/// The height of the body of a project without documents: a line, a button and a hint.
+const EMPTY_PROJECT_BODY_H: f32 = 96.0;
 
 // ---------------------------------------------------------------------------------------------
 // Pure logic
@@ -436,6 +439,8 @@ pub enum MenuEffect {
     Copy(String),
     /// Show a folder in the file manager.
     Reveal(PathBuf),
+    /// Start typing a name in the explorer (new folder, rename).
+    Edit(InlineEdit),
 }
 
 /// One entry of the explorer's right-click menu. Like `commands::TAB_MENU` it is a table that
@@ -621,6 +626,187 @@ pub fn menu_entries(on: MenuOn) -> impl Iterator<Item = &'static ExplorerMenuEnt
     EXPLORER_MENU.iter().filter(move |e| e.on == on)
 }
 
+/// The folder a menu entry imports into: the clicked folder, or the root for the empty space.
+fn import_folder_of(m: &MenuContext<'_>) -> PathBuf {
+    m.rel.clone()
+}
+
+/// The entries a project adds to the menu (PROJ-2, PROJ-5), after [`EXPLORER_MENU`]'s. They are
+/// listed only while the workspace is a project.
+pub static PROJECT_MENU: &[ExplorerMenuEntry] = &[
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: true,
+        name: |_| "explorer.menu.import_here",
+        enabled: yes,
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::Project(
+                ProjectAction::ImportDialog {
+                    into: import_folder_of(m),
+                },
+            )))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |_| "explorer.menu.import_folder",
+        enabled: yes,
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::Project(
+                ProjectAction::ImportFolderDialog {
+                    into: import_folder_of(m),
+                },
+            )))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |_| "explorer.menu.new_folder",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Edit(InlineEdit::new_folder(m.rel.clone()))),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |_| "explorer.menu.rename",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Edit(InlineEdit::rename(m.rel.clone(), true))),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Folder,
+        separator_before: false,
+        name: |_| "explorer.menu.trash",
+        enabled: yes,
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::Project(
+                ProjectAction::AskTrash { rel: m.rel.clone() },
+            )))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: true,
+        name: |_| "explorer.menu.rename",
+        enabled: yes,
+        effect: |m| Some(MenuEffect::Edit(InlineEdit::rename(m.rel.clone(), false))),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::File,
+        separator_before: false,
+        name: |_| "explorer.menu.trash",
+        enabled: yes,
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::Project(
+                ProjectAction::AskTrash { rel: m.rel.clone() },
+            )))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: true,
+        name: |_| "explorer.menu.import_here",
+        enabled: yes,
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::Project(
+                ProjectAction::ImportDialog {
+                    into: import_folder_of(m),
+                },
+            )))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: false,
+        name: |_| "explorer.menu.import_folder",
+        enabled: yes,
+        effect: |m| {
+            Some(MenuEffect::Queue(Action::Project(
+                ProjectAction::ImportFolderDialog {
+                    into: import_folder_of(m),
+                },
+            )))
+        },
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: false,
+        name: |_| "explorer.menu.new_folder",
+        enabled: yes,
+        effect: |_| Some(MenuEffect::Edit(InlineEdit::new_folder(PathBuf::new()))),
+    },
+    ExplorerMenuEntry {
+        on: MenuOn::Empty,
+        separator_before: false,
+        name: |_| "cmd.file.project_trash",
+        enabled: yes,
+        effect: |_| Some(MenuEffect::Queue(Action::Project(ProjectAction::ShowTrash))),
+    },
+];
+
+/// The rows of the menu for a click on `on`: [`menu_entries`], then the project's when
+/// `in_project`.
+pub fn menu_entries_for(
+    on: MenuOn,
+    in_project: bool,
+) -> impl Iterator<Item = &'static ExplorerMenuEntry> {
+    let extra: &'static [ExplorerMenuEntry] = if in_project { PROJECT_MENU } else { &[] };
+    menu_entries(on).chain(extra.iter().filter(move |e| e.on == on))
+}
+
+/// What is being typed in the explorer's field (PROJ-5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditKind {
+    /// The name of a new folder inside `parent` (below the root).
+    NewFolder {
+        /// The folder it goes into.
+        parent: PathBuf,
+    },
+    /// A new name for `rel`.
+    Rename {
+        /// The file or folder below the root.
+        rel: PathBuf,
+        /// It is a folder (a file keeps its extension).
+        is_dir: bool,
+    },
+}
+
+/// A name being typed in the explorer: a new folder or a rename.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineEdit {
+    /// What it is for.
+    pub kind: EditKind,
+    /// The text of the field.
+    pub text: String,
+    /// Why the text cannot be used, after Enter.
+    pub error: Option<String>,
+    /// The field takes the keyboard when it is next drawn.
+    pub focus: bool,
+}
+
+impl InlineEdit {
+    /// Typing the name of a new folder inside `parent`.
+    pub fn new_folder(parent: PathBuf) -> InlineEdit {
+        InlineEdit {
+            kind: EditKind::NewFolder { parent },
+            text: String::new(),
+            error: None,
+            focus: true,
+        }
+    }
+
+    /// Typing a new name for `rel`, starting from its name (without a file's extension).
+    pub fn rename(rel: PathBuf, is_dir: bool) -> InlineEdit {
+        InlineEdit {
+            text: project::rename_start_text(&rel, is_dir),
+            kind: EditKind::Rename { rel, is_dir },
+            error: None,
+            focus: true,
+        }
+    }
+}
+
 // --- the outside world ---------------------------------------------------------------------
 
 /// Puts text on the clipboard. Tests use a fake that records instead.
@@ -777,6 +963,8 @@ pub struct ExplorerState {
     pub services: ExplorerServices,
     /// Errors from the file manager, reported from its thread, shown on the next frame.
     reveal_errors: Arc<Mutex<Vec<String>>>,
+    /// A name being typed: a new folder or a rename (PROJ-5).
+    pub edit: Option<InlineEdit>,
 }
 
 impl ExplorerState {
@@ -797,6 +985,35 @@ impl ExplorerState {
     /// Forgets the file chosen with "Select for Compare" (a comparison started).
     pub fn clear_compare_pick(&mut self) {
         self.compare_pick = None;
+    }
+
+    /// The folder (below the root) of the row the cursor is on: the folder itself, or the
+    /// folder of a file. `None` without a cursor.
+    pub fn cursor_folder(&self) -> Option<PathBuf> {
+        let entry = self.index.as_ref()?.entry(self.cursor?)?;
+        Some(match entry.kind {
+            EntryKind::Dir => entry.rel_path.clone(),
+            EntryKind::Pdf => entry
+                .rel_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Puts the cursor on the entry at `rel` (below the root) of `index`, opening the folders
+    /// above it and scrolling to it. Returns whether the entry was found.
+    pub fn select_path(&mut self, index: &Arc<WorkspaceIndex>, rel: &Path) -> bool {
+        self.sync(index);
+        let Some(idx) = index.find(rel) else {
+            return false;
+        };
+        if reveal(index, &mut self.expanded, idx) {
+            self.version += 1;
+        }
+        self.cursor = Some(idx);
+        self.scroll_to_cursor = true;
+        true
     }
 
     /// The entry the keyboard cursor is on.
@@ -848,6 +1065,7 @@ impl ExplorerState {
                 ));
                 self.services.clipboard.copy_text(ctx, text);
             }
+            MenuEffect::Edit(edit) => self.edit = Some(edit),
             MenuEffect::Reveal(dir) => {
                 let (errors, ctx) = (Arc::clone(&self.reveal_errors), ctx.clone());
                 self.services.opener.open_folder(
@@ -1047,6 +1265,8 @@ pub struct WorkspaceView {
     pub error: Option<String>,
     /// Why the folder is not watched, if it is not.
     pub watch_error: Option<String>,
+    /// The project's name, when the folder is a project (PROJ-5).
+    pub project: Option<String>,
 }
 
 impl WorkspaceView {
@@ -1058,6 +1278,7 @@ impl WorkspaceView {
             scanning: workspace.scan.scanning(),
             error: workspace.scan.error(),
             watch_error: workspace.watch_error(),
+            project: workspace.project.as_ref().map(|p| p.name.clone()),
         }
     }
 
@@ -1066,8 +1287,11 @@ impl WorkspaceView {
         self.index.as_ref().filter(|i| i.file_count() > 0)
     }
 
-    /// The name shown in the section header: the folder's name.
+    /// The name shown in the section header: the project's name, else the folder's.
     pub fn name(&self) -> String {
+        if let Some(project) = &self.project {
+            return project.clone();
+        }
         self.root.file_name().map_or_else(
             || self.root.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
@@ -1083,11 +1307,13 @@ pub fn start_workspace(state: &mut AppState, root: PathBuf, ctx: &egui::Context)
     let watch = Arc::new(Mutex::new(WatchState::Starting));
     let changed = Arc::new(AtomicBool::new(false));
     start_watcher(&root, &watch, &changed, ctx);
+    let project = crate::panels::project::ProjectInfo::read(&root);
     state.workspace = Some(Workspace {
         root,
         scan,
         watch,
         changed,
+        project,
     });
     for window in &mut state.windows {
         window.explorer.reset();
@@ -1143,8 +1369,12 @@ fn start_watcher(
 /// the workspace only scans it again.
 pub fn open_folder(state: &mut AppState, path: &Path, ctx: &egui::Context) {
     let root = normalize_path(path);
-    match &state.workspace {
-        Some(ws) if ws.root == root => ws.scan.rescan(),
+    match &mut state.workspace {
+        Some(ws) if ws.root == root => {
+            ws.scan.rescan();
+            // It may have become a project since it was opened (WP-91).
+            ws.project = crate::panels::project::ProjectInfo::read(&root);
+        }
         _ => start_workspace(state, root.clone(), ctx),
     }
     session::record_folder(state, &root);
@@ -1194,6 +1424,7 @@ pub fn compact_body_height(view: Option<&WorkspaceView>) -> Option<f32> {
         None => Some(ONE_LINE_BODY_H),
         Some(v) if v.tree().is_some() => None,
         Some(v) if v.index.is_none() && v.error.is_some() => Some(TWO_LINE_BODY_H),
+        Some(v) if v.project.is_some() && v.index.is_some() => Some(EMPTY_PROJECT_BODY_H),
         Some(_) => Some(ONE_LINE_BODY_H),
     }
 }
@@ -1218,6 +1449,19 @@ pub fn header_buttons(
     let Some(view) = view else {
         return;
     };
+    if view.project.is_some() {
+        let response = ui
+            .add(egui::Button::new(RichText::new("+").small()).frame(false))
+            .on_hover_text(tr("explorer.import_tip"));
+        response.widget_info(|| {
+            WidgetInfo::labeled(egui::Role::Button, true, tr("explorer.import_button"))
+        });
+        if response.clicked() {
+            queue.push(Action::Project(ProjectAction::ImportDialog {
+                into: explorer.cursor_folder().unwrap_or_default(),
+            }));
+        }
+    }
     if small_button(ui, "⊟", tr("explorer.collapse_all")) {
         explorer.collapse_all();
     }
@@ -1330,9 +1574,11 @@ pub fn show_body(
         }
         return;
     };
+    show_edit(ui, explorer, queue);
     if index.file_count() == 0 {
         match &view.error {
             Some(err) => hint(ui, &tr("explorer.failed").replace("{}", err)),
+            None if view.project.is_some() => empty_project(ui, explorer, window, queue),
             None => hint(ui, tr("explorer.empty")),
         }
         return;
@@ -1382,7 +1628,124 @@ pub fn show_body(
             m.move_focus(FocusDirection::None);
         });
     }
-    show_tree(ui, &index, explorer, prepared, current, window, queue);
+    let in_project = view.project.is_some();
+    show_tree(
+        ui,
+        &index,
+        explorer,
+        prepared,
+        current,
+        (window, in_project),
+        queue,
+    );
+}
+
+/// What the explorer of a project without documents shows: a line, "Import PDFs…" and a hint
+/// about pasting (PROJ-1). Right-clicking the space offers the folder menu.
+fn empty_project(
+    ui: &mut Ui,
+    explorer: &mut ExplorerState,
+    window: WindowId,
+    queue: &mut Vec<Action>,
+) {
+    ui.label(RichText::new(tr("explorer.project_empty")).weak());
+    let button = ui.button(tr("explorer.import_first"));
+    button
+        .widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, tr("explorer.import_first")));
+    if button.clicked() {
+        queue.push(Action::Project(ProjectAction::ImportDialog {
+            into: PathBuf::new(),
+        }));
+    }
+    ui.add(egui::Label::new(RichText::new(tr("explorer.paste_hint")).weak().small()).wrap());
+    let rest = ui.interact(
+        ui.available_rect_before_wrap(),
+        tree_id(window),
+        Sense::click(),
+    );
+    let m = MenuContext {
+        on: MenuOn::Empty,
+        idx: None,
+        path: PathBuf::new(),
+        rel: PathBuf::new(),
+        expanded: false,
+        filtering: false,
+        pick: None,
+        current: None,
+        window,
+    };
+    let mut events = Vec::new();
+    rest.context_menu(|ui| menu_ui(ui, &m, true, &mut events));
+    for event in events {
+        if let RowEvent::Menu(effect) = event {
+            explorer.apply(effect, ui.ctx(), queue);
+        }
+    }
+}
+
+/// The field of a new folder or a rename, above the tree, while one is being typed (PROJ-5).
+/// Enter makes it, Esc gives up.
+fn show_edit(ui: &mut Ui, explorer: &mut ExplorerState, queue: &mut Vec<Action>) {
+    let Some(edit) = &mut explorer.edit else {
+        return;
+    };
+    let label = match &edit.kind {
+        EditKind::NewFolder { .. } => tr("explorer.new_folder_label"),
+        EditKind::Rename { .. } => tr("explorer.rename_label"),
+    };
+    let id = Id::unique("explorer_inline_edit");
+    let mut done = false;
+    let mut cancel = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let field = ui.add(
+            TextEdit::singleline(&mut edit.text)
+                .id(id)
+                .desired_width(f32::INFINITY),
+        );
+        if std::mem::take(&mut edit.focus) {
+            field.request_focus();
+        }
+        if field.lost_focus() {
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                done = true;
+            } else {
+                cancel = true;
+            }
+        }
+    });
+    if let Some(err) = &edit.error {
+        ui.colored_label(ui.visuals().error_fg_color, err);
+    }
+    if cancel {
+        explorer.edit = None;
+        return;
+    }
+    if done {
+        let target = match &edit.kind {
+            EditKind::NewFolder { parent } => project::new_folder_target(parent, &edit.text),
+            EditKind::Rename { rel, is_dir } => project::rename_target(rel, &edit.text, *is_dir),
+        };
+        match (target, &edit.kind) {
+            (Ok(rel), EditKind::NewFolder { .. }) => {
+                queue.push(Action::Project(ProjectAction::NewFolder { rel }));
+                explorer.edit = None;
+            }
+            (Ok(to), EditKind::Rename { rel, .. }) => {
+                if to != *rel {
+                    queue.push(Action::Project(ProjectAction::Rename {
+                        from: rel.clone(),
+                        to,
+                    }));
+                }
+                explorer.edit = None;
+            }
+            (Err(err), _) => {
+                edit.error = Some(err);
+                edit.focus = true;
+            }
+        }
+    }
 }
 
 /// What every row of one frame needs besides itself.
@@ -1396,6 +1759,8 @@ struct RowEnv<'a> {
     pick: Option<&'a Path>,
     current: Option<&'a Path>,
     window: WindowId,
+    /// The workspace is a project: its menu entries are listed.
+    in_project: bool,
 }
 
 impl RowEnv<'_> {
@@ -1502,7 +1867,7 @@ fn show_tree(
     explorer: &mut ExplorerState,
     prepared: Prepared,
     current: Option<&Path>,
-    window: WindowId,
+    (window, in_project): (WindowId, bool),
     queue: &mut Vec<Action>,
 ) {
     let row_h = ui.text_style_height(&TextStyle::Body) + 4.0;
@@ -1536,6 +1901,7 @@ fn show_tree(
         pick: explorer.compare_pick.as_deref(),
         current,
         window,
+        in_project,
     };
 
     // The background of the list: clicking it gives the tree the keyboard, right-clicking it
@@ -1544,7 +1910,14 @@ fn show_tree(
     if background.clicked() {
         background.request_focus();
     }
-    background.context_menu(|ui| menu_ui(ui, &env.menu_context(MenuOn::Empty, None), &mut events));
+    background.context_menu(|ui| {
+        menu_ui(
+            ui,
+            &env.menu_context(MenuOn::Empty, None),
+            env.in_project,
+            &mut events,
+        );
+    });
 
     let mut area = ScrollArea::vertical()
         .id_salt("explorer_tree")
@@ -1592,9 +1965,10 @@ fn show_tree(
     }
 }
 
-/// The entries of a right-click menu for `m`; a chosen one becomes an event.
-fn menu_ui(ui: &mut Ui, m: &MenuContext<'_>, events: &mut Vec<RowEvent>) {
-    for entry in menu_entries(m.on) {
+/// The entries of a right-click menu for `m` (with the project's when `in_project`); a chosen
+/// one becomes an event.
+fn menu_ui(ui: &mut Ui, m: &MenuContext<'_>, in_project: bool, events: &mut Vec<RowEvent>) {
+    for entry in menu_entries_for(m.on, in_project) {
         if entry.separator_before {
             ui.separator();
         }
@@ -1713,7 +2087,12 @@ fn show_row(ui: &mut Ui, row_h: f32, row: &Row, env: &RowEnv<'_>, events: &mut V
             EntryKind::Dir => MenuOn::Folder,
             EntryKind::Pdf => MenuOn::File,
         };
-        menu_ui(ui, &env.menu_context(on, Some(row.idx)), events);
+        menu_ui(
+            ui,
+            &env.menu_context(on, Some(row.idx)),
+            env.in_project,
+            events,
+        );
     });
 }
 
@@ -2480,6 +2859,7 @@ mod tests {
                 scanning,
                 error: error.map(str::to_owned),
                 watch_error: Some("no watches left".into()),
+                project: None,
             }
         };
         let views = [

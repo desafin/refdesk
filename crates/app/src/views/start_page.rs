@@ -11,6 +11,7 @@ use egui::{RichText, Ui};
 
 use crate::action::{Action, OpenTarget};
 use crate::i18n::tr;
+use crate::panels::project::ProjectAction;
 use crate::state::TabId;
 
 /// Width of the column the start page is laid out in, in points.
@@ -50,13 +51,26 @@ impl RecentEntry {
     }
 }
 
+/// One recently opened project (PROJ-4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentProject {
+    /// The project's folder.
+    pub path: PathBuf,
+    /// Its name when it was last opened.
+    pub name: String,
+    /// Whether it still was a project when the list was built.
+    pub exists: bool,
+}
+
 /// Everything the start page shows.
 #[derive(Clone, Debug, Default)]
 pub struct StartPage {
     /// Recent documents, newest first.
     pub recent: Arc<Vec<RecentEntry>>,
-    /// Recent workspace folders, newest first (WS-1).
+    /// Recent workspace folders that are not projects, newest first (WS-1).
     pub recent_folders: Vec<PathBuf>,
+    /// Recent projects, newest first (PROJ-4).
+    pub recent_projects: Arc<Vec<RecentProject>>,
     /// Command name and shortcut text of a few common commands.
     pub shortcuts: Vec<(String, String)>,
     /// Unix seconds now, for the "3 days ago" texts.
@@ -108,12 +122,15 @@ pub fn show(ui: &mut Ui, page: &StartPage, queue: &mut Vec<Action>) {
                 // Two buttons side by side, centred.
                 let width = ui.available_width();
                 ui.horizontal(|ui| {
-                    ui.add_space((width / 2.0 - 110.0).max(0.0));
+                    ui.add_space((width / 2.0 - 170.0).max(0.0));
                     if ui.button(tr("start.open_button")).clicked() {
                         queue.push(Action::OpenFileDialog);
                     }
                     if ui.button(tr("start.open_folder_button")).clicked() {
                         queue.push(Action::OpenFolderDialog);
+                    }
+                    if ui.button(tr("start.new_project_button")).clicked() {
+                        queue.push(Action::Project(ProjectAction::NewDialog));
                     }
                 });
             });
@@ -124,6 +141,10 @@ pub fn show(ui: &mut Ui, page: &StartPage, queue: &mut Vec<Action>) {
                 ui.add_space((width - column) / 2.0);
                 ui.vertical(|ui| {
                     ui.set_width(column);
+                    if !page.recent_projects.is_empty() {
+                        project_list(ui, &page.recent_projects, queue);
+                        ui.add_space(16.0);
+                    }
                     if !page.recent_folders.is_empty() {
                         folder_list(ui, &page.recent_folders, queue);
                         ui.add_space(16.0);
@@ -159,6 +180,31 @@ fn folder_label(path: &Path) -> (String, String) {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     (name, parent)
+}
+
+/// "Recent projects": name and folder; one that is gone is dimmed (opening it says so).
+fn project_list(ui: &mut Ui, projects: &[RecentProject], queue: &mut Vec<Action>) {
+    ui.strong(tr("start.recent_projects"));
+    ui.add_space(4.0);
+    for project in projects {
+        let mut name = RichText::new(&project.name);
+        if !project.exists {
+            name = name.weak();
+        }
+        let clicked = ui
+            .add(egui::Button::new(name).frame(false))
+            .on_hover_text(project.path.display().to_string())
+            .clicked();
+        let mut detail = project.path.display().to_string();
+        if !project.exists {
+            detail = format!("{detail} · {}", tr("start.missing"));
+        }
+        ui.label(RichText::new(detail).small().weak());
+        ui.add_space(4.0);
+        if clicked {
+            queue.push(Action::Project(ProjectAction::Open(project.path.clone())));
+        }
+    }
 }
 
 fn folder_list(ui: &mut Ui, folders: &[PathBuf], queue: &mut Vec<Action>) {
