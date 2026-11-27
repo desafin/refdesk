@@ -196,11 +196,20 @@ fn serve(stream: TcpStream, reply: Reply, log: &(Mutex<Vec<Recorded>>, Condvar))
 }
 
 /// An address where nothing listens.
+///
+/// Not a port that was bound and let go: the tests run side by side, and the fake server of
+/// another test can be given that very port a moment later. The ports tried here are below the
+/// range the system hands out, so no test's server can take them.
 fn closed_endpoint() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
+    for port in [9u16, 7, 13, 19, 37, 79, 113] {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let refused = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused);
+        if refused {
+            return format!("http://{addr}");
+        }
+    }
+    panic!("no closed port among the ones tried");
 }
 
 fn config(endpoint: &str, model: &str) -> TranslateConfig {
