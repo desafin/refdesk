@@ -106,7 +106,7 @@ base14="$(cd "$mupdf_src/resources/fonts/urw" && ls -- *.cff | grep -v '^NimbusB
 
 # The table below lists what MuPDF compiles in with mupdf-sys' format features off. Stop if a
 # feature that adds libraries (HarfBuzz, Gumbo, MuJS, Brotli, extract, ...) gets switched on.
-sys_features="$(cargo tree --locked -p refdesk "${feature_args[@]}" -e normal --prefix none --format '{p}|{f}' \
+sys_features="$(cargo tree --color never --locked -p refdesk "${feature_args[@]}" -e normal --prefix none --format '{p}|{f}' \
     | sed -n 's/^mupdf-sys v[^|]*|//p' | head -n 1)"
 for feature in ${sys_features//,/ }; do
     case "$feature" in
@@ -118,7 +118,7 @@ for feature in ${sys_features//,/ }; do
     esac
 done
 
-crates="$(cargo tree --locked -p refdesk "${feature_args[@]}" -e normal,no-proc-macro --prefix none \
+crates="$(cargo tree --color never --locked -p refdesk "${feature_args[@]}" -e normal,no-proc-macro --prefix none \
     --format '{p}|{l}|{r}' \
     | sed 's/ (\*)$//; s/ (proc-macro)//' \
     | grep -v '^refdesk\(-core\)\? v' \
