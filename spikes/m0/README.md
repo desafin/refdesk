@@ -7,8 +7,8 @@
 
 ```sh
 cd spikes/m0
-export CARGO_TARGET_DIR=/home/oscar/orca/projects/pdfToolCreation/target   # 의존성 빌드 결과 공유
-cargo run -- /home/oscar/orca/projects/pdfToolCreation/references/viewers/tdf/benches/geotopo.pdf
+export CARGO_TARGET_DIR=<저장소>/target   # 의존성 빌드 결과 공유
+cargo run -- <저장소>/references/viewers/tdf/benches/geotopo.pdf
 ```
 
 선택 인자

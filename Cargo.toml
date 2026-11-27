@@ -8,6 +8,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "AGPL-3.0-or-later"
+repository = "https://github.com/desafin/refdesk"
+homepage = "https://github.com/desafin/refdesk"
 
 [workspace.dependencies]
 # Pinned together with the feature sets verified on this machine (docs/ARCHITECTURE.md §2.1).

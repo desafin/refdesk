@@ -24,7 +24,7 @@
 **브리프**: 하위 에이전트는 이 대화를 모른다. 배정할 때 아래를 그대로 준다.
 
 ```
-너는 refdesk 프로젝트의 WP-XX 구현자다. 저장소: /home/oscar/orca/projects/pdfToolCreation
+너는 refdesk 프로젝트의 WP-XX 구현자다. 저장소: <저장소>
 1. 먼저 읽어라: CLAUDE.md, docs/ARCHITECTURE.md 의 §1·§2 와 <계약 절>, docs/PLAN.md 의 "WP-XX" 절.
 2. 소유 파일만 만들거나 고쳐라: <목록>. 그 밖의 파일을 고쳐야 하면 멈추고 이유를 보고하라.
 3. 라이브러리 API 는 기억으로 쓰지 말고 ARCHITECTURE §2.2 가 가리키는 소스를 읽어 확인하라.
@@ -49,7 +49,7 @@ cargo 가 여러 worktree 의 같은 크레이트를 같은 것으로 취급해�
 처음 빌드 시간을 줄이려면 의존성 빌드 결과만 복사해 온다:
 
 ```sh
-cp -r /home/oscar/orca/projects/pdfToolCreation/target ./target    # 몇 초 걸린다. 공유가 아니라 복사
+cp -r <주 작업 공간>/target ./target                                # 몇 초 걸린다. 공유가 아니라 복사
 cargo clean -p refdesk -p refdesk-core                             # 작업 공간 크레이트는 반드시 새로 빌드
 ```
 

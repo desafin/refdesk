@@ -6,3 +6,6 @@
 
 # 검증용 코드의 빌드 산출물
 /spikes/*/target/
+
+# 릴리스 묶음 (scripts/package.sh)
+/dist/

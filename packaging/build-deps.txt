@@ -1,0 +1,15 @@
+# Ubuntu 24.04 packages needed to build and test refdesk (default features) and to make the
+# release bundles. One package per line; read by packaging/setup-build-env.sh, which both the
+# GitHub workflows and scripts/verify-in-container.sh call.
+
+# C/C++ compilers, make, ar/ld/strip, libc headers. mupdf-sys runs MuPDF's Makefile
+# (`make libs`) with gcc and embeds the fonts with `ld -r -b binary`; freetype-sys and the
+# mupdf wrapper are compiled by the cc crate; `strip` is used by scripts/package.sh.
+build-essential
+# libclang.so and clang's own headers for bindgen (mupdf-sys generates its bindings at build
+# time with bindgen's `runtime` feature, which dlopens libclang).
+libclang-dev
+# rustup and cargo download over HTTPS. The GitHub runner has both already; a bare
+# ubuntu:24.04 container does not.
+ca-certificates
+curl

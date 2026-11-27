@@ -471,9 +471,10 @@ mod preload_tests {
     #[test]
     #[ignore = "measurement on a large reference document; run with --ignored"]
     fn measure_preload_of_a_660_page_document() {
-        let path = Path::new(
-            "/home/oscar/orca/projects/pdfToolCreation/references/viewers/tdf/benches/example_dictionary.pdf",
-        );
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../references/viewers/tdf/benches/example_dictionary.pdf"
+        ));
         assert!(path.exists(), "missing {}", path.display());
         let ctx = egui::Context::default();
         let repaints = watch_repaints(&ctx);

@@ -458,9 +458,9 @@ mod tests {
     #[test]
     fn a_location_text_opens_the_same_file_at_the_same_page_on_the_command_line() {
         let paths = [
-            "/home/oscar/specs/AUTOSAR_SWS_ExecutionManagement.pdf",
-            "/home/oscar/My Documents/two  spaces.pdf",
-            "/home/oscar/문서/실행 관리 사양서.pdf",
+            "/home/user/specs/AUTOSAR_SWS_ExecutionManagement.pdf",
+            "/home/user/My Documents/two  spaces.pdf",
+            "/home/user/문서/실행 관리 사양서.pdf",
             "/tmp/a#b.pdf",
             "/tmp/ends with hash#.pdf",
             "/tmp/looks#page=3 like a page.pdf",

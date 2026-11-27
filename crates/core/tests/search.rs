@@ -471,7 +471,10 @@ fn searching_while_the_document_is_still_opening_works() {
 #[test]
 #[ignore = "needs the 660-page reference PDF; prints timings"]
 fn large_document_timing() {
-    let default = "/home/oscar/orca/projects/pdfToolCreation/references/viewers/tdf/benches/example_dictionary.pdf";
+    let default = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../references/viewers/tdf/benches/example_dictionary.pdf"
+    );
     let path = std::env::var("REFDESK_BIG_PDF").unwrap_or_else(|_| default.to_string());
     if !Path::new(&path).exists() {
         eprintln!("skipped: {path} does not exist");

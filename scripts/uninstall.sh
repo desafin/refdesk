@@ -1,30 +1,46 @@
 #!/usr/bin/env bash
-# Removes what scripts/install.sh installed.
+# Removes what install.sh installed.
 #
-#   scripts/uninstall.sh [--dry-run]
+#   uninstall.sh [--prefix DIR] [--dry-run]
 #
-# The default PDF viewer setting and the user's data (~/.config/refdesk, ~/.local/state/refdesk)
-# are not touched. --dry-run only prints what would happen.
+# DIR is the one given to install.sh (default: ~/.local). The default PDF viewer setting and
+# the user's data (~/.config/refdesk, ~/.local/state/refdesk) are not touched.
+# --dry-run only prints what would happen.
 set -euo pipefail
 
 dry_run=0
-for arg in "$@"; do
-    case "$arg" in
+prefix="$HOME/.local"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --dry-run) dry_run=1 ;;
+        --prefix)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "uninstall.sh: --prefix needs a directory" >&2
+                exit 2
+            fi
+            prefix="$2"
+            shift
+            ;;
+        --prefix=*) prefix="${1#--prefix=}" ;;
         -h | --help)
-            sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
-            echo "uninstall.sh: unknown option: $arg" >&2
+            echo "uninstall.sh: unknown option: $1" >&2
             exit 2
             ;;
     esac
+    shift
 done
+case "$prefix" in
+    /*) ;;
+    *) prefix="$PWD/$prefix" ;;
+esac
 
-bin_dir="$HOME/.local/bin"
-apps_dir="$HOME/.local/share/applications"
-icons_dir="$HOME/.local/share/icons/hicolor/scalable/apps"
+bin_dir="$prefix/bin"
+apps_dir="$prefix/share/applications"
+icons_dir="$prefix/share/icons/hicolor/scalable/apps"
 
 run() {
     if [ "$dry_run" -eq 1 ]; then

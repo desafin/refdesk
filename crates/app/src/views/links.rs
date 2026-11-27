@@ -1077,9 +1077,10 @@ mod tests {
     #[test]
     #[ignore = "reads a large reference document; run with --ignored"]
     fn geotopo_links_of_the_first_twenty_pages() {
-        let path = Path::new(
-            "/home/oscar/orca/projects/pdfToolCreation/references/viewers/tdf/benches/geotopo.pdf",
-        );
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../references/viewers/tdf/benches/geotopo.pdf"
+        ));
         assert!(path.exists(), "the reference document is missing");
         let (tx, rx) = mpsc::channel();
         let tx = Mutex::new(tx);
