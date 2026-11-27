@@ -10,8 +10,6 @@ use crate::text::PageText;
 pub const MAX_PASSAGE_CHARS: usize = 2000;
 /// A word translation longer than this many characters is cut.
 pub const MAX_WORD_OUTPUT_CHARS: usize = 40;
-/// How far `sentence_around` looks on each side of the target, in characters.
-const SENTENCE_REACH: usize = 300;
 /// Token budget of a word answer.
 const WORD_TOKENS: u32 = 32;
 /// Largest token budget of a passage answer.
@@ -294,155 +292,17 @@ pub fn clean_output(kind: &TranslateKind, text: &str) -> String {
     }
 }
 
-/// The sentence the characters `chars` of `page` are in: the text from the end of the previous
-/// sentence to the end of this one, at most 300 characters on each side of the target.
+/// The sentence the characters `chars` of `page` are in: the sentence segment(s) of
+/// [`super::segment::segments`] that hold them, so that the sentence a word popup sends is the
+/// segment translated ahead of reading (§4.16). At most [`super::segment::MAX_SEGMENT_CHARS`]
+/// characters per segment.
 ///
 /// Lines are joined with a space; a word broken by a hyphen at a line end (a letter, a hyphen,
 /// and a lowercase letter on the next line) is joined without it, as search does. A sentence ends
-/// after `!`, `?` or `;` followed by a space, after `.` followed by a space and an uppercase
-/// letter, a digit or an opening bracket (so `e.g. this` and `3.2` do not end one), and at the
-/// end of a block (paragraph) or of the page.
+/// after `!`, `?` or `;` followed by a space, after `:` at a line end, after `.` followed by a
+/// space and an uppercase letter, a digit or an opening bracket (so `e.g. this` and `3.2` do not
+/// end one; nor do `Fig. 3` and an ellipsis), and at the end of a block (paragraph) or of the
+/// page.
 pub fn sentence_around(page: &PageText, chars: Range<u32>) -> String {
-    let flat = Flat::new(page);
-    let (Some(t0), Some(t1)) = (
-        flat.position_of(chars.start),
-        flat.position_of(chars.end.saturating_sub(1).max(chars.start)),
-    ) else {
-        return String::new();
-    };
-    let s = &flat.chars;
-    let t1 = t1 + 1;
-
-    // Back from the target to the end of the previous sentence.
-    let low = t0.saturating_sub(SENTENCE_REACH);
-    let mut start = None;
-    let mut k = t0;
-    while k > low {
-        k -= 1;
-        if s[k] == BREAK || ends_sentence(s, k) {
-            start = Some(k + 1);
-            break;
-        }
-    }
-    let start = start.unwrap_or_else(|| {
-        if low == 0 {
-            0
-        } else {
-            // Cut at the first space after the limit so that no word is cut.
-            (low..t0).find(|&i| s[i] == ' ').map_or(low, |i| i + 1)
-        }
-    });
-
-    // Forward from the target to the end of this sentence.
-    let high = (t1 + SENTENCE_REACH).min(s.len());
-    let mut end = None;
-    for k in (t1 - 1).max(t0)..high {
-        if s[k] == BREAK {
-            end = Some(k);
-            break;
-        }
-        if ends_sentence(s, k) || k + 1 == s.len() {
-            end = Some(k + 1);
-            break;
-        }
-    }
-    let end = end.unwrap_or_else(|| {
-        if high == s.len() {
-            high
-        } else {
-            (t1..high).rev().find(|&i| s[i] == ' ').unwrap_or(high)
-        }
-    });
-    let text: String = s[start.min(end)..end].iter().collect();
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Marks a block border in [`Flat`].
-const BREAK: char = '\n';
-
-/// Whether the character at `k` ends a sentence.
-fn ends_sentence(s: &[char], k: usize) -> bool {
-    let c = s[k];
-    if !matches!(c, '.' | '!' | '?' | ';') {
-        return false;
-    }
-    match s.get(k + 1) {
-        None | Some(&BREAK) => true,
-        Some(n) if n.is_whitespace() => {
-            if c != '.' {
-                return true;
-            }
-            let next = s[k + 1..]
-                .iter()
-                .find(|c| !c.is_whitespace() || **c == BREAK);
-            match next {
-                None | Some(&BREAK) => true,
-                Some(n) => n.is_uppercase() || n.is_ascii_digit() || matches!(n, '(' | '['),
-            }
-        }
-        Some(_) => false,
-    }
-}
-
-/// The text of a page as one character sequence: lines joined, blocks separated by [`BREAK`],
-/// with the position of every page character in it.
-struct Flat {
-    chars: Vec<char>,
-    /// `pos[i]`: where page character `i` is in `chars` (`None`: dropped, or in no line).
-    pos: Vec<Option<usize>>,
-}
-
-impl Flat {
-    fn new(page: &PageText) -> Flat {
-        let n = page.chars.len();
-        let mut line_block: Vec<Option<usize>> = vec![None; page.lines.len()];
-        for (bi, b) in page.blocks.iter().enumerate() {
-            let first = (b.lines.start as usize).min(line_block.len());
-            let last = (b.lines.end as usize).min(line_block.len());
-            if let Some(slots) = line_block.get_mut(first..last) {
-                slots.fill(Some(bi));
-            }
-        }
-        let mut chars: Vec<char> = Vec::with_capacity(n + page.lines.len());
-        let mut pos: Vec<Option<usize>> = vec![None; n];
-        let mut prev_block: Option<Option<usize>> = None;
-        for (li, line) in page.lines.iter().enumerate() {
-            let end = (line.chars.end as usize).min(n);
-            let start = (line.chars.start as usize).min(end);
-            if start == end {
-                continue;
-            }
-            let block = line_block.get(li).copied().flatten();
-            if let Some(pb) = prev_block {
-                let same = block.is_some() && pb == block;
-                let first = page.chars[start].ch;
-                if !same {
-                    chars.push(BREAK);
-                } else if hyphen_break(&chars, first) {
-                    chars.pop();
-                } else {
-                    chars.push(' ');
-                }
-            }
-            for (slot, c) in pos[start..end].iter_mut().zip(&page.chars[start..end]) {
-                *slot = Some(chars.len());
-                chars.push(c.ch);
-            }
-            prev_block = Some(block);
-        }
-        Flat { chars, pos }
-    }
-
-    fn position_of(&self, ch: u32) -> Option<usize> {
-        self.pos.get(ch as usize).copied().flatten()
-    }
-}
-
-/// Whether the text so far ends in "letter-" and the next line starts with a lowercase letter.
-fn hyphen_break(before: &[char], next: char) -> bool {
-    let n = before.len();
-    n >= 2
-        && matches!(before[n - 1], '-' | '\u{2010}' | '\u{00AD}')
-        && before[n - 2].is_alphabetic()
-        && next.is_lowercase()
+    super::segment::sentence_text(page, chars)
 }

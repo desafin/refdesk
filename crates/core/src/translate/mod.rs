@@ -7,14 +7,17 @@
 //!
 //! A backend blocks while it waits for the server, so it is only ever called from a
 //! [`TranslateJob`] thread (R-1). Prompts and output clean-up are pure functions in [`prompt`];
-//! [`TranslationCache`] remembers finished translations across runs (TR-6).
+//! [`TranslationCache`] remembers finished translations across runs (TR-6). [`segment`] splits a
+//! page into sentences and [`pretranslate`] translates a document ahead of reading (TR-15 ~ 19).
 
 pub mod cache;
 pub mod embedded;
 mod http;
 pub mod ollama;
 pub mod openai;
+pub mod pretranslate;
 pub mod prompt;
+pub mod segment;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,11 +31,18 @@ pub use cache::{MAX_CACHE_ENTRIES, TranslationCache};
 pub use embedded::EmbeddedBackend;
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
+pub use pretranslate::{
+    Assembled, Outcome, PageSource, PretranslateJob, PretranslateOptions, PretranslateOrder,
+    PretranslateSettings, PretranslateSetup, PretranslateSnapshot, PretranslateStatus,
+    PretranslateStore, SharedStore, StoredSegment, StoredTranslation, assemble, pick_page,
+    store_path,
+};
 pub use prompt::{
     MAX_PASSAGE_CHARS, MAX_WORD_OUTPUT_CHARS, Prompts, clean_output, fill_passage_template,
     fill_word_template, gemma_chat, language_name, max_tokens, passage_prompt, prepare_passage,
     sentence_around, word_prompt,
 };
+pub use segment::{Segment, SkipReason, covering, segments, skip_reason, text_hash};
 
 /// What is asked.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
